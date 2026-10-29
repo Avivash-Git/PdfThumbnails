@@ -1,0 +1,16 @@
+# Private working notes (never published)
+/notes/
+
+# Build output and downloaded dependencies
+/out/
+/build/
+/dist/
+/.cache/
+/third_party/
+/Testing/
+CMakeUserPresets.json
+
+# Editors
+.vs/
+.vscode/
+*.user
