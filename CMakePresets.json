@@ -1,0 +1,128 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 31, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "description": "Ninja + cl.exe from a developer environment (scripts\\build.cmd sets it up).",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "installDir": "${sourceDir}/out/install/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "cl",
+        "PDFT_SPECTRE": "AUTO",
+        "PDFT_VERSION_SUFFIX": "$env{PDFT_VERSION_SUFFIX}"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "x64",
+      "hidden": true,
+      "architecture": { "value": "x64", "strategy": "external" },
+      "toolset": { "value": "host=x64", "strategy": "external" },
+      "cacheVariables": { "PDFT_EXPECTED_ARCH": "x64" }
+    },
+    {
+      "name": "arm64",
+      "hidden": true,
+      "description": "Cross-compiled on an x64 host (vcvarsall x64_arm64).",
+      "architecture": { "value": "arm64", "strategy": "external" },
+      "toolset": { "value": "host=x64", "strategy": "external" },
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "Windows",
+        "CMAKE_SYSTEM_PROCESSOR": "ARM64",
+        "PDFT_EXPECTED_ARCH": "arm64"
+      }
+    },
+    { "name": "debug", "hidden": true, "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "release", "hidden": true, "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } },
+    { "name": "x64-debug", "displayName": "x64 Debug", "inherits": [ "base", "x64", "debug" ] },
+    { "name": "x64-release", "displayName": "x64 Release", "inherits": [ "base", "x64", "release" ] },
+    { "name": "arm64-release", "displayName": "ARM64 Release", "inherits": [ "base", "arm64", "release" ] },
+    {
+      "name": "ci-x64",
+      "displayName": "CI x64 Release",
+      "description": "What CI builds: Release with the Spectre-mitigated runtime required.",
+      "inherits": [ "base", "x64", "release" ],
+      "cacheVariables": { "PDFT_SPECTRE": "ON" }
+    },
+    {
+      "name": "ci-arm64",
+      "displayName": "CI ARM64 Release",
+      "description": "What CI builds: Release with the Spectre-mitigated runtime required.",
+      "inherits": [ "base", "arm64", "release" ],
+      "cacheVariables": { "PDFT_SPECTRE": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "x64-debug", "configurePreset": "x64-debug" },
+    { "name": "x64-release", "configurePreset": "x64-release" },
+    { "name": "arm64-release", "configurePreset": "arm64-release" },
+    { "name": "ci-x64", "configurePreset": "ci-x64" },
+    { "name": "ci-arm64", "configurePreset": "ci-arm64" }
+  ],
+  "testPresets": [
+    {
+      "name": "test-base",
+      "hidden": true,
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "timeout": 300 }
+    },
+    {
+      "name": "x64-native",
+      "hidden": true,
+      "inherits": [ "test-base" ],
+      "filter": { "exclude": { "label": "system|e2e" } }
+    },
+    {
+      "name": "arm64-cross",
+      "hidden": true,
+      "description": "ARM64 binaries cannot run on the x64 build host: static gates only.",
+      "inherits": [ "test-base" ],
+      "filter": { "include": { "label": "gate" } }
+    },
+    { "name": "x64-debug", "configurePreset": "x64-debug", "inherits": [ "x64-native" ] },
+    { "name": "x64-release", "configurePreset": "x64-release", "inherits": [ "x64-native" ] },
+    { "name": "arm64-release", "configurePreset": "arm64-release", "inherits": [ "arm64-cross" ] },
+    { "name": "ci-x64", "configurePreset": "ci-x64", "inherits": [ "x64-native" ] },
+    { "name": "ci-arm64", "configurePreset": "ci-arm64", "inherits": [ "arm64-cross" ] }
+  ],
+  "workflowPresets": [
+    {
+      "name": "x64-debug",
+      "steps": [
+        { "type": "configure", "name": "x64-debug" },
+        { "type": "build", "name": "x64-debug" }
+      ]
+    },
+    {
+      "name": "x64-release",
+      "steps": [
+        { "type": "configure", "name": "x64-release" },
+        { "type": "build", "name": "x64-release" }
+      ]
+    },
+    {
+      "name": "arm64-release",
+      "steps": [
+        { "type": "configure", "name": "arm64-release" },
+        { "type": "build", "name": "arm64-release" }
+      ]
+    },
+    {
+      "name": "ci-x64",
+      "steps": [
+        { "type": "configure", "name": "ci-x64" },
+        { "type": "build", "name": "ci-x64" }
+      ]
+    },
+    {
+      "name": "ci-arm64",
+      "steps": [
+        { "type": "configure", "name": "ci-arm64" },
+        { "type": "build", "name": "ci-arm64" }
+      ]
+    }
+  ]
+}

@@ -1,4 +1,0 @@
-LIBRARY PdfThumbnails.dll
-EXPORTS
-    DllCanUnloadNow PRIVATE
-    DllGetClassObject PRIVATE
