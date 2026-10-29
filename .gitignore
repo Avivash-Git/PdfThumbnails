@@ -14,3 +14,7 @@ CMakeUserPresets.json
 .vs/
 .vscode/
 *.user
+
+# Local agent state (approved commands carry absolute profile paths)
+.claude/settings.local.json
+.claude/worktrees/
