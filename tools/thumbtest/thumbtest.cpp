@@ -1,19 +1,20 @@
 // thumbtest: checks PdfThumbnails.dll against real files.
 //
-//   thumbtest direct <PdfThumbnails.dll> <size> <outdir|-> <file.pdf>...
+//   thumbtest direct <PdfThumbnails.dll> <size> <outdir|-> <file.pdf|dir>...
 //       Calls the DLL directly; no registration needed.
-//   thumbtest cache <size> <outdir|-> <file.pdf>...
+//   thumbtest cache <size> <outdir|-> <file.pdf|dir>...
 //       Forces a fresh extraction through Explorer's thumbnail cache, i.e. the
 //       registered handler running in the isolated thumbnail process.
-//   thumbtest cachenew <size> <outdir|-> <file.pdf>...
+//   thumbtest cachenew <size> <outdir|-> <file.pdf|dir>...
 //       Same, but in a new thumbnail process (picks up a rebuilt DLL).
-//   thumbtest cacheinproc <size> <outdir|-> <file.pdf>...
+//   thumbtest cacheinproc <size> <outdir|-> <file.pdf|dir>...
 //       Same, but the cache loads the handler into this process instead.
-//   thumbtest shell <size> <outdir|-> <file.pdf>...
+//   thumbtest shell <size> <outdir|-> <file.pdf|dir>...
 //       Asks the shell for the thumbnail Explorer would show (may be cached).
-//   thumbtest stress <PdfThumbnails.dll> <size> <threads> <rounds> <file.pdf>...
+//   thumbtest stress <PdfThumbnails.dll> <size> <threads> <rounds> <file.pdf|dir>...
 //       Renders the files concurrently from several threads.
 //
+// A directory stands for the *.pdf files directly inside it, in name order.
 // Prints one line per file: OK/FAIL, bitmap size, share of non-white pixels,
 // alpha type and milliseconds. With an outdir it also writes <name>.png there.
 
@@ -25,6 +26,7 @@
 #include <thumbcache.h>
 #include <wincodec.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cwchar>
@@ -202,6 +204,43 @@ void Report(const std::wstring& file, HRESULT hr, HBITMAP bitmap, int alpha, dou
   std::fflush(stdout);
 }
 
+// Appends the files named by |arg|: the file itself or, for a directory, the *.pdf
+// files directly inside it, sorted by name (ordinal, ignoring case). False when a
+// directory holds no PDFs.
+bool AddFiles(const std::wstring& arg, std::vector<std::wstring>* files) {
+  const DWORD attributes = GetFileAttributesW(arg.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+    files->push_back(arg);
+    return true;
+  }
+  std::wstring dir = arg;
+  if (dir.back() != L'\\' && dir.back() != L'/') dir += L'\\';
+  std::vector<std::wstring> found;
+  WIN32_FIND_DATAW data;
+  HANDLE find = FindFirstFileExW((dir + L"*.pdf").c_str(), FindExInfoBasic, &data,
+                                 FindExSearchNameMatch, nullptr, 0);
+  if (find != INVALID_HANDLE_VALUE) {
+    do {
+      // The pattern also matches 8.3 aliases (e.g. of "x.pdfx"); check the real name.
+      if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+          CompareStringOrdinal(PathFindExtensionW(data.cFileName), -1, L".pdf", -1, TRUE) ==
+              CSTR_EQUAL) {
+        found.push_back(dir + data.cFileName);
+      }
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
+  }
+  if (found.empty()) {
+    std::printf("no .pdf files in %s\n", Utf8(arg).c_str());
+    return false;
+  }
+  std::sort(found.begin(), found.end(), [](const std::wstring& a, const std::wstring& b) {
+    return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+  });
+  files->insert(files->end(), found.begin(), found.end());
+  return true;
+}
+
 using GetClassObjectFn = HRESULT(STDAPICALLTYPE*)(REFCLSID, REFIID, void**);
 
 IClassFactory* LoadFactory(const wchar_t* dllPath) {
@@ -360,10 +399,11 @@ int RunStress(const wchar_t* dllPath, UINT size, int threads, int rounds,
 int Usage() {
   std::printf(
       "usage:\n"
-      "  thumbtest direct <PdfThumbnails.dll> <size> <outdir|-> <file.pdf>...\n"
-      "  thumbtest cache|cachenew|cacheinproc <size> <outdir|-> <file.pdf>...\n"
-      "  thumbtest shell <size> <outdir|-> <file.pdf>...\n"
-      "  thumbtest stress <PdfThumbnails.dll> <size> <threads> <rounds> <file.pdf>...\n");
+      "  thumbtest direct <PdfThumbnails.dll> <size> <outdir|-> <file.pdf|dir>...\n"
+      "  thumbtest cache|cachenew|cacheinproc <size> <outdir|-> <file.pdf|dir>...\n"
+      "  thumbtest shell <size> <outdir|-> <file.pdf|dir>...\n"
+      "  thumbtest stress <PdfThumbnails.dll> <size> <threads> <rounds> <file.pdf|dir>...\n"
+      "A directory stands for the *.pdf files directly inside it, in name order.\n");
   return 2;
 }
 
@@ -372,27 +412,32 @@ int Usage() {
 int wmain(int argc, wchar_t** argv) {
   if (argc < 2) return Usage();
   const std::wstring mode = argv[1];
+  // Each mode's first file argument; at least one file or directory must follow.
+  const bool cacheMode = mode == L"cache" || mode == L"cachenew" || mode == L"cacheinproc";
+  const int first = mode == L"direct"                  ? 5
+                    : (cacheMode || mode == L"shell") ? 4
+                    : mode == L"stress"               ? 6
+                                                      : 0;
+  if (first == 0 || argc <= first) return Usage();
+  std::vector<std::wstring> files;
+  for (int i = first; i < argc; ++i) {
+    if (!AddFiles(argv[i], &files)) return 2;
+  }
+
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  auto filesFrom = [&](int first) {
-    std::vector<std::wstring> files;
-    for (int i = first; i < argc; ++i) files.emplace_back(argv[i]);
-    return files;
-  };
   int result = 2;
-  if (mode == L"direct" && argc >= 6) {
-    result = RunDirect(argv[2], static_cast<UINT>(_wtoi(argv[3])), argv[4], filesFrom(5));
-  } else if ((mode == L"cache" || mode == L"cachenew" || mode == L"cacheinproc") && argc >= 5) {
+  if (mode == L"direct") {
+    result = RunDirect(argv[2], static_cast<UINT>(_wtoi(argv[3])), argv[4], files);
+  } else if (cacheMode) {
     const int extraFlags = mode == L"cachenew"      ? WTS_INSTANCESURROGATE
                            : mode == L"cacheinproc" ? WTS_EXTRACTINPROC
                                                     : 0;
-    result = RunCache(static_cast<UINT>(_wtoi(argv[2])), extraFlags, argv[3], filesFrom(4));
-  } else if (mode == L"shell" && argc >= 5) {
-    result = RunShell(static_cast<UINT>(_wtoi(argv[2])), argv[3], filesFrom(4));
-  } else if (mode == L"stress" && argc >= 7) {
-    result = RunStress(argv[2], static_cast<UINT>(_wtoi(argv[3])), _wtoi(argv[4]), _wtoi(argv[5]),
-                       filesFrom(6));
+    result = RunCache(static_cast<UINT>(_wtoi(argv[2])), extraFlags, argv[3], files);
+  } else if (mode == L"shell") {
+    result = RunShell(static_cast<UINT>(_wtoi(argv[2])), argv[3], files);
   } else {
-    result = Usage();
+    result = RunStress(argv[2], static_cast<UINT>(_wtoi(argv[3])), _wtoi(argv[4]), _wtoi(argv[5]),
+                       files);
   }
   CoUninitialize();
   return result;
