@@ -315,12 +315,13 @@ TEST(RunMediumTool, RunsTheProgramAtMediumAndReturnsItsExitCode) {
       {L" --label-only -- " + tool + L" --exit 3", 3},
   };
   for (const auto& call : nested) {
-    const DWORD code = RunPlain(tool + call.arguments).code;
-    if (code == 126) {
-      GTEST_SKIP() << "Application Control (Smart App Control) blocked a program that "
-                      "pdft-run-medium.exe started on this PC";
+    const Started run = RunPlain(tool + call.arguments);
+    if (IsApplicationControlBlock(run.hr) || run.code == 126) {
+      GTEST_SKIP() << "Application Control (Smart App Control) blocked pdft-run-medium.exe or a "
+                      "program it started on this PC";
     }
-    EXPECT_EQ(code, call.code) << "pdft-run-medium" << call.arguments;
+    ASSERT_EQ(run.hr, S_OK) << "pdft-run-medium" << call.arguments;
+    EXPECT_EQ(run.code, call.code) << "pdft-run-medium" << call.arguments;
   }
   EXPECT_EQ(RunPlain(tool + L" -- " + QuoteArgument(OwnFolder() + L"\\no such program.exe")).code,
             125u);

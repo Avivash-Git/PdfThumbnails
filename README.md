@@ -91,7 +91,9 @@ Results go to `repair.log`. To turn the task off, run `repair -NoAutoRepair`.
 
 Needs Visual Studio 2022 or 2026 (the Build Tools are enough) with the components listed in `.vsconfig`. [docs/BUILDING.md](docs/BUILDING.md) has the details: presets, options, tests, staging and CI.
 
-```
+From a Command Prompt (`cmd`) in the repository folder:
+
+```bat
 scripts\build.cmd x64-release
 cmake --install out\build\x64-release --prefix dist\PdfThumbnails\bin --component runtime
 copy /y PdfThumbnails.cmd dist\PdfThumbnails\
