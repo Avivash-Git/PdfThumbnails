@@ -10,12 +10,26 @@
 /third_party/
 /Testing/
 CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+
+# Build products and archives anywhere else (nothing like this is tracked)
+*.dll
+*.exe
+*.pdb
+*.obj
+*.lib
+*.exp
+*.ilk
+*.log
+*.zip
+*.tgz
+*.7z
 
 # Editors
 .vs/
 .vscode/
 *.user
 
-# Local agent state (approved commands carry absolute profile paths)
-.claude/settings.local.json
-.claude/worktrees/
+# Local agent state (may hold absolute profile paths)
+/.claude/

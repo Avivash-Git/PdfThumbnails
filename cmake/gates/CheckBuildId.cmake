@@ -4,7 +4,7 @@
 #         -DPDFIUM=<staged pdfium> -DVERSION=<a.b.c.d> -P CheckBuildId.cmake
 # The fixed vector below was computed independently with the 1.1 manager's PowerShell code
 # (Install-Files: Get-FileHash ... -join '', SHA256 over the ASCII, first 4 bytes, 'x2').
-# (The 1.1 release DLLs give 1.1.0.0-67a1323e, the name of the installed 1.1 build folder.)
+# (The 1.1 DLLs give 1.1.0.0-67a1323e.)
 # The comparison with the app's C++ ComputeBuildId() is added with the app (§3.9, WP7).
 
 cmake_minimum_required(VERSION 3.31)
