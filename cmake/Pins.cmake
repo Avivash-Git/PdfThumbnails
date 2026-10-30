@@ -1,5 +1,6 @@
 # Every file the build downloads: URL and SHA-256. Nothing is fetched without a pin, and the
-# CI download cache is keyed on this file. Bumps follow docs/MAINTAINING.md (one PR each).
+# CI download cache is keyed on this file. Bumps follow docs/BUILDING.md (Updating PDFium),
+# one PR each.
 
 include_guard(GLOBAL)
 

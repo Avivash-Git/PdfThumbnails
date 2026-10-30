@@ -180,12 +180,15 @@ don't keep the token.
 |---|---|---|---|
 | `build (ci-x64)` | x64 | always | `scripts\build.cmd ci-x64`: gates, unit and handler tests; artifacts |
 | `build (ci-arm64)` | x64 | always | `scripts\build.cmd ci-arm64` (cross-compiled): gates; artifacts |
-| `build (x64-debug)` | x64 | not on pull requests | `scripts\build.cmd x64-debug` |
-| `test-arm64` | ARM64 | not on pull requests | the ARM64 test bundle, run natively with `ctest --test-dir` |
+| `build (x64-debug)` | x64 | not on pull requests, unless called | `scripts\build.cmd x64-debug` |
+| `test-arm64` | ARM64 | not on pull requests, unless called | the ARM64 test bundle, run natively with `ctest --test-dir` |
 
 It runs on pushes to `main` and on pull requests (except when only Markdown files or `docs\`
 changed), by hand (`workflow_dispatch`), and when another workflow calls it (`workflow_call`;
-for the later release workflows). A new push to a pull request cancels its older run.
+for the later release workflows). A called run builds and tests everything, also when the
+calling workflow was started by a pull request. A new push to a pull request cancels its older
+run. `test-arm64` uses only the `tests-arm64` artifact, so it still runs when `build (ci-x64)`
+or `build (x64-debug)` fails; it fails if `build (ci-arm64)` made no artifact.
 
 Details:
 - **Runners.** GitHub-hosted runners run elevated (High integrity). The handler tests relaunch

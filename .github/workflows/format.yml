@@ -45,7 +45,8 @@ jobs:
           git ls-files -z -- '*.cpp' '*.h' '*.inc' |
             xargs -0 --no-run-if-empty "$RUNNER_TEMP/fmt/bin/clang-format" --dry-run --Werror
 
-      # Generic patterns only, written so that they do not match themselves. Placeholders such as
+      # Generic patterns only, written so that they do not match themselves, nor contain the
+      # literal words a history-wide search looks for ([x] brackets). Placeholders such as
       # C:\Users\<name> or %USERPROFILE% are fine.
       - name: No personal paths, SIDs, PC names or mail addresses
         run: |

@@ -3,8 +3,10 @@
 #
 #   build (ci-x64)    x64 Release: gates, unit and handler tests; artifacts
 #   build (ci-arm64)  ARM64 Release, cross-compiled on the x64 runner: gates; artifacts
-#   build (x64-debug) x64 Debug: gates, unit and handler tests (not on pull requests)
-#   test-arm64        the ARM64 test bundle, run natively on an ARM64 runner (not on pull requests)
+#   build (x64-debug) x64 Debug: gates, unit and handler tests (not on pull requests, unless
+#                     called by another workflow)
+#   test-arm64        the ARM64 test bundle, run natively on an ARM64 runner (not on pull
+#                     requests, unless called; also when another build leg failed)
 #
 # Repository variables (Settings > Secrets and variables > Actions > Variables), all optional:
 #   PDFT_WIN_X64_RUNNER  x64 runner label. Default windows-2025, which serves VS 2022 17.14 (v143)
@@ -70,7 +72,8 @@ jobs:
         preset: [ci-x64, ci-arm64, x64-debug]
         exclude:
           # Pull requests build only what ships (Windows minutes are limited on a private repo).
-          - preset: ${{ github.event_name == 'pull_request' && 'x64-debug' || 'none' }}
+          # A called run sees its caller's event name, so it checks inputs.called too.
+          - preset: ${{ github.event_name == 'pull_request' && !inputs.called && 'x64-debug' || 'none' }}
     env:
       PRESET: ${{ matrix.preset }}
       PDFT_ARCH: ${{ contains(matrix.preset, 'arm64') && 'arm64' || 'x64' }}
@@ -175,9 +178,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # Uses only build (ci-arm64)'s tests-arm64 artifact: !cancelled() lets it run when another
+  # build leg (x64-debug, ci-x64) failed, and the download fails when ci-arm64 made no artifact.
   test-arm64:
     needs: build
-    if: github.event_name != 'pull_request' && vars.PDFT_ARM64_TESTS != 'off'
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || inputs.called) && vars.PDFT_ARM64_TESTS != 'off' }}
     runs-on: ${{ vars.PDFT_ARM64_RUNNER || 'windows-11-arm' }}
     timeout-minutes: 30
     permissions: {}
