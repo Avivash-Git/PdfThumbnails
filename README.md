@@ -93,12 +93,15 @@ Needs Visual Studio 2022 or 2026 (the Build Tools are enough) with the component
 
 ```
 scripts\build.cmd x64-release
-cmake --install out\build\x64-release --prefix <folder> --component runtime
+cmake --install out\build\x64-release --prefix dist\PdfThumbnails\bin --component runtime
+copy /y PdfThumbnails.cmd dist\PdfThumbnails\
+copy /y PdfThumbnails.ps1 dist\PdfThumbnails\
+dist\PdfThumbnails\PdfThumbnails.cmd install -Machine -AutoRepair
 ```
 
 - `scripts\build.cmd <preset>` finds Visual Studio, then configures, builds and tests one preset: `x64-release`, `x64-debug`, `arm64-release`, `ci-x64` or `ci-arm64`. CMake downloads PDFium `chromium/8125` (`pdfium-win-<arch>.tgz` from [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries)) and checks its SHA-256. The DLL links the C runtime statically, so it depends only on Windows DLLs.
 - The `gate` tests (`ctest --preset x64-release -L gate`) check the staged files: the exports, the imports, the hardening flags, the version, every PDFium function the DLL binds, the PDFium hash and the license notices.
-- The runtime component holds the two DLLs, `LICENSE.txt`, `THIRD-PARTY-NOTICES.md` and `licenses\`. Until the 2.0 settings app exists, install with the 1.1 manager: put the two DLLs in a `bin\` folder next to `PdfThumbnails.cmd` and `PdfThumbnails.ps1`, then run `PdfThumbnails.cmd install -Machine -AutoRepair` there.
+- The runtime component holds the two DLLs, `LICENSE.txt`, `THIRD-PARTY-NOTICES.md` and `licenses\`. Until the 2.0 settings app exists, the 1.1 manager installs it, as above: it takes the build from the `bin\` folder next to `PdfThumbnails.ps1` (or from `dist\PdfThumbnails\bin` below it) and copies itself and that `bin\` to `%LOCALAPPDATA%\Programs\PdfThumbnails`. `dist\` is ignored by Git.
 - Tests (`scripts\build.cmd` runs them all; GoogleTest v1.18.0 is downloaded and checked like PDFium):
   - `ctest --preset x64-release -L "unit|handler"` runs the test programs. `unit` covers the test-PDF generator and the test helpers. `handler` loads the built DLL in-process and checks every test PDF at several zoom levels (sizes, pixels, error codes, 8 threads at once). The DLL refuses to render in elevated processes, so from an elevated prompt the handler tests restart themselves at Medium integrity.
   - `out\build\x64-release\bin\thumbtest.exe makepdfs <dir>` writes the 18 synthetic edge-case PDFs; `makesamples <dir>` writes the settings app's two preview samples (committed in `src\app\res`).

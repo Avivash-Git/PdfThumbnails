@@ -5,6 +5,7 @@
 /out/
 /build/
 /dist/
+/bin/
 /.cache/
 /third_party/
 /Testing/
