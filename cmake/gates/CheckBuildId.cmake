@@ -7,7 +7,7 @@
 # (The 1.1 DLLs give 1.1.0.0-67a1323e.)
 # The comparison with the app's C++ ComputeBuildId() is added with the app (§3.9, WP7).
 
-cmake_minimum_required(VERSION 3.31)
+cmake_minimum_required(VERSION 4.3)
 include("${CMAKE_CURRENT_LIST_DIR}/PeTools.cmake")
 pdft_require(SCRIPT WORK_DIR DLL PDFIUM VERSION)
 

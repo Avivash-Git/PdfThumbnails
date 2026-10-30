@@ -9,11 +9,10 @@
 #                     requests, unless called; also when another build leg failed)
 #
 # Repository variables (Settings > Secrets and variables > Actions > Variables), all optional:
-#   PDFT_WIN_X64_RUNNER  x64 runner label. Default windows-2025, which serves VS 2022 17.14 (v143)
-#                        and CMake 3.31 to private repositories; set windows-2025-vs2026 (VS 2026,
-#                        v145) once the repository is public.
-#   PDFT_VS_VERSION      vswhere version range for scripts\build.cmd, e.g. [18.0,19.0); empty =
-#                        the newest Visual Studio on the image.
+#   PDFT_WIN_X64_RUNNER  x64 runner label. Default windows-2025, which serves Visual Studio 2026
+#                        (v145) and its own CMake 4.x, private repositories included.
+#   PDFT_VS_VERSION      vswhere version range for scripts\build.cmd, e.g. [18.11,19.0); empty =
+#                        the newest Visual Studio 18.11 or later on the image.
 #   PDFT_ARM64_RUNNER    ARM64 runner label. Default windows-11-arm (windows-11-vs2026-arm works
 #                        too: the job needs only CTest).
 #   PDFT_ARM64_TESTS     "off" skips test-arm64, for when no ARM64 runner is available to the

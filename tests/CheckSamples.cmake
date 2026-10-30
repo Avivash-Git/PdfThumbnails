@@ -4,6 +4,7 @@
 #         -P tests/CheckSamples.cmake
 # After a deliberate change to the samples: thumbtest makesamples src/app/res
 
+# The test bundle runs this with the test machine's CMake, not the build's: keep the minimum low.
 cmake_minimum_required(VERSION 3.31)
 foreach(var IN ITEMS THUMBTEST COMMITTED_DIR WORK_DIR)
   if(NOT DEFINED ${var} OR "${${var}}" STREQUAL "")

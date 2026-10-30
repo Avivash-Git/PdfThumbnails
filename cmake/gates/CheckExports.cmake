@@ -1,7 +1,7 @@
 # gate.<bin>.exports: the image exports exactly the expected names and nothing by ordinal only.
 #   cmake -DDUMPBIN=<dumpbin> -DFILE=<image> -DEXPECTED=<name,name,...> -P CheckExports.cmake
 
-cmake_minimum_required(VERSION 3.31)
+cmake_minimum_required(VERSION 4.3)
 include("${CMAKE_CURRENT_LIST_DIR}/PeTools.cmake")
 pdft_require(FILE EXPECTED)
 

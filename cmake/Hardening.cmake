@@ -9,9 +9,9 @@
 #               metadata checks on objects compiled without it (LNK2047).
 #
 # Options:
-#   PDFT_WARNINGS_AS_ERRORS  compiler (COMPILE_WARNING_AS_ERROR) and linker (/WX) warnings fail
-#                            the build. The linker /WX is passed explicitly:
-#                            CMAKE_LINK_WARNING_AS_ERROR needs CMake 4.0 and VS 2022 ships 3.31.
+#   PDFT_WARNINGS_AS_ERRORS  compiler (COMPILE_WARNING_AS_ERROR) and linker (LINK_WARNING_AS_ERROR)
+#                            warnings fail the build. Both are target properties, so third-party
+#                            targets never get them.
 #   PDFT_SPECTRE             AUTO | ON | OFF: /Qspectre and the Spectre-mitigated CRT. AUTO uses
 #                            them when the libraries are installed; ON fails configure without.
 #   PDFT_REPRODUCIBLE        /Brepro (undocumented; used by Chromium): no time stamps in objects
@@ -80,7 +80,7 @@ function(pdft_harden target kind)
 
   # ---- link ----
   if(PDFT_WARNINGS_AS_ERRORS)
-    target_link_options(${target} PRIVATE /WX)
+    set_property(TARGET ${target} PROPERTY LINK_WARNING_AS_ERROR ON)
   endif()
   # PDBs for every configuration; the binary records only the PDB's file name, never a path.
   # Static imports resolve from System32 only (0x800 = LOAD_LIBRARY_SEARCH_SYSTEM32).

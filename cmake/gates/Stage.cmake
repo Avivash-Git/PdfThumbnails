@@ -3,7 +3,7 @@
 #         -P cmake/gates/Stage.cmake
 # The directory is emptied first, so files left from an earlier build can never satisfy a gate.
 
-cmake_minimum_required(VERSION 3.31)
+cmake_minimum_required(VERSION 4.3)
 include("${CMAKE_CURRENT_LIST_DIR}/PeTools.cmake")
 pdft_require(BUILD_DIR STAGE_DIR)
 if(NOT COMPONENT)

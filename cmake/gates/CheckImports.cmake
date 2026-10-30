@@ -6,7 +6,7 @@
 # The deny list catches an accidental dynamic CRT (/MD) even when its DLLs are on the allow list
 # by pattern, and even though vcruntime140.dll exists in System32 on most PCs.
 
-cmake_minimum_required(VERSION 3.31)
+cmake_minimum_required(VERSION 4.3)
 include("${CMAKE_CURRENT_LIST_DIR}/PeTools.cmake")
 pdft_require(FILE ALLOW)
 

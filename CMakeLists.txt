@@ -1,9 +1,8 @@
 # PdfThumbnails: PDF thumbnail handler for Windows Explorer.
 # Build with scripts\build.cmd <preset> (see CMakePresets.json).
 
-# 3.31 is what Visual Studio 2022 bundles; the code and build must work with VS 2022 (v143)
-# and VS 2026 (v145) alike.
-cmake_minimum_required(VERSION 3.31)
+# Requires Visual Studio 2026 (v145) and CMake 4.3, which Visual Studio 2026 18.11 brings.
+cmake_minimum_required(VERSION 4.3)
 
 include(cmake/ProjectInfo.cmake)
 project(${PDFT_PRODUCT_NAME}
@@ -15,8 +14,8 @@ if(NOT MSVC OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
   message(FATAL_ERROR "Build with MSVC (cl.exe) from a Visual Studio developer environment: "
                       "scripts\\build.cmd <preset>")
 endif()
-if(MSVC_VERSION LESS 1930)
-  message(FATAL_ERROR "MSVC ${CMAKE_CXX_COMPILER_VERSION} is too old: use Visual Studio 2022 (v143) or later")
+if(MSVC_VERSION LESS 1950)
+  message(FATAL_ERROR "MSVC ${CMAKE_CXX_COMPILER_VERSION} is too old: use Visual Studio 2026 (v145) or later")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)

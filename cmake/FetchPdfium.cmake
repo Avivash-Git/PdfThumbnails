@@ -7,7 +7,7 @@
 #   cmake -DARCH=<x64|arm64> [-DVERIFY_ATTESTATION=ON] -P cmake/FetchPdfium.cmake
 # PDFT_DOWNLOAD_DIR (-D) overrides the cache folder, as in a build.
 
-cmake_minimum_required(VERSION 3.31)
+cmake_minimum_required(VERSION 4.3)
 
 if(NOT DEFINED ARCH OR NOT ARCH MATCHES "^(x64|arm64)$")
   message(FATAL_ERROR "usage: cmake -DARCH=<x64|arm64> [-DVERIFY_ATTESTATION=ON] -P ${CMAKE_SCRIPT_MODE_FILE}")

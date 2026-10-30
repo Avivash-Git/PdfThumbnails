@@ -12,7 +12,7 @@
 # PDFium is built by a third party: it has CFG and CET but no dependent load flag and no EH
 # continuation table, so it gets the shorter profile.
 
-cmake_minimum_required(VERSION 3.31)
+cmake_minimum_required(VERSION 4.3)
 include("${CMAKE_CURRENT_LIST_DIR}/PeTools.cmake")
 pdft_require(FILE PROFILE ARCH MACHINE)
 if(NOT PROFILE MATCHES "^(own|pdfium)$")

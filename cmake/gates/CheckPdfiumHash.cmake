@@ -2,7 +2,7 @@
 # PDFT_PDFIUM_<arch>_DLL_SHA256).
 #   cmake -DFILE=<staged pdfium dll> -DEXPECTED=<sha256> -P CheckPdfiumHash.cmake
 
-cmake_minimum_required(VERSION 3.31)
+cmake_minimum_required(VERSION 4.3)
 include("${CMAKE_CURRENT_LIST_DIR}/PeTools.cmake")
 pdft_require(FILE EXPECTED)
 

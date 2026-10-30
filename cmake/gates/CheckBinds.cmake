@@ -4,7 +4,7 @@
 #   cmake -DDUMPBIN=<dumpbin> -DLIST=<pdfium_functions.inc> -DCOUNT=<n> -DFILE=<pdfium dll>
 #         -P CheckBinds.cmake
 
-cmake_minimum_required(VERSION 3.31)
+cmake_minimum_required(VERSION 4.3)
 include("${CMAKE_CURRENT_LIST_DIR}/PeTools.cmake")
 pdft_require(LIST COUNT FILE)
 

@@ -6,7 +6,7 @@ CI runs the same script, so a local build is what CI builds.
 ## Prerequisites
 
 - **Windows 10 or 11**, x64 or ARM64.
-- **Visual Studio 2022 (17.14 or later) or Visual Studio 2026.** The free Build Tools are enough.
+- **Visual Studio 2026, version 18.11 or later.** The free Build Tools are enough.
   Install the components listed in `.vsconfig`:
   - the C++ build tools for x64 and ARM64;
   - the Spectre-mitigated runtime libraries for x64 and ARM64;
@@ -21,7 +21,9 @@ CI runs the same script, so a local build is what CI builds.
     --installPath "<Visual Studio folder>" --config "%CD%\.vsconfig" --passive
   ```
 
-  Visual Studio 2022 brings CMake 3.31, Visual Studio 2026 brings CMake 4.x; both work.
+  The build needs CMake 4.3 or later; Visual Studio 2026 18.11 brings CMake 4.3.1. A CMake
+  installed separately and already on `PATH` is used instead of Visual Studio's, so it must be
+  4.3 or later too. Visual Studio 2022 is not supported.
 - **Git.**
 - **Internet access for the first build.** CMake downloads PDFium, GoogleTest and WIL from the
   URLs pinned in `cmake/Pins.cmake` and checks every file's SHA-256 (see
@@ -40,7 +42,7 @@ scripts\build.cmd x64-release
 ```
 
 The script:
-1. finds Visual Studio with `vswhere` (the newest one with the needed components);
+1. finds Visual Studio with `vswhere` (the newest 18.11 or later with the needed components);
 2. sets up the compiler environment with `vcvarsall` (x64, or x64-to-ARM64 for `arm64` presets);
 3. writes the toolchain versions to `out\build\<preset>\buildinfo.txt` and prints them;
 4. runs `cmake --workflow --preset <preset>`: configure, build, then test.
@@ -49,8 +51,8 @@ It returns 0 when everything built and every test passed. Run it from a plain `c
 developer prompt is needed.
 
 To use a particular Visual Studio when several are installed, set `PDFT_VS_VERSION` to a
-`vswhere` version range first, for example `set PDFT_VS_VERSION=[17.0,18.0)` for Visual
-Studio 2022 or `[18.0,19.0)` for Visual Studio 2026.
+`vswhere` version range first, for example `set PDFT_VS_VERSION=[18.11,19.0)` to stay on
+Visual Studio 2026 once a newer one is installed too.
 
 Output: `out\build\<preset>\bin\` holds the handler (`PdfThumbnails.dll`), its PDFium copy
 (`PdfThumbnails-pdfium.dll`), the PDBs, the tools and the test programs.
@@ -216,8 +218,8 @@ Repository variables (Settings > Secrets and variables > Actions > Variables), a
 
 | Variable | Default | Use |
 |---|---|---|
-| `PDFT_WIN_X64_RUNNER` | `windows-2025` | The x64 runner label. For private repositories `windows-2025` has Visual Studio 2022 17.14 (MSVC v143) and CMake 3.31. Public repositories can use `windows-2025-vs2026` (Visual Studio 2026, v145), which matches a local Visual Studio 2026 build. |
-| `PDFT_VS_VERSION` | empty (newest) | Passed to `scripts\build.cmd`, e.g. `[18.0,19.0)` to require Visual Studio 2026. |
+| `PDFT_WIN_X64_RUNNER` | `windows-2025` | The x64 runner label. `windows-2025` has Visual Studio 2026 (MSVC v145), private repositories included; the build uses the image's own CMake 4.x, which comes first on `PATH`. |
+| `PDFT_VS_VERSION` | empty (newest 18.11 or later) | Passed to `scripts\build.cmd`, e.g. `[18.11,19.0)` to stay on Visual Studio 2026. |
 | `PDFT_ARM64_RUNNER` | `windows-11-arm` | The ARM64 runner label (`windows-11-vs2026-arm` works too; the job needs only CTest). |
 | `PDFT_ARM64_TESTS` | on | Set to `off` to skip `test-arm64`, for example when the account's plan has no ARM64 runners. |
 

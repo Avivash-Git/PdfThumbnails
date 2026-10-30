@@ -6,7 +6,7 @@
 # WIL_LICENSE is passed once a target compiles WIL in (the settings app); GTEST_LICENSE when
 # the staged component is the test bundle (programs linked with GoogleTest).
 
-cmake_minimum_required(VERSION 3.31)
+cmake_minimum_required(VERSION 4.3)
 include("${CMAKE_CURRENT_LIST_DIR}/PeTools.cmake")
 pdft_require(STAGE_DIR PDFIUM_DIR PROJECT_LICENSE NOTICES)
 

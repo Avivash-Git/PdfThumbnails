@@ -3,7 +3,7 @@
 # OriginalFilename equal to the file's name.
 #   cmake -DFILE=<image> -DVERSION=<a.b.c.d> -P CheckVersion.cmake
 
-cmake_minimum_required(VERSION 3.31)
+cmake_minimum_required(VERSION 4.3)
 include("${CMAKE_CURRENT_LIST_DIR}/PeTools.cmake")
 pdft_require(FILE VERSION)
 

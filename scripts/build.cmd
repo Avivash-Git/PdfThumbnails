@@ -2,10 +2,11 @@
 rem Configures, builds and tests one CMake preset with MSVC (CI runs the same script):
 rem   scripts\build.cmd <preset>      x64-release | x64-debug | arm64-release | ci-x64 | ci-arm64
 rem Finds Visual Studio with vswhere, sets up the compiler environment with vcvarsall, then runs
-rem "cmake --workflow --preset <preset>" in the repository root. Works with Visual Studio 2022
-rem (v143, CMake 3.31) and 2026 (v145, CMake 4.x).
-rem Optional: set PDFT_VS_VERSION to a vswhere version range, e.g. [18.0,19.0), to pin the
-rem Visual Studio version (CI images can carry more than one; empty means the newest).
+rem "cmake --workflow --preset <preset>" in the repository root. Needs Visual Studio 2026 18.11 or
+rem later (MSVC v145) and CMake 4.3 or later: vcvarsall appends Visual Studio's CMake to PATH, so
+rem a CMake installed separately and already on PATH is used instead.
+rem Optional: set PDFT_VS_VERSION to a vswhere version range, e.g. [18.11,19.0), to pin the
+rem Visual Studio version (CI images can carry more than one; empty means the newest 18.11 or later).
 rem Writes the toolchain versions to out\build\<preset>\buildinfo.txt (CI ships it as BUILDINFO.txt).
 setlocal EnableExtensions DisableDelayedExpansion
 
@@ -31,8 +32,8 @@ set "REQUIRES=Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
 if "%TARGET%"=="arm64" set "REQUIRES=%REQUIRES% Microsoft.VisualStudio.Component.VC.Tools.ARM64"
 if defined CIPRESET if "%TARGET%"=="x64" set "REQUIRES=%REQUIRES% Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre"
 if defined CIPRESET if "%TARGET%"=="arm64" set "REQUIRES=%REQUIRES% Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre"
+set VSRANGE=-version "[18.11,)"
 rem Compared, not "if defined": CI passes an unset repository variable as an empty value.
-set "VSRANGE="
 if not "%PDFT_VS_VERSION%"=="" set VSRANGE=-version "%PDFT_VS_VERSION%"
 
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -87,7 +88,7 @@ exit /b 2
 
 :novs
 echo Visual Studio with the C++ %TARGET% tools was not found (vswhere -requires %REQUIRES% %VSRANGE%).
-echo Install Visual Studio 2022 or 2026 (Build Tools are enough) with the components in .vsconfig.
+echo Install Visual Studio 2026 18.11 or later (Build Tools are enough) with the components in .vsconfig.
 exit /b 1
 
 :nocmake

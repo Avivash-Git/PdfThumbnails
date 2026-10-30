@@ -10,7 +10,7 @@
 # (just the name, no line end).
 # Release builds run it after code signing, because signing changes the bytes (M3/M4).
 
-cmake_minimum_required(VERSION 3.31)
+cmake_minimum_required(VERSION 4.3)
 include("${CMAKE_CURRENT_LIST_DIR}/gates/PeTools.cmake")
 pdft_require(DLL PDFIUM)
 
