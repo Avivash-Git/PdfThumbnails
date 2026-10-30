@@ -43,7 +43,7 @@ The setting lives in `%LOCALAPPDATA%\Programs\PdfThumbnails\settings.ini` (`[Thu
 
 - **Manager:** `%LOCALAPPDATA%\Programs\PdfThumbnails\` holds `PdfThumbnails.cmd/.ps1`, `settings.ini`, `repair.log`, `README.md`, the licenses, and in `bin\` a copy of the installed build.
 - **DLLs Explorer loads:** `...\PdfThumbnails\app\<version>-<hash>\` (per-user), or `C:\Program Files\PdfThumbnails\app\<version>-<hash>\` (with `-Machine`).
-- **Updating after a rebuild:** run the new build's `dist\PdfThumbnails\PdfThumbnails.cmd install` with the same options you used before (here `install -Machine -AutoRepair`). On a machine-wide install, a plain `install` updates the machine-wide copy anyway; `uninstall` first if you want to switch to per-user.
+- **Updating after a rebuild:** run `PdfThumbnails.cmd install` next to the new build's `bin\` folder (see "Build from source") with the same options you used before (here `install -Machine -AutoRepair`). On a machine-wide install, a plain `install` updates the machine-wide copy anyway; `uninstall` first if you want to switch to per-user.
 
 ## How it works
 
@@ -75,7 +75,7 @@ Results go to `repair.log`. To turn the task off, run `repair -NoAutoRepair`.
 ## Limits and caveats
 
 - **Smart App Control.** The DLLs are not code-signed, so with Smart App Control **On** Windows *may* block them. New or changed PDFs would then show icons, while thumbnails Explorer already cached keep showing, so check with `status` rather than by looking at a folder.
-  - On the maintainer's PC, a copy built there kept working with Smart App Control On, also after a restart. That includes the PDFium DLL, which `build.ps1` downloads unsigned from GitHub. The likely reason (not confirmed) is that neither file carries the "downloaded from the internet" mark that a browser adds. Files with that mark, such as ones extracted from a ZIP downloaded in a browser, are checked strictly.
+  - On the maintainer's PC, a copy built there kept working with Smart App Control On, also after a restart. That includes the PDFium DLL, which the build downloads unsigned from GitHub. The likely reason (not confirmed) is that neither file carries the "downloaded from the internet" mark that a browser adds. Files with that mark, such as ones extracted from a ZIP downloaded in a browser, are checked strictly.
   - `status` tells you which case you're in. It runs a live test and reads Windows' block log, and only reports a problem when there is evidence of one.
   - If it is blocking, you can turn Smart App Control off. Or run `PdfThumbnails.cmd uninstall` and enable the Microsoft-signed PDF thumbnails in PowerToys (File Explorer add-ons). Uninstall first: otherwise this handler's per-user `.pdf` entry outranks PowerToys.
 - These files keep the plain icon:
@@ -89,18 +89,20 @@ Results go to `repair.log`. To turn the task off, run `repair -NoAutoRepair`.
 
 ## Build from source
 
+Needs Visual Studio 2022 or 2026 (the Build Tools are enough) with the components listed in `.vsconfig`.
+
 ```
-winget install --id MartinStorsjo.LLVM-MinGW.UCRT --exact --version 23.1.4-20261020
-build.cmd
-dist\PdfThumbnails\PdfThumbnails.cmd install -Machine -AutoRepair
+scripts\build.cmd x64-release
+cmake --install out\build\x64-release --prefix <folder> --component runtime
 ```
 
-- `build.ps1` downloads PDFium `chromium/8125` (`pdfium-win-x64.tgz` from [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries)) and checks its SHA-256. It then compiles the DLL statically, so the DLL depends only on Windows DLLs. Finally it checks the exports, the imports, every PDFium function the DLL binds and the license notices.
+- `scripts\build.cmd <preset>` finds Visual Studio, then configures, builds and tests one preset: `x64-release`, `x64-debug`, `arm64-release`, `ci-x64` or `ci-arm64`. CMake downloads PDFium `chromium/8125` (`pdfium-win-<arch>.tgz` from [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries)) and checks its SHA-256. The DLL links the C runtime statically, so it depends only on Windows DLLs.
+- The `gate` tests (`ctest --preset x64-release -L gate`) check the staged files: the exports, the imports, the hardening flags, the version, every PDFium function the DLL binds, the PDFium hash and the license notices.
+- The runtime component holds the two DLLs, `LICENSE.txt`, `THIRD-PARTY-NOTICES.md` and `licenses\`. Until the 2.0 settings app exists, install with the 1.1 manager: put the two DLLs in a `bin\` folder next to `PdfThumbnails.cmd` and `PdfThumbnails.ps1`, then run `PdfThumbnails.cmd install -Machine -AutoRepair` there.
 - Tests:
   - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\make-test-pdfs.ps1 -OutDir <dir>` writes synthetic edge cases.
-  - `dist\tools\thumbtest.exe` renders through the DLL directly (`direct`, `stress`) or through Explorer's pipeline (`cache`, `cachenew`, `cacheinproc`, `shell`).
+  - `out\build\x64-release\bin\thumbtest.exe` renders through the DLL directly (`direct`, `stress`) or through Explorer's pipeline (`cache`, `cachenew`, `cacheinproc`, `shell`).
   - Set `PDFTHUMBNAILS_SETTINGS` to another `settings.ini` to test zoom levels in `direct` mode.
-- To remove the toolchain afterwards: `winget uninstall --id MartinStorsjo.LLVM-MinGW.UCRT --exact --purge`. The installed handler does not need it.
 
 ## Why not reverse-engineer Foxit (REA)?
 
@@ -116,3 +118,4 @@ dist\PdfThumbnails\PdfThumbnails.cmd install -Machine -AutoRepair
 - This project: MIT (`LICENSE`).
 - PDFium: BSD-3-Clause / Apache-2.0, plus the notices of its third-party components (FreeType, ICU, libjpeg-turbo, libpng, zlib and others), in `licenses\`.
 - The pdfium-binaries build: MIT.
+- `THIRD-PARTY-NOTICES.md` lists every component and its license file.
