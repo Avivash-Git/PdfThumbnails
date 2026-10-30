@@ -4,10 +4,12 @@
 //       Runs the program with this process's token lowered to Medium integrity and returns its
 //       exit code. By default the token is also filtered (Administrators deny-only, no
 //       privileges), like a standard user's; --label-only changes only the integrity label.
-//       125 = the program could not be started.
+//       125 = the program could not be started; 126 = Application Control (Smart App Control,
+//       WDAC) blocked it.
 //   pdft-run-medium --check-token
-//       Prints this process's integrity level, whether the Administrators group is enabled and
-//       the elevation type; exit 0 when it runs at Medium without Administrators, else 3.
+//       Prints this process's integrity level, whether the Administrators group is enabled, the
+//       elevation type, and the token's owner and default DACL as SDDL; exit 0 when it runs at
+//       Medium without Administrators, else 3.
 //   pdft-run-medium --exit <n>
 //       Exits with <n> (a harmless target for tests).
 
@@ -26,7 +28,9 @@ int Usage() {
       "usage:\n"
       "  pdft-run-medium [--label-only] [--] <program> [arguments...]\n"
       "  pdft-run-medium --check-token\n"
-      "  pdft-run-medium --exit <n>\n",
+      "  pdft-run-medium --exit <n>\n"
+      "exit codes: the program's, or 125 = it could not be started, 126 = Application Control\n"
+      "blocked it\n",
       stderr);
   return 2;
 }
@@ -68,7 +72,7 @@ int wmain(int argc, wchar_t** argv) {
   if (FAILED(hr)) {
     std::fprintf(stderr, "pdft-run-medium: cannot run the program at Medium integrity: 0x%08lX\n",
                  static_cast<unsigned long>(hr));
-    return 125;
+    return pdft::test::IsApplicationControlBlock(hr) ? 126 : 125;
   }
   return static_cast<int>(code);
 }

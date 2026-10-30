@@ -63,6 +63,72 @@ struct OwnedHandle {
   }
 };
 
+// A SID in a buffer of its own.
+using Sid = std::vector<BYTE>;
+
+Sid WellKnown(WELL_KNOWN_SID_TYPE type) {
+  Sid sid(SECURITY_MAX_SID_SIZE);
+  DWORD size = SECURITY_MAX_SID_SIZE;
+  if (!CreateWellKnownSid(type, nullptr, sid.data(), &size)) sid.clear();
+  return sid;
+}
+
+// Token information that is or starts with a SID: TokenUser or TokenOwner.
+Sid TokenSid(HANDLE token, TOKEN_INFORMATION_CLASS what) {
+  alignas(TOKEN_USER) BYTE buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+  DWORD size = 0;
+  if (!GetTokenInformation(token, what, buffer, sizeof(buffer), &size)) return Sid();
+  PSID sid = what == TokenUser ? reinterpret_cast<TOKEN_USER*>(buffer)->User.Sid
+                               : reinterpret_cast<TOKEN_OWNER*>(buffer)->Owner;
+  const BYTE* bytes = static_cast<const BYTE*>(sid);
+  return Sid(bytes, bytes + GetLengthSid(sid));
+}
+
+// The rights |token|'s default DACL allows |sid| (0 when it has no access-allowed ACE for it).
+ACCESS_MASK DefaultDaclAllows(HANDLE token, const Sid& sid) {
+  DWORD size = 0;
+  GetTokenInformation(token, TokenDefaultDacl, nullptr, 0, &size);
+  std::vector<BYTE> buffer(size);
+  if (!size || !GetTokenInformation(token, TokenDefaultDacl, buffer.data(), size, &size)) return 0;
+  const PACL dacl = reinterpret_cast<TOKEN_DEFAULT_DACL*>(buffer.data())->DefaultDacl;
+  ACCESS_MASK mask = 0;
+  for (DWORD i = 0; dacl && i < dacl->AceCount; ++i) {
+    void* ace = nullptr;
+    if (GetAce(dacl, i, &ace) &&
+        static_cast<ACE_HEADER*>(ace)->AceType == ACCESS_ALLOWED_ACE_TYPE &&
+        EqualSid(&static_cast<ACCESS_ALLOWED_ACE*>(ace)->SidStart, const_cast<BYTE*>(sid.data()))) {
+      mask |= static_cast<ACCESS_ALLOWED_ACE*>(ace)->Mask;
+    }
+  }
+  return mask;
+}
+
+// Gives |token| another default DACL until destroyed.
+class ScopedDefaultDacl {
+ public:
+  ScopedDefaultDacl(HANDLE token, PACL dacl) : token_(token) {
+    DWORD size = 0;
+    GetTokenInformation(token, TokenDefaultDacl, nullptr, 0, &size);
+    saved_.resize(size);
+    TOKEN_DEFAULT_DACL value = {dacl};
+    set_ = size && GetTokenInformation(token, TokenDefaultDacl, saved_.data(), size, &size) &&
+           SetTokenInformation(token, TokenDefaultDacl, &value, sizeof(value));
+  }
+  ScopedDefaultDacl(const ScopedDefaultDacl&) = delete;
+  ScopedDefaultDacl& operator=(const ScopedDefaultDacl&) = delete;
+  ~ScopedDefaultDacl() {
+    if (set_) {
+      SetTokenInformation(token_, TokenDefaultDacl, saved_.data(), sizeof(TOKEN_DEFAULT_DACL));
+    }
+  }
+  bool ok() const { return set_; }
+
+ private:
+  HANDLE token_;
+  std::vector<BYTE> saved_;  // TOKEN_DEFAULT_DACL followed by the ACL it points to
+  bool set_ = false;
+};
+
 TEST(MediumIl, DecideRelaunch) {
   using enum RelaunchDecision;
   EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_LOW_RID, false), kRunHere);
@@ -116,6 +182,8 @@ TEST(MediumIl, LabelOnlyTokenIsMedium) {
   DWORD size = 0;
   ASSERT_TRUE(GetTokenInformation(token.handle, TokenType, &type, sizeof(type), &size));
   EXPECT_EQ(type, TokenPrimary);
+  EXPECT_EQ(DefaultDaclAllows(token.handle, TokenSid(token.handle, TokenUser)),
+            static_cast<ACCESS_MASK>(GENERIC_ALL));
 }
 
 TEST(MediumIl, FilteredTokenIsMediumWithoutAdministrators) {
@@ -123,6 +191,52 @@ TEST(MediumIl, FilteredTokenIsMediumWithoutAdministrators) {
   ASSERT_EQ(CreateMediumTokenForSelf(MediumToken::kFiltered, &token.handle), S_OK);
   EXPECT_EQ(TokenIntegrityRid(token.handle), static_cast<DWORD>(SECURITY_MANDATORY_MEDIUM_RID));
   EXPECT_FALSE(TokenHasEnabledAdministrators(token.handle));
+  EXPECT_EQ(DefaultDaclAllows(token.handle, TokenSid(token.handle, TokenUser)),
+            static_cast<ACCESS_MASK>(GENERIC_ALL));
+}
+
+// An elevated token's default DACL grants only Administrators and SYSTEM. A token made from it
+// keeps that default unless CreateMediumToken replaces it, and a filtered child (Administrators
+// deny-only) then cannot open its own token (error 5). Our own token gets that default DACL while
+// the Medium tokens are made, so this runs the elevated case at any integrity level. (Not a copy
+// of our token: starting a process with a token filtered from a copy needs a privilege.)
+TEST(MediumIl, TokensGrantTheirUserWhenTheSourceGrantsOnlyAdministrators) {
+  const Sid administrators = WellKnown(WinBuiltinAdministratorsSid);
+  const Sid system = WellKnown(WinLocalSystemSid);
+  ASSERT_FALSE(administrators.empty() || system.empty());
+  alignas(DWORD) BYTE acl[256];
+  const PACL elevated = reinterpret_cast<PACL>(acl);  // D:(A;;GA;;;BA)(A;;GA;;;SY)
+  ASSERT_TRUE(InitializeAcl(elevated, sizeof(acl), ACL_REVISION));
+  ASSERT_TRUE(AddAccessAllowedAce(elevated, ACL_REVISION, GENERIC_ALL,
+                                  const_cast<BYTE*>(administrators.data())));
+  ASSERT_TRUE(
+      AddAccessAllowedAce(elevated, ACL_REVISION, GENERIC_ALL, const_cast<BYTE*>(system.data())));
+
+  OwnedHandle self, labelOnly, filtered;
+  ASSERT_TRUE(OpenProcessToken(
+      GetCurrentProcess(),
+      TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ADJUST_DEFAULT | TOKEN_ASSIGN_PRIMARY, &self.handle));
+  const Sid user = TokenSid(self.handle, TokenUser);
+  ASSERT_FALSE(user.empty());
+  {
+    const ScopedDefaultDacl asElevated(self.handle, elevated);
+    ASSERT_TRUE(asElevated.ok());
+    ASSERT_EQ(DefaultDaclAllows(self.handle, user), 0u);
+    ASSERT_EQ(CreateMediumToken(self.handle, MediumToken::kLabelOnly, &labelOnly.handle), S_OK);
+    ASSERT_EQ(CreateMediumToken(self.handle, MediumToken::kFiltered, &filtered.handle), S_OK);
+  }
+  for (const HANDLE token : {labelOnly.handle, filtered.handle}) {
+    SCOPED_TRACE(token == filtered.handle ? "filtered" : "label only");
+    EXPECT_EQ(DefaultDaclAllows(token, user), static_cast<ACCESS_MASK>(GENERIC_ALL));
+    EXPECT_EQ(DefaultDaclAllows(token, system), static_cast<ACCESS_MASK>(GENERIC_ALL));
+    EXPECT_EQ(DefaultDaclAllows(token, administrators), 0u);
+    EXPECT_EQ(TokenSid(token, TokenOwner), user);
+  }
+
+  // The filtered child opens its own token (check-token exits 3 when it cannot).
+  DWORD code = 0;
+  ASSERT_EQ(RunWithToken(filtered.handle, Self(), ChildCommand(L"check-token"), &code), S_OK);
+  EXPECT_EQ(code, 0u) << "the child cannot open its own token, or is not a Medium standard user";
 }
 
 TEST(MediumIl, NeverRaisesALowToken) {
@@ -189,10 +303,25 @@ TEST(RunMediumTool, RunsTheProgramAtMediumAndReturnsItsExitCode) {
   }
   ASSERT_EQ(first.hr, S_OK);
   EXPECT_EQ(first.code, 42u);
-  EXPECT_EQ(RunPlain(tool + L" -- " + tool + L" --exit 42").code, 42u);
-  EXPECT_EQ(RunPlain(tool + L" " + tool + L" --check-token").code, 0u);
-  EXPECT_EQ(RunPlain(tool + L" " + ChildCommand(L"check-token")).code, 0u);
-  EXPECT_EQ(RunPlain(tool + L" --label-only -- " + tool + L" --exit 3").code, 3u);
+  // The tool starting a second program: Application Control can block that start too (the
+  // tool then exits with 126).
+  const struct {
+    std::wstring arguments;
+    DWORD code;
+  } nested[] = {
+      {L" -- " + tool + L" --exit 42", 42},
+      {L" " + tool + L" --check-token", 0},
+      {L" " + ChildCommand(L"check-token"), 0},
+      {L" --label-only -- " + tool + L" --exit 3", 3},
+  };
+  for (const auto& call : nested) {
+    const DWORD code = RunPlain(tool + call.arguments).code;
+    if (code == 126) {
+      GTEST_SKIP() << "Application Control (Smart App Control) blocked a program that "
+                      "pdft-run-medium.exe started on this PC";
+    }
+    EXPECT_EQ(code, call.code) << "pdft-run-medium" << call.arguments;
+  }
   EXPECT_EQ(RunPlain(tool + L" -- " + QuoteArgument(OwnFolder() + L"\\no such program.exe")).code,
             125u);
   EXPECT_EQ(RunPlain(tool).code, 2u);

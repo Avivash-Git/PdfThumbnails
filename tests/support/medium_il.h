@@ -29,8 +29,9 @@ DWORD TokenIntegrityRid(HANDLE token);
 DWORD CurrentIntegrityRid();
 // True when |token| has the Administrators group enabled (not deny-only).
 bool TokenHasEnabledAdministrators(HANDLE token);
-// Prints this process's integrity level, whether Administrators is enabled and the elevation
-// type; returns 0 when it runs at Medium without Administrators enabled, else 3.
+// Prints this process's integrity level, whether Administrators is enabled, the elevation type,
+// and the token's owner and default DACL as SDDL; returns 0 when it runs at Medium without
+// Administrators enabled, else 3.
 int ReportOwnToken();
 
 // True for the errors Windows gives when Application Control (WDAC, Smart App Control) refuses
@@ -46,7 +47,9 @@ enum class MediumToken {
 // A primary token like |source| at Medium integrity. |source| needs TOKEN_QUERY,
 // TOKEN_DUPLICATE, TOKEN_ADJUST_DEFAULT and TOKEN_ASSIGN_PRIMARY (a filtered token keeps the
 // source handle's access). The label is only ever lowered, which needs no privilege: a
-// |source| below Medium gives E_INVALIDARG.
+// |source| below Medium gives E_INVALIDARG. The new token's owner is its user, and its default
+// DACL grants its user and SYSTEM full access and its logon session read/execute, as a standard
+// user's token does (an elevated source's default DACL grants only Administrators and SYSTEM).
 HRESULT CreateMediumToken(HANDLE source, MediumToken kind, HANDLE* token);
 // The same for this process's own token.
 HRESULT CreateMediumTokenForSelf(MediumToken kind, HANDLE* token);

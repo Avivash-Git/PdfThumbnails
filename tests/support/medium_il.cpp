@@ -1,5 +1,7 @@
 #include "medium_il.h"
 
+#include <sddl.h>
+
 #include <cstdio>
 #include <vector>
 
@@ -41,6 +43,52 @@ HRESULT LastError() {
 bool WellKnownSid(WELL_KNOWN_SID_TYPE type, BYTE (&storage)[SECURITY_MAX_SID_SIZE]) {
   DWORD size = sizeof(storage);
   return CreateWellKnownSid(type, nullptr, storage, &size) != FALSE;
+}
+
+// A new token takes its default DACL and owner from the source token. An elevated source grants
+// only Administrators and SYSTEM, which a filtered token holds deny-only, so its process could
+// not open its own token or the objects it creates. Gives |token| a standard user's defaults:
+// owner = the token user, default DACL D:(A;;GA;;;<user>)(A;;GA;;;SY)(A;;GRGX;;;<logon SID>).
+HRESULT SetUserDefaults(HANDLE token) {
+  alignas(TOKEN_USER) BYTE user[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+  DWORD size = 0;
+  if (!GetTokenInformation(token, TokenUser, user, sizeof(user), &size)) return LastError();
+  PSID userSid = reinterpret_cast<TOKEN_USER*>(user)->User.Sid;
+  BYTE system[SECURITY_MAX_SID_SIZE];
+  if (!WellKnownSid(WinLocalSystemSid, system)) return LastError();
+  alignas(TOKEN_GROUPS) BYTE logon[sizeof(TOKEN_GROUPS) + SECURITY_MAX_SID_SIZE];
+  const bool hasLogon =
+      GetTokenInformation(token, TokenLogonSid, logon, sizeof(logon), &size) &&
+      reinterpret_cast<TOKEN_GROUPS*>(logon)->GroupCount > 0;  // none in some service tokens
+
+  alignas(DWORD) BYTE acl[sizeof(ACL) + 3 * (sizeof(ACCESS_ALLOWED_ACE) + SECURITY_MAX_SID_SIZE)];
+  PACL dacl = reinterpret_cast<PACL>(acl);
+  if (!InitializeAcl(dacl, sizeof(acl), ACL_REVISION) ||
+      !AddAccessAllowedAce(dacl, ACL_REVISION, GENERIC_ALL, userSid) ||
+      !AddAccessAllowedAce(dacl, ACL_REVISION, GENERIC_ALL, system) ||
+      (hasLogon && !AddAccessAllowedAce(dacl, ACL_REVISION, GENERIC_READ | GENERIC_EXECUTE,
+                                        reinterpret_cast<TOKEN_GROUPS*>(logon)->Groups[0].Sid))) {
+    return LastError();
+  }
+  TOKEN_DEFAULT_DACL defaultDacl = {dacl};
+  TOKEN_OWNER owner = {userSid};
+  if (!SetTokenInformation(token, TokenDefaultDacl, &defaultDacl, sizeof(defaultDacl)) ||
+      !SetTokenInformation(token, TokenOwner, &owner, sizeof(owner))) {
+    return LastError();
+  }
+  return S_OK;
+}
+
+// "<what> <SDDL>" for one part (OWNER_ or DACL_SECURITY_INFORMATION) of a descriptor.
+void PrintSddl(const char* what, PSECURITY_DESCRIPTOR descriptor, SECURITY_INFORMATION part) {
+  LPWSTR text = nullptr;
+  if (ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, SDDL_REVISION_1, part, &text,
+                                                           nullptr)) {
+    std::printf("%s %ls\n", what, text);
+    LocalFree(text);
+  } else {
+    std::printf("%s unreadable (error %lu)\n", what, GetLastError());
+  }
 }
 
 }  // namespace
@@ -87,6 +135,23 @@ int ReportOwnToken() {
   GetTokenInformation(token.get(), TokenElevationType, &type, sizeof(type), &size);
   std::printf("integrity 0x%04lX, Administrators %s, elevation type %d\n", rid,
               admin ? "enabled" : "not enabled", static_cast<int>(type));
+
+  // The owner and default DACL that objects this process creates get.
+  SECURITY_DESCRIPTOR descriptor;
+  InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION);
+  alignas(TOKEN_OWNER) BYTE owner[sizeof(TOKEN_OWNER) + SECURITY_MAX_SID_SIZE];
+  if (GetTokenInformation(token.get(), TokenOwner, owner, sizeof(owner), &size)) {
+    SetSecurityDescriptorOwner(&descriptor, reinterpret_cast<TOKEN_OWNER*>(owner)->Owner, FALSE);
+  }
+  size = 0;
+  GetTokenInformation(token.get(), TokenDefaultDacl, nullptr, 0, &size);  // the size it needs
+  std::vector<BYTE> dacl(size);
+  if (size && GetTokenInformation(token.get(), TokenDefaultDacl, dacl.data(), size, &size)) {
+    SetSecurityDescriptorDacl(
+        &descriptor, TRUE, reinterpret_cast<TOKEN_DEFAULT_DACL*>(dacl.data())->DefaultDacl, FALSE);
+  }
+  PrintSddl("owner", &descriptor, OWNER_SECURITY_INFORMATION);
+  PrintSddl("default DACL", &descriptor, DACL_SECURITY_INFORMATION);
   std::fflush(stdout);
   return rid == SECURITY_MANDATORY_MEDIUM_RID && !admin ? 0 : 3;
 }
@@ -133,6 +198,8 @@ HRESULT CreateMediumToken(HANDLE source, MediumToken kind, HANDLE* token) {
     return LastError();
   }
   if (TokenIntegrityRid(created.get()) != SECURITY_MANDATORY_MEDIUM_RID) return E_UNEXPECTED;
+  const HRESULT hr = SetUserDefaults(created.get());
+  if (FAILED(hr)) return hr;
   *token = created.release();
   return S_OK;
 }
