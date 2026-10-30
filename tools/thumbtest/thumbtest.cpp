@@ -19,10 +19,11 @@
 // alpha type and milliseconds. With an outdir it also writes <name>.png there.
 
 #include <windows.h>
+
+#include <propsys.h>
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
-#include <propsys.h>
 #include <thumbcache.h>
 #include <wincodec.h>
 
@@ -129,7 +130,8 @@ double InkShare(const std::vector<DWORD>& pixels) {
   for (DWORD p : pixels) {
     if ((p & 0xFF) < 0xF0 || ((p >> 8) & 0xFF) < 0xF0 || ((p >> 16) & 0xFF) < 0xF0) ++ink;
   }
-  return pixels.empty() ? 0.0 : 100.0 * static_cast<double>(ink) / static_cast<double>(pixels.size());
+  return pixels.empty() ? 0.0
+                        : 100.0 * static_cast<double>(ink) / static_cast<double>(pixels.size());
 }
 
 bool AllOpaque(const std::vector<DWORD>& pixels) {
@@ -145,10 +147,9 @@ HRESULT SavePng(const std::vector<DWORD>& pixels, int width, int height, const s
                                 kIidWicImagingFactory, factory.out());
   Com<IWICBitmap> bitmap;
   if (SUCCEEDED(hr)) {
-    hr = factory->CreateBitmapFromMemory(width, height, kPixel32bppBgr, width * 4,
-                                         static_cast<UINT>(pixels.size() * 4),
-                                         reinterpret_cast<BYTE*>(const_cast<DWORD*>(pixels.data())),
-                                         &bitmap.p);
+    hr = factory->CreateBitmapFromMemory(
+        width, height, kPixel32bppBgr, width * 4, static_cast<UINT>(pixels.size() * 4),
+        reinterpret_cast<BYTE*>(const_cast<DWORD*>(pixels.data())), &bitmap.p);
   }
   Com<IWICFormatConverter> converter;
   if (SUCCEEDED(hr)) hr = factory->CreateFormatConverter(&converter.p);
@@ -176,10 +177,14 @@ HRESULT SavePng(const std::vector<DWORD>& pixels, int width, int height, const s
 
 const char* AlphaName(int alpha) {
   switch (alpha) {
-    case WTSAT_RGB: return "RGB ";
-    case WTSAT_ARGB: return "ARGB";
-    case WTSAT_UNKNOWN: return "UNK ";
-    default: return "-   ";
+    case WTSAT_RGB:
+      return "RGB ";
+    case WTSAT_ARGB:
+      return "ARGB";
+    case WTSAT_UNKNOWN:
+      return "UNK ";
+    default:
+      return "-   ";
   }
 }
 
@@ -194,12 +199,12 @@ void Report(const std::wstring& file, HRESULT hr, HBITMAP bitmap, int alpha, dou
                 static_cast<unsigned long>(hr), ms, name.c_str());
     return;
   }
-  std::printf("OK   %4dx%-4d  ink %5.1f%%  %s %s  %7.0f ms  %s\n", width, height,
-              InkShare(pixels), AlphaName(alpha), AllOpaque(pixels) ? "opaque" : "      ", ms,
-              name.c_str());
+  std::printf("OK   %4dx%-4d  ink %5.1f%%  %s %s  %7.0f ms  %s\n", width, height, InkShare(pixels),
+              AlphaName(alpha), AllOpaque(pixels) ? "opaque" : "      ", ms, name.c_str());
   if (outdir != L"-") {
     HRESULT saved = SavePng(pixels, width, height, outdir + L"\\" + Stem(file) + L".png");
-    if (FAILED(saved)) std::printf("     (could not write png: 0x%08lX)\n", static_cast<unsigned long>(saved));
+    if (FAILED(saved))
+      std::printf("     (could not write png: 0x%08lX)\n", static_cast<unsigned long>(saved));
   }
   std::fflush(stdout);
 }
@@ -260,8 +265,8 @@ IClassFactory* LoadFactory(const wchar_t* dllPath) {
   return factory;
 }
 
-HRESULT ExtractDirect(IClassFactory* factory, const std::wstring& file, UINT size,
-                      HBITMAP* bitmap, WTS_ALPHATYPE* alpha) {
+HRESULT ExtractDirect(IClassFactory* factory, const std::wstring& file, UINT size, HBITMAP* bitmap,
+                      WTS_ALPHATYPE* alpha) {
   Com<IStream> stream;
   HRESULT hr = SHCreateStreamOnFileEx(file.c_str(), STGM_READ | STGM_SHARE_DENY_NONE,
                                       FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &stream.p);
@@ -311,7 +316,8 @@ int RunCache(UINT size, int extraFlags, const std::wstring& outdir,
     WTS_ALPHATYPE alpha = WTSAT_UNKNOWN;
     hr = SHCreateItemFromParsingName(file.c_str(), nullptr, kIidShellItem, item.out());
     if (SUCCEEDED(hr)) {
-      hr = cache->GetThumbnail(item.p, size, static_cast<WTS_FLAGS>(flags), &shared.p, nullptr, nullptr);
+      hr = cache->GetThumbnail(item.p, size, static_cast<WTS_FLAGS>(flags), &shared.p, nullptr,
+                               nullptr);
     }
     if (SUCCEEDED(hr) && shared.p) hr = shared->GetSharedBitmap(&bitmap);  // owned by |shared|
     if (SUCCEEDED(hr) && shared.p) shared->GetFormat(&alpha);
@@ -328,8 +334,8 @@ int RunShell(UINT size, const std::wstring& outdir, const std::vector<std::wstri
     double start = NowMs();
     Com<IShellItemImageFactory> images;
     HBITMAP bitmap = nullptr;
-    HRESULT hr = SHCreateItemFromParsingName(file.c_str(), nullptr, kIidShellItemImageFactory,
-                                             images.out());
+    HRESULT hr =
+        SHCreateItemFromParsingName(file.c_str(), nullptr, kIidShellItemImageFactory, images.out());
     SIZE wanted = {static_cast<LONG>(size), static_cast<LONG>(size)};
     if (SUCCEEDED(hr)) hr = images->GetImage(wanted, SIIGBF_THUMBNAILONLY, &bitmap);
     Report(file, hr, bitmap, -1, NowMs() - start, outdir);
@@ -414,7 +420,7 @@ int wmain(int argc, wchar_t** argv) {
   const std::wstring mode = argv[1];
   // Each mode's first file argument; at least one file or directory must follow.
   const bool cacheMode = mode == L"cache" || mode == L"cachenew" || mode == L"cacheinproc";
-  const int first = mode == L"direct"                  ? 5
+  const int first = mode == L"direct"                 ? 5
                     : (cacheMode || mode == L"shell") ? 4
                     : mode == L"stress"               ? 6
                                                       : 0;

@@ -8,6 +8,7 @@
 // so there is no DllRegisterServer here.
 
 #include <windows.h>
+
 #include <propsys.h>
 #include <shlobj.h>
 #include <thumbcache.h>
@@ -45,9 +46,9 @@ constexpr UINT kMaxEdge = 2560;
 constexpr ULONGLONG kMaxFileBytes = 256ull << 20;
 // Time limits per thumbnail. Slower files keep the plain icon. Opening the
 // document and parsing page 1 cannot be interrupted, so those may overrun.
-constexpr ULONGLONG kReadBudgetMs = 8000;     // reading the file
-constexpr ULONGLONG kLockWaitMs = 15000;      // from the start, waiting for other PDFs
-constexpr ULONGLONG kRenderBudgetMs = 8000;   // from getting PDFium to the finished page
+constexpr ULONGLONG kReadBudgetMs = 8000;    // reading the file
+constexpr ULONGLONG kLockWaitMs = 15000;     // from the start, waiting for other PDFs
+constexpr ULONGLONG kRenderBudgetMs = 8000;  // from getting PDFium to the finished page
 // Draw annotations too (stamps, highlights); form fields come from FPDF_FFLDraw.
 constexpr int kRenderFlags = FPDF_ANNOT;
 // Magnification in percent, from settings.ini (see ReadZoomPercent).
@@ -92,9 +93,9 @@ bool ResolveAll(HMODULE dll, Pdfium& p) {
 bool IsInModule(HMODULE module, const void* address) {
   HMODULE owner = nullptr;
   return module &&
-         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            static_cast<LPCWSTR>(address), &owner) &&
+         GetModuleHandleExW(
+             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+             static_cast<LPCWSTR>(address), &owner) &&
          owner == module;
 }
 
@@ -111,7 +112,8 @@ LONG CALLBACK FailFastOnPdfiumFault(EXCEPTION_POINTERS* info) {
   const bool ours = IsInModule(g_pdfiumModule, record->ExceptionAddress) ||
                     IsInModule(g_module, record->ExceptionAddress);
   // 0xE0000008 is PDFium's out-of-memory exception, raised from kernelbase.
-  if (code == 0xE0000008 || (crash && ours)) RaiseFailFastException(info->ExceptionRecord, info->ContextRecord, 0);
+  if (code == 0xE0000008 || (crash && ours))
+    RaiseFailFastException(info->ExceptionRecord, info->ContextRecord, 0);
   return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -173,12 +175,14 @@ bool IsAboveMediumIntegrity() {
   static const bool above = [] {
     HANDLE token = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return true;
-    alignas(TOKEN_MANDATORY_LABEL) BYTE buffer[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
+    alignas(TOKEN_MANDATORY_LABEL)
+        BYTE buffer[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
     DWORD size = 0;
     bool result = true;
     if (GetTokenInformation(token, TokenIntegrityLevel, buffer, sizeof(buffer), &size)) {
       PSID sid = reinterpret_cast<TOKEN_MANDATORY_LABEL*>(buffer)->Label.Sid;
-      result = *GetSidSubAuthority(sid, *GetSidSubAuthorityCount(sid) - 1) > SECURITY_MANDATORY_MEDIUM_RID;
+      result = *GetSidSubAuthority(sid, *GetSidSubAuthorityCount(sid) - 1) >
+               SECURITY_MANDATORY_MEDIUM_RID;
     }
     CloseHandle(token);
     return result;
@@ -239,7 +243,8 @@ class FileBuffer {
       ULONG chunk = left < (1u << 20) ? static_cast<ULONG>(left) : (1u << 20);
       ULONG read = 0;
       // Fails if the file shrank, or Explorer let go of it for another program.
-      if (FAILED(stream->Read(data_ + size_, chunk, &read)) || read == 0) return WTS_E_FAILEDEXTRACTION;
+      if (FAILED(stream->Read(data_ + size_, chunk, &read)) || read == 0)
+        return WTS_E_FAILEDEXTRACTION;
       size_ += read;
     }
     return S_OK;
@@ -349,7 +354,8 @@ HRESULT RenderFirstPage(const FileBuffer& file, UINT edge, int zoom, ULONGLONG d
         hr = WTS_E_EXTRACTIONTIMEDOUT;
       } else {
         if (form) p.FormOnAfterLoadPage(page, form);
-        hr = expired() ? WTS_E_EXTRACTIONTIMEDOUT : RenderPage(page, form, size, edge, zoom, deadline, result);
+        hr = expired() ? WTS_E_EXTRACTIONTIMEDOUT
+                       : RenderPage(page, form, size, edge, zoom, deadline, result);
         if (form) p.FormOnBeforeClosePage(page, form);
       }
       p.ClosePage(page);
@@ -404,7 +410,8 @@ class PdfThumbnailProvider final : public IInitializeWithStream, public IThumbna
     if (!stream_) return E_UNEXPECTED;
     if (cx == 0) return E_INVALIDARG;
     if (IsAboveMediumIntegrity()) return WTS_E_FAILEDEXTRACTION;
-    if (!InitOnceExecuteOnce(&g_pdfiumOnce, LoadPdfium, nullptr, nullptr)) return WTS_E_FAILEDEXTRACTION;
+    if (!InitOnceExecuteOnce(&g_pdfiumOnce, LoadPdfium, nullptr, nullptr))
+      return WTS_E_FAILEDEXTRACTION;
 
     const ULONGLONG start = GetTickCount64();
     // Read the file before taking the PDFium lock, so no COM call (which may
@@ -414,8 +421,8 @@ class PdfThumbnailProvider final : public IInitializeWithStream, public IThumbna
     if (FAILED(hr)) return hr;
     const int zoom = ReadZoomPercent();
     if (!AcquirePdfiumLock(start + kLockWaitMs)) return WTS_E_EXTRACTIONTIMEDOUT;
-    hr = RenderFirstPage(file, cx < kMaxEdge ? cx : kMaxEdge, zoom, GetTickCount64() + kRenderBudgetMs,
-                         bitmap);
+    hr = RenderFirstPage(file, cx < kMaxEdge ? cx : kMaxEdge, zoom,
+                         GetTickCount64() + kRenderBudgetMs, bitmap);
     ReleasePdfiumLock();
     if (SUCCEEDED(hr)) *alpha = WTSAT_RGB;
     return hr;
