@@ -18,7 +18,8 @@
 # CI builds ARM64 on an x64 host and runs the ARM64 bundle on an ARM64 runner. The bundle's
 # CTestTestfile.cmake is generated at the end of this file from the registrations below, with
 # paths relative to the bundle: register program tests with pdft_add_program_test() so both
-# lists stay the same.
+# lists stay the same. A cross build (CMAKE_CROSSCOMPILING, the arm64 presets) cannot run its
+# programs, so its build tree registers only the gates; its bundle still gets every test.
 
 pdft_add_googletest()
 set(PDFT_GTEST_DIR "${PDFT_GTEST_DIR}" PARENT_SCOPE)   # for Install.cmake (its LICENSE)
@@ -47,11 +48,14 @@ function(pdft_bundle_test name)
 endfunction()
 
 # pdft_add_program_test(<name> <target> [<property> <value>...])
-# A test that runs <target>'s program with no arguments, in the build tree and in the bundle.
+# A test that runs <target>'s program with no arguments, in the build tree (native builds only)
+# and in the bundle.
 function(pdft_add_program_test name target)
-  add_test(NAME ${name} COMMAND ${target})
-  if(ARGN)
-    set_tests_properties(${name} PROPERTIES ${ARGN})
+  if(NOT CMAKE_CROSSCOMPILING)
+    add_test(NAME ${name} COMMAND ${target})
+    if(ARGN)
+      set_tests_properties(${name} PROPERTIES ${ARGN})
+    endif()
   endif()
   pdft_bundle_test(${name}
     COMMAND "./$<TARGET_FILE_NAME:${target}>"
@@ -70,12 +74,14 @@ add_dependencies(pdft_unit_tests pdft_run_medium)   # RunMediumTool tests
 pdft_add_program_test(unit.tests pdft_unit_tests LABELS unit)
 
 if(TARGET thumbtest)
-  add_test(NAME unit.samples
-    COMMAND "${CMAKE_COMMAND}" "-DTHUMBTEST=$<TARGET_FILE:thumbtest>"
-            "-DCOMMITTED_DIR=${PROJECT_SOURCE_DIR}/src/app/res"
-            "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/samples"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/CheckSamples.cmake")
-  set_tests_properties(unit.samples PROPERTIES LABELS unit)
+  if(NOT CMAKE_CROSSCOMPILING)   # it runs thumbtest
+    add_test(NAME unit.samples
+      COMMAND "${CMAKE_COMMAND}" "-DTHUMBTEST=$<TARGET_FILE:thumbtest>"
+              "-DCOMMITTED_DIR=${PROJECT_SOURCE_DIR}/src/app/res"
+              "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/samples"
+              -P "${CMAKE_CURRENT_SOURCE_DIR}/CheckSamples.cmake")
+    set_tests_properties(unit.samples PROPERTIES LABELS unit)
+  endif()
   # No CMAKE_COMMAND in a bundle either: it runs the cmake on PATH.
   pdft_bundle_test(unit.samples
     COMMAND cmake "-DTHUMBTEST=./$<TARGET_FILE_NAME:thumbtest>" -DCOMMITTED_DIR=samples
