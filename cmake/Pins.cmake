@@ -16,6 +16,11 @@ set(PDFT_PDFIUM_arm64_URL        "${_pdft_pdfium_release}/pdfium-win-arm64.tgz")
 set(PDFT_PDFIUM_arm64_SHA256     "d394ba61991fb53f4d87f70988035f337d9e73f2bd2c3c1b966df8c43fcabb05")
 set(PDFT_PDFIUM_arm64_DLL_SHA256 "61b3500520d2f7ec2f8074851ba941b1470e85b8849e6efe5966ef2ce676c1f3")
 
+# Who must have built the archives (GitHub artifact attestations; checked by
+# cmake/FetchPdfium.cmake -DVERIFY_ATTESTATION=ON, which CI runs on a download-cache miss).
+set(PDFT_PDFIUM_ATTESTATION_REPO     "bblanchon/pdfium-binaries")
+set(PDFT_PDFIUM_ATTESTATION_WORKFLOW "bblanchon/pdfium-binaries/.github/workflows/build-all.yml")
+
 unset(_pdft_pdfium_release)
 
 # ---- GoogleTest v1.18.0 (tests only; used from WP3) ---------------------------------------
