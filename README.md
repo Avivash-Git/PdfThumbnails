@@ -89,7 +89,7 @@ Results go to `repair.log`. To turn the task off, run `repair -NoAutoRepair`.
 
 ## Build from source
 
-Needs Visual Studio 2022 or 2026 (the Build Tools are enough) with the components listed in `.vsconfig`.
+Needs Visual Studio 2022 or 2026 (the Build Tools are enough) with the components listed in `.vsconfig`. [docs/BUILDING.md](docs/BUILDING.md) has the details: presets, options, tests, staging and CI.
 
 ```
 scripts\build.cmd x64-release
