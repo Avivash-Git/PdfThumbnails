@@ -1,0 +1,52 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 960 540]  /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<<  /Length 689 >>
+stream
+0.97 g 0 0 960 540 re f
+0.13 0.36 0.66 rg 0 0 24 540 re f
+0.15 g BT /F1 44 Tf 72 448 Td (Sample Slide) Tj ET
+0.95 0.55 0.15 rg 72 426 180 6 re f
+0.13 0.36 0.66 rg 72 366 12 12 re f
+0.72 g 100 366 320 12 re f
+0.13 0.36 0.66 rg 72 318 12 12 re f
+0.72 g 100 318 280 12 re f
+0.13 0.36 0.66 rg 72 270 12 12 re f
+0.72 g 100 270 340 12 re f
+0.13 0.36 0.66 rg 72 222 12 12 re f
+0.72 g 100 222 240 12 re f
+1 g 520 120 380 260 re f
+0.85 G 1 w 520 120 380 260 re S
+0.13 0.36 0.66 rg 560 140 50 120 re f
+0.95 0.55 0.15 rg 640 140 50 190 re f
+0.20 0.62 0.35 rg 720 140 50 80 re f
+0.80 0.25 0.25 rg 800 140 50 150 re f
+0.4 G 1 w 540 140 m 880 140 l S
+0.7 G 1 w 72 60 m 888 60 l S
+0.6 g 864 34 24 10 re f
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000242 00000 n 
+0000000983 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1058
+%%EOF

@@ -13,6 +13,13 @@
 //       Asks the shell for the thumbnail Explorer would show (may be cached).
 //   thumbtest stress <PdfThumbnails.dll> <size> <threads> <rounds> <file.pdf|dir>...
 //       Renders the files concurrently from several threads.
+//   thumbtest makepdfs <dir>
+//       Writes the 18 synthetic test PDFs (edge cases, including files that must fail).
+//   thumbtest makesamples <dir>
+//       Writes the settings app's two preview samples (sample-document.pdf, sample-slide.pdf).
+//   thumbtest compare [--tolerance <n>] <a.png|dir> <b.png|dir>
+//       Compares decoded pixels of two PNGs, or of the same-named PNGs in two folders; a
+//       channel may differ by up to <n> (default 0). Exit 0 when all match.
 //
 // A directory stands for the *.pdf files directly inside it, in name order.
 // Prints one line per file: OK/FAIL, bitmap size, share of non-white pixels,
@@ -30,12 +37,16 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cwchar>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include "test_pdfs.h"
 
 namespace {
 
@@ -63,6 +74,8 @@ constexpr GUID kPixel32bppBgr = {
     0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x0e}};
 constexpr GUID kPixel24bppBgr = {
     0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x0c}};
+constexpr GUID kPixel32bppBgra = {
+    0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x0f}};
 
 // Minimal owning COM pointer.
 template <typename T>
@@ -402,6 +415,155 @@ int RunStress(const wchar_t* dllPath, UINT size, int threads, int rounds,
   return bad ? 1 : 0;
 }
 
+// makepdfs / makesamples: writes |files| into |dir| (created if needed) and lists them.
+int RunMake(const wchar_t* dir, const std::vector<pdft::test::GeneratedFile>& files) {
+  wchar_t full[MAX_PATH];
+  const DWORD length = GetFullPathNameW(dir, MAX_PATH, full, nullptr);
+  if (length == 0 || length >= MAX_PATH) {
+    std::printf("bad directory %s\n", Utf8(dir).c_str());
+    return 2;
+  }
+  const int created = SHCreateDirectoryExW(nullptr, full, nullptr);
+  if (created != ERROR_SUCCESS && created != ERROR_ALREADY_EXISTS && created != ERROR_FILE_EXISTS) {
+    std::printf("cannot create %s (error %d)\n", Utf8(full).c_str(), created);
+    return 2;
+  }
+  std::wstring error;
+  if (!pdft::test::WriteFiles(full, files, &error)) {
+    std::printf("%s\n", Utf8(error).c_str());
+    return 2;
+  }
+  for (const auto& file : files) {
+    std::printf("%10zu  %s\n", file.bytes.size(), Utf8(file.name).c_str());
+  }
+  return 0;
+}
+
+// Decodes a PNG (any format WIC reads) into top-down 32bpp BGRA.
+HRESULT LoadImagePixels(IWICImagingFactory* factory, const std::wstring& path,
+                        std::vector<DWORD>* pixels, UINT* width, UINT* height) {
+  Com<IWICBitmapDecoder> decoder;
+  HRESULT hr = factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                                                  WICDecodeMetadataCacheOnDemand, &decoder.p);
+  Com<IWICBitmapFrameDecode> frame;
+  if (SUCCEEDED(hr)) hr = decoder->GetFrame(0, &frame.p);
+  Com<IWICFormatConverter> converter;
+  if (SUCCEEDED(hr)) hr = factory->CreateFormatConverter(&converter.p);
+  if (SUCCEEDED(hr)) {
+    hr = converter->Initialize(frame.p, kPixel32bppBgra, WICBitmapDitherTypeNone, nullptr, 0,
+                               WICBitmapPaletteTypeCustom);
+  }
+  if (SUCCEEDED(hr)) hr = converter->GetSize(width, height);
+  if (SUCCEEDED(hr)) {
+    pixels->assign(static_cast<size_t>(*width) * *height, 0);
+    hr = converter->CopyPixels(nullptr, *width * 4, static_cast<UINT>(pixels->size() * 4),
+                               reinterpret_cast<BYTE*>(pixels->data()));
+  }
+  return hr;
+}
+
+// One pair of images: prints a line, returns 0 (same), 1 (different) or 2 (unreadable).
+int CompareImages(IWICImagingFactory* factory, const std::wstring& a, const std::wstring& b,
+                  const std::string& label, int tolerance) {
+  std::vector<DWORD> pa, pb;
+  UINT wa = 0, ha = 0, wb = 0, hb = 0;
+  HRESULT hr = LoadImagePixels(factory, a, &pa, &wa, &ha);
+  const std::wstring* bad = &a;
+  if (SUCCEEDED(hr)) {
+    hr = LoadImagePixels(factory, b, &pb, &wb, &hb);
+    bad = &b;
+  }
+  if (FAILED(hr)) {
+    std::printf("ERROR    %s  cannot read %s: 0x%08lX\n", label.c_str(), Utf8(*bad).c_str(),
+                static_cast<unsigned long>(hr));
+    return 2;
+  }
+  if (wa != wb || ha != hb) {
+    std::printf("SIZE     %s  %ux%u vs %ux%u\n", label.c_str(), wa, ha, wb, hb);
+    return 1;
+  }
+  size_t differing = 0;
+  int maxDelta = 0;
+  for (size_t i = 0; i < pa.size(); ++i) {
+    int delta = 0;
+    for (int shift = 0; shift < 32; shift += 8) {
+      const int ca = static_cast<int>((pa[i] >> shift) & 0xFF);
+      const int cb = static_cast<int>((pb[i] >> shift) & 0xFF);
+      delta = std::max(delta, std::abs(ca - cb));
+    }
+    maxDelta = std::max(maxDelta, delta);
+    if (delta > tolerance) ++differing;
+  }
+  if (differing) {
+    std::printf("DIFF     %s  %zu of %zu pixels differ (max channel delta %d)\n", label.c_str(),
+                differing, pa.size(), maxDelta);
+    return 1;
+  }
+  std::printf("same     %s  %ux%u%s\n", label.c_str(), wa, ha,
+              maxDelta ? " (within tolerance)" : "");
+  return 0;
+}
+
+// The *.png file names directly inside |dir|.
+std::set<std::wstring> PngNames(const std::wstring& dir) {
+  std::set<std::wstring> names;
+  WIN32_FIND_DATAW data;
+  HANDLE find = FindFirstFileExW((dir + L"\\*.png").c_str(), FindExInfoBasic, &data,
+                                 FindExSearchNameMatch, nullptr, 0);
+  if (find == INVALID_HANDLE_VALUE) return names;
+  do {
+    if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+        CompareStringOrdinal(PathFindExtensionW(data.cFileName), -1, L".png", -1, TRUE) ==
+            CSTR_EQUAL) {
+      names.insert(data.cFileName);
+    }
+  } while (FindNextFileW(find, &data));
+  FindClose(find);
+  return names;
+}
+
+int RunCompare(const std::wstring& a, const std::wstring& b, int tolerance) {
+  Com<IWICImagingFactory> factory;
+  HRESULT hr = CoCreateInstance(kClsidWicImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                kIidWicImagingFactory, factory.out());
+  if (FAILED(hr)) {
+    std::printf("cannot create WIC: 0x%08lX\n", static_cast<unsigned long>(hr));
+    return 2;
+  }
+  const DWORD attrA = GetFileAttributesW(a.c_str());
+  const DWORD attrB = GetFileAttributesW(b.c_str());
+  if (attrA == INVALID_FILE_ATTRIBUTES || attrB == INVALID_FILE_ATTRIBUTES ||
+      (attrA & FILE_ATTRIBUTE_DIRECTORY) != (attrB & FILE_ATTRIBUTE_DIRECTORY)) {
+    std::printf("compare needs two existing files or two existing directories\n");
+    return 2;
+  }
+  if (!(attrA & FILE_ATTRIBUTE_DIRECTORY)) {
+    return CompareImages(factory.p, a, b, Utf8(PathFindFileNameW(a.c_str())), tolerance);
+  }
+  const std::set<std::wstring> namesA = PngNames(a), namesB = PngNames(b);
+  std::set<std::wstring> all = namesA;
+  all.insert(namesB.begin(), namesB.end());
+  if (all.empty()) {
+    std::printf("no .png files in %s or %s\n", Utf8(a).c_str(), Utf8(b).c_str());
+    return 2;
+  }
+  int worst = 0, same = 0;
+  for (const auto& name : all) {
+    if (!namesA.count(name) || !namesB.count(name)) {
+      std::printf("MISSING  %s  only in %s\n", Utf8(name).c_str(),
+                  Utf8(namesA.count(name) ? a : b).c_str());
+      worst = std::max(worst, 1);
+      continue;
+    }
+    const int result =
+        CompareImages(factory.p, a + L"\\" + name, b + L"\\" + name, Utf8(name), tolerance);
+    if (result == 0) ++same;
+    worst = std::max(worst, result);
+  }
+  std::printf("%d of %zu images match\n", same, all.size());
+  return worst;
+}
+
 int Usage() {
   std::printf(
       "usage:\n"
@@ -409,6 +571,9 @@ int Usage() {
       "  thumbtest cache|cachenew|cacheinproc <size> <outdir|-> <file.pdf|dir>...\n"
       "  thumbtest shell <size> <outdir|-> <file.pdf|dir>...\n"
       "  thumbtest stress <PdfThumbnails.dll> <size> <threads> <rounds> <file.pdf|dir>...\n"
+      "  thumbtest makepdfs <dir>\n"
+      "  thumbtest makesamples <dir>\n"
+      "  thumbtest compare [--tolerance <n>] <a.png|dir> <b.png|dir>\n"
       "A directory stands for the *.pdf files directly inside it, in name order.\n");
   return 2;
 }
@@ -418,6 +583,25 @@ int Usage() {
 int wmain(int argc, wchar_t** argv) {
   if (argc < 2) return Usage();
   const std::wstring mode = argv[1];
+  if (mode == L"makepdfs" || mode == L"makesamples") {
+    if (argc != 3) return Usage();
+    return RunMake(argv[2],
+                   mode == L"makepdfs" ? pdft::test::MakeTestPdfs() : pdft::test::MakeSamplePdfs());
+  }
+  if (mode == L"compare") {
+    int i = 2, tolerance = 0;
+    if (argc > i + 1 && std::wstring(argv[i]) == L"--tolerance") {
+      wchar_t* end = nullptr;
+      tolerance = static_cast<int>(std::wcstol(argv[i + 1], &end, 10));
+      if (!end || *end != L'\0' || tolerance < 0 || tolerance > 255) return Usage();
+      i += 2;
+    }
+    if (argc != i + 2) return Usage();
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const int result = RunCompare(argv[i], argv[i + 1], tolerance);
+    CoUninitialize();
+    return result;
+  }
   // Each mode's first file argument; at least one file or directory must follow.
   const bool cacheMode = mode == L"cache" || mode == L"cachenew" || mode == L"cacheinproc";
   const int first = mode == L"direct"                 ? 5

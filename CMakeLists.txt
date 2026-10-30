@@ -43,6 +43,7 @@ pdft_generate_project_config()
 
 add_subdirectory(src/handler)
 if(PDFT_BUILD_TOOLS)
+  add_subdirectory(tests/support)   # the test-PDF generator
   add_subdirectory(tools/thumbtest)
 endif()
 
