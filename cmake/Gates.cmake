@@ -1,0 +1,111 @@
+# Gates: static checks of what we ship, as CTest tests with the label "gate" (run with
+# `ctest --preset <preset> -L gate`). They never execute the built binaries, so cross-compiled
+# ARM64 builds run them on the x64 host too. Every gate inspects a fresh
+# `cmake --install --component runtime` (fixture gate.stage, in <build>/gate-stage) with
+# dumpbin and `cmake -P` scripts from cmake/gates.
+#
+#   gate.stage                 fixture: stages the runtime component
+#   gate.<bin>.exports         exact export list (handler: DllCanUnloadNow, DllGetClassObject)
+#   gate.imports.<bin>         imports on an allow list; no CRT DLLs; delay-loads only if listed
+#   gate.hardening.<bin>       CFG, CET (x64), EH continuation (x64), NX, ASLR, dependent load
+#                              flag 0x800, PDB name only, no build-machine paths
+#   gate.version.<bin>         FileVersion = project version, OriginalFilename = file name
+#   gate.pdfium.pe             PDFium's own (shorter) hardening profile
+#   gate.pdfium.binds          src/handler/pdfium_functions.inc has 18 entries, all exported
+#   gate.pdfium.hash           the staged PDFium DLL is the pinned one
+#   gate.licenses              every license and notice is staged and named in the notices
+#   gate.buildid               cmake/BuildId.cmake: fixed vector + the staged DLLs
+#
+# Our own binaries register through pdft_add_binary_gates(); the settings exes (WP6) add theirs
+# the same way.
+
+include_guard(GLOBAL)
+
+# dumpbin from the same toolset as the linker. Hostx64\arm64\dumpbin.exe reads ARM64 and x64
+# images alike.
+cmake_path(GET CMAKE_LINKER PARENT_PATH _pdft_linker_dir)
+find_program(PDFT_DUMPBIN NAMES dumpbin HINTS "${_pdft_linker_dir}" NO_DEFAULT_PATH)
+find_program(PDFT_DUMPBIN NAMES dumpbin)
+unset(_pdft_linker_dir)
+if(NOT PDFT_DUMPBIN)
+  message(FATAL_ERROR "dumpbin.exe not found next to ${CMAKE_LINKER}: the gates need it")
+endif()
+
+set(PDFT_GATE_SCRIPTS "${PROJECT_SOURCE_DIR}/cmake/gates")
+set(PDFT_GATE_STAGE "${CMAKE_BINARY_DIR}/gate-stage")
+# Text that must never appear in a shipped binary: this checkout, this build tree, and any
+# user profile path.
+set(PDFT_GATE_FORBIDDEN_PATHS "${PROJECT_SOURCE_DIR}|${CMAKE_BINARY_DIR}|/Users/")
+
+add_test(NAME gate.stage
+  COMMAND "${CMAKE_COMMAND}" "-DBUILD_DIR=${CMAKE_BINARY_DIR}" "-DSTAGE_DIR=${PDFT_GATE_STAGE}"
+          "-DCONFIG=$<CONFIG>" -DCOMPONENT=runtime -P "${PDFT_GATE_SCRIPTS}/Stage.cmake")
+set_tests_properties(gate.stage PROPERTIES LABELS gate FIXTURES_SETUP gate.stage)
+
+# pdft_add_gate(<test name> <script> [-D<var>=<value>]...): one gate test on the staged tree.
+function(pdft_add_gate name script)
+  add_test(NAME ${name}
+    COMMAND "${CMAKE_COMMAND}" "-DDUMPBIN=${PDFT_DUMPBIN}" ${ARGN} -P "${PDFT_GATE_SCRIPTS}/${script}")
+  set_tests_properties(${name} PROPERTIES
+    LABELS gate
+    ENVIRONMENT VSLANG=1033
+    FIXTURES_REQUIRED gate.stage)
+endfunction()
+
+# pdft_add_binary_gates(<short name> <target> IMPORTS <dll>... [DELAY_IMPORTS <dll>...]
+#                       [EXPORTS <name>...])
+# The gates for one of our own staged binaries. Import names compare case-insensitively; a
+# trailing * matches any rest. Without EXPORTS the export list is not checked.
+function(pdft_add_binary_gates short target)
+  cmake_parse_arguments(PARSE_ARGV 2 arg "" "" "IMPORTS;DELAY_IMPORTS;EXPORTS")
+  if(NOT arg_IMPORTS)
+    message(FATAL_ERROR "pdft_add_binary_gates(${short}): IMPORTS is required")
+  endif()
+  set(file "${PDFT_GATE_STAGE}/$<TARGET_FILE_NAME:${target}>")
+  list(JOIN arg_IMPORTS "," allow)
+  list(JOIN arg_DELAY_IMPORTS "," delay_allow)
+  pdft_add_gate(gate.imports.${short} CheckImports.cmake
+    "-DFILE=${file}" "-DALLOW=${allow}" "-DDELAY_ALLOW=${delay_allow}")
+  pdft_add_gate(gate.hardening.${short} CheckHardening.cmake
+    "-DFILE=${file}" -DPROFILE=own "-DARCH=${PDFT_ARCH}" "-DMACHINE=${PDFT_PE_MACHINE}"
+    "-DFORBIDDEN=${PDFT_GATE_FORBIDDEN_PATHS}")
+  pdft_add_gate(gate.version.${short} CheckVersion.cmake
+    "-DFILE=${file}" "-DVERSION=${PROJECT_VERSION}")
+  if(arg_EXPORTS)
+    list(JOIN arg_EXPORTS "," exports)
+    pdft_add_gate(gate.${short}.exports CheckExports.cmake "-DFILE=${file}" "-DEXPECTED=${exports}")
+  endif()
+endfunction()
+
+# ---- the handler ----------------------------------------------------------------------------
+pdft_add_binary_gates(handler pdft_handler
+  EXPORTS DllCanUnloadNow DllGetClassObject
+  IMPORTS KERNEL32.dll ADVAPI32.dll OLE32.dll SHELL32.dll GDI32.dll)
+
+# ---- PDFium (third-party binary, shipped under our private name) ----------------------------
+set(_pdft_pdfium "${PDFT_GATE_STAGE}/${PDFT_PDFIUM_DLL}")
+pdft_add_gate(gate.imports.pdfium CheckImports.cmake
+  "-DFILE=${_pdft_pdfium}" "-DALLOW=KERNEL32.dll,ADVAPI32.dll,GDI32.dll,USER32.dll")
+pdft_add_gate(gate.pdfium.pe CheckHardening.cmake
+  "-DFILE=${_pdft_pdfium}" -DPROFILE=pdfium "-DARCH=${PDFT_ARCH}" "-DMACHINE=${PDFT_PE_MACHINE}")
+pdft_add_gate(gate.pdfium.hash CheckPdfiumHash.cmake
+  "-DFILE=${_pdft_pdfium}" "-DEXPECTED=${PDFT_PDFIUM_${PDFT_ARCH}_DLL_SHA256}")
+# The count is deliberate: a change to the bound functions must change it too.
+pdft_add_gate(gate.pdfium.binds CheckBinds.cmake
+  "-DLIST=${PROJECT_SOURCE_DIR}/src/handler/pdfium_functions.inc" -DCOUNT=18 "-DFILE=${_pdft_pdfium}")
+
+# ---- the package as a whole -----------------------------------------------------------------
+set(_pdft_wil_license "")
+if(DEFINED PDFT_WIL_DIR)
+  set(_pdft_wil_license "-DWIL_LICENSE=${PDFT_WIL_DIR}/LICENSE")
+endif()
+pdft_add_gate(gate.licenses CheckLicenses.cmake
+  "-DSTAGE_DIR=${PDFT_GATE_STAGE}" "-DPDFIUM_DIR=${PDFT_PDFIUM_DIR}"
+  "-DPROJECT_LICENSE=${PROJECT_SOURCE_DIR}/LICENSE"
+  "-DNOTICES=${PROJECT_SOURCE_DIR}/THIRD-PARTY-NOTICES.md" ${_pdft_wil_license})
+pdft_add_gate(gate.buildid CheckBuildId.cmake
+  "-DSCRIPT=${PROJECT_SOURCE_DIR}/cmake/BuildId.cmake" "-DWORK_DIR=${CMAKE_BINARY_DIR}/gate-buildid"
+  "-DDLL=${PDFT_GATE_STAGE}/$<TARGET_FILE_NAME:pdft_handler>"
+  "-DPDFIUM=${_pdft_pdfium}" "-DVERSION=${PROJECT_VERSION}")
+unset(_pdft_pdfium)
+unset(_pdft_wil_license)

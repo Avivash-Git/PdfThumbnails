@@ -43,16 +43,16 @@
     {
       "name": "ci-x64",
       "displayName": "CI x64 Release",
-      "description": "What CI builds: Release with the Spectre-mitigated runtime required.",
+      "description": "What CI builds: Release, Spectre-mitigated runtime required, deterministic output.",
       "inherits": [ "base", "x64", "release" ],
-      "cacheVariables": { "PDFT_SPECTRE": "ON" }
+      "cacheVariables": { "PDFT_SPECTRE": "ON", "PDFT_REPRODUCIBLE": "ON" }
     },
     {
       "name": "ci-arm64",
       "displayName": "CI ARM64 Release",
-      "description": "What CI builds: Release with the Spectre-mitigated runtime required.",
+      "description": "What CI builds: Release, Spectre-mitigated runtime required, deterministic output.",
       "inherits": [ "base", "arm64", "release" ],
-      "cacheVariables": { "PDFT_SPECTRE": "ON" }
+      "cacheVariables": { "PDFT_SPECTRE": "ON", "PDFT_REPRODUCIBLE": "ON" }
     }
   ],
   "buildPresets": [
@@ -93,35 +93,40 @@
       "name": "x64-debug",
       "steps": [
         { "type": "configure", "name": "x64-debug" },
-        { "type": "build", "name": "x64-debug" }
+        { "type": "build", "name": "x64-debug" },
+        { "type": "test", "name": "x64-debug" }
       ]
     },
     {
       "name": "x64-release",
       "steps": [
         { "type": "configure", "name": "x64-release" },
-        { "type": "build", "name": "x64-release" }
+        { "type": "build", "name": "x64-release" },
+        { "type": "test", "name": "x64-release" }
       ]
     },
     {
       "name": "arm64-release",
       "steps": [
         { "type": "configure", "name": "arm64-release" },
-        { "type": "build", "name": "arm64-release" }
+        { "type": "build", "name": "arm64-release" },
+        { "type": "test", "name": "arm64-release" }
       ]
     },
     {
       "name": "ci-x64",
       "steps": [
         { "type": "configure", "name": "ci-x64" },
-        { "type": "build", "name": "ci-x64" }
+        { "type": "build", "name": "ci-x64" },
+        { "type": "test", "name": "ci-x64" }
       ]
     },
     {
       "name": "ci-arm64",
       "steps": [
         { "type": "configure", "name": "ci-arm64" },
-        { "type": "build", "name": "ci-arm64" }
+        { "type": "build", "name": "ci-arm64" },
+        { "type": "test", "name": "ci-arm64" }
       ]
     }
   ]
