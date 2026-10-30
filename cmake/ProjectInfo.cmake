@@ -38,6 +38,8 @@ set(PDFT_LEGACY_ROOT_NAME      "PdfThumbnails")   # %LOCALAPPDATA%\Programs\...,
 set(PDFT_LEGACY_TASK           "\\PdfThumbnails auto-repair")
 set(PDFT_LEGACY_RUNONCE        "PdfThumbnailsCleanup")
 set(PDFT_LEGACY_SETTINGS_ENV   "PDFTHUMBNAILS_SETTINGS")
+# Appended to FOLDERID_LocalAppData: the 1.x settings file ([Thumbnails] Zoom=<percent>).
+set(PDFT_LEGACY_SETTINGS_INI   "\\Programs\\${PDFT_LEGACY_ROOT_NAME}\\settings.ini")
 
 # ---- Detection only (never part of a product name) --------------------------------------
 set(PDFT_PDFCRAFT_PRODUCT_NAME "PdfCraft")
@@ -45,6 +47,10 @@ set(PDFT_PDFCRAFT_UPGRADE_CODE "{EA00C367-7270-4C50-9D8B-A7A5C88AD27F}")
 set(PDFT_PDFCRAFT_SUBSCRIPTION "<QueryList><Query Id=\"0\" Path=\"Application\"><Select Path=\"Application\">*[System[Provider[@Name='MsiInstaller'] and EventID=1033] and EventData[Data='PdfCraft']]</Select></Query></QueryList>")
 set(PDFT_THUMB_SLOT_IID        "{e357fccd-a995-4576-b01f-234630154e96}")   # IThumbnailProvider
 set(PDFT_SURROGATE_APPID       "{AB8902B4-09CA-4BB6-B78D-A8F59079A8D5}")
+
+# ---- Windows constants (spelled out, so no target depends on uuid.lib/shell32 knowing them) -
+set(PDFT_IID_INITIALIZE_WITH_STREAM "{B824B49D-22AC-4161-AC8A-9916E8FA3F7F}")
+set(PDFT_FOLDERID_LOCAL_APPDATA     "{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}")
 
 # ---- Generated files --------------------------------------------------------------------
 set(PDFT_TEMPLATE_DIR "${CMAKE_CURRENT_LIST_DIR}/templates")
@@ -93,13 +99,14 @@ function(pdft_generate_project_config)
   foreach(name IN ITEMS PRODUCT_NAME DESCRIPTION COPYRIGHT HANDLER_CLSID HANDLER_CLASS_NAME
                         HANDLER_DLL PDFIUM_DLL SETTINGS_EXE CLI_EXE REG_KEY TASK_FOLDER
                         TASK_PREFIX OBJECT_PREFIX INNO_APPID AUMID LEGACY_ROOT_NAME LEGACY_TASK
-                        LEGACY_RUNONCE LEGACY_SETTINGS_ENV PDFCRAFT_PRODUCT_NAME
-                        PDFCRAFT_UPGRADE_CODE PDFCRAFT_SUBSCRIPTION THUMB_SLOT_IID
-                        SURROGATE_APPID)
+                        LEGACY_RUNONCE LEGACY_SETTINGS_ENV LEGACY_SETTINGS_INI
+                        PDFCRAFT_PRODUCT_NAME PDFCRAFT_UPGRADE_CODE PDFCRAFT_SUBSCRIPTION
+                        THUMB_SLOT_IID SURROGATE_APPID)
     pdft_c_string(PDFT_C_${name} "${PDFT_${name}}")
   endforeach()
   pdft_c_string(PDFT_C_PRODUCT_VERSION "${PROJECT_VERSION}${PDFT_VERSION_SUFFIX}")
-  foreach(name IN ITEMS HANDLER_CLSID THUMB_SLOT_IID SURROGATE_APPID PDFCRAFT_UPGRADE_CODE)
+  foreach(name IN ITEMS HANDLER_CLSID THUMB_SLOT_IID SURROGATE_APPID PDFCRAFT_UPGRADE_CODE
+                        IID_INITIALIZE_WITH_STREAM FOLDERID_LOCAL_APPDATA)
     pdft_guid_initializer(PDFT_GUID_${name} "${PDFT_${name}}")
   endforeach()
   set(dir "${CMAKE_BINARY_DIR}/generated")

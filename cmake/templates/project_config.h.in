@@ -38,6 +38,8 @@ inline constexpr wchar_t kLegacyRootName[] = L"@PDFT_C_LEGACY_ROOT_NAME@";
 inline constexpr wchar_t kLegacyTask[] = L"@PDFT_C_LEGACY_TASK@";
 inline constexpr wchar_t kLegacyRunOnce[] = L"@PDFT_C_LEGACY_RUNONCE@";
 inline constexpr wchar_t kLegacySettingsEnv[] = L"@PDFT_C_LEGACY_SETTINGS_ENV@";
+// Appended to FOLDERID_LocalAppData (starts with a backslash).
+inline constexpr wchar_t kLegacySettingsIni[] = L"@PDFT_C_LEGACY_SETTINGS_INI@";
 
 // ---- Detection only -----------------------------------------------------------------------
 inline constexpr wchar_t kPdfCraftProductName[] = L"@PDFT_C_PDFCRAFT_PRODUCT_NAME@";
@@ -48,5 +50,10 @@ inline constexpr wchar_t kThumbSlotIidString[] = L"@PDFT_C_THUMB_SLOT_IID@";
 inline constexpr GUID kThumbSlotIid = @PDFT_GUID_THUMB_SLOT_IID@;
 inline constexpr wchar_t kSurrogateAppIdString[] = L"@PDFT_C_SURROGATE_APPID@";
 inline constexpr GUID kSurrogateAppId = @PDFT_GUID_SURROGATE_APPID@;
+
+// ---- Windows constants (spelled out, so no target depends on uuid.lib knowing them) -------
+// IThumbnailProvider is kThumbSlotIid above.
+inline constexpr GUID kIidInitializeWithStream = @PDFT_GUID_IID_INITIALIZE_WITH_STREAM@;
+inline constexpr GUID kFolderIdLocalAppData = @PDFT_GUID_FOLDERID_LOCAL_APPDATA@;
 
 }  // namespace pdft

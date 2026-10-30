@@ -18,6 +18,7 @@
 #include "fpdf_formfill.h"
 #include "fpdf_progressive.h"
 #include "fpdfview.h"
+#include "project_config.h"
 
 #ifndef WTS_E_FAILEDEXTRACTION
 #define WTS_E_FAILEDEXTRACTION ((HRESULT)0x8004B200L)
@@ -28,22 +29,16 @@
 
 namespace {
 
-// {0C3534C4-5B7A-48AB-828D-1CD660DC447F}; must match $Clsid in PdfThumbnails.ps1.
-constexpr CLSID kClsidPdfThumbnails = {
-    0x0c3534c4, 0x5b7a, 0x48ab, {0x82, 0x8d, 0x1c, 0xd6, 0x60, 0xdc, 0x44, 0x7f}};
-
-// Spelled out so the build does not depend on libuuid knowing these IIDs.
-constexpr IID kIidThumbnailProvider = {
-    0xe357fccd, 0xa995, 0x4576, {0xb0, 0x1f, 0x23, 0x46, 0x30, 0x15, 0x4e, 0x96}};
-constexpr IID kIidInitializeWithStream = {
-    0xb824b49d, 0x22ac, 0x4161, {0xac, 0x8a, 0x99, 0x16, 0xe8, 0xfa, 0x3f, 0x7f}};
-// FOLDERID_LocalAppData.
-constexpr GUID kFolderIdLocalAppData = {
-    0xf1b32785, 0x6fba, 0x4fcf, {0x9d, 0x55, 0x7b, 0x8e, 0x7f, 0x15, 0x70, 0x91}};
+// Names and IDs come from cmake/ProjectInfo.cmake (project_config.h). The CLSID never
+// changes; the IIDs are spelled out there so the build does not depend on uuid.lib knowing them.
+constexpr CLSID kClsidPdfThumbnails = pdft::kHandlerClsid;
+constexpr IID kIidThumbnailProvider = pdft::kThumbSlotIid;
+constexpr IID kIidInitializeWithStream = pdft::kIidInitializeWithStream;
+constexpr GUID kFolderIdLocalAppData = pdft::kFolderIdLocalAppData;
 
 // Private name, so another extension's LoadLibrary("pdfium.dll") in the shared
 // thumbnail process can never bind to this copy, or this code to theirs.
-constexpr wchar_t kPdfiumDll[] = L"PdfThumbnails-pdfium.dll";
+using pdft::kPdfiumDll;
 // Explorer does not ask for more than 2560 px; cap it anyway.
 constexpr UINT kMaxEdge = 2560;
 // The whole file is read into memory first; bigger PDFs keep the plain icon.
@@ -64,25 +59,11 @@ LONG g_serverRefs = 0;  // live objects + IClassFactory::LockServer locks
 
 // ---- PDFium -----------------------------------------------------------------
 
+// One member per function in pdfium_functions.inc, named by its second argument.
 struct Pdfium {
-  decltype(&FPDF_InitLibraryWithConfig) InitLibraryWithConfig;
-  decltype(&FPDF_LoadMemDocument64) LoadMemDocument64;
-  decltype(&FPDF_CloseDocument) CloseDocument;
-  decltype(&FPDF_GetFormType) GetFormType;
-  decltype(&FPDF_GetPageCount) GetPageCount;
-  decltype(&FPDF_GetPageSizeByIndexF) GetPageSizeByIndexF;
-  decltype(&FPDF_LoadPage) LoadPage;
-  decltype(&FPDF_ClosePage) ClosePage;
-  decltype(&FPDFBitmap_CreateEx) BitmapCreateEx;
-  decltype(&FPDFBitmap_FillRect) BitmapFillRect;
-  decltype(&FPDFBitmap_Destroy) BitmapDestroy;
-  decltype(&FPDF_RenderPageBitmap_Start) RenderPageBitmapStart;
-  decltype(&FPDF_RenderPage_Close) RenderPageClose;
-  decltype(&FPDFDOC_InitFormFillEnvironment) InitFormFillEnvironment;
-  decltype(&FPDFDOC_ExitFormFillEnvironment) ExitFormFillEnvironment;
-  decltype(&FORM_OnAfterLoadPage) FormOnAfterLoadPage;
-  decltype(&FORM_OnBeforeClosePage) FormOnBeforeClosePage;
-  decltype(&FPDF_FFLDraw) FFLDraw;
+#define PDFT_FN(name, member) decltype(&name) member;
+#include "pdfium_functions.inc"
+#undef PDFT_FN
 };
 
 Pdfium g_pdfium;
@@ -96,6 +77,16 @@ template <typename Fn>
 bool Resolve(HMODULE dll, const char* name, Fn* fn) {
   *fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(dll, name)));
   return *fn != nullptr;
+}
+
+// Binds every function in pdfium_functions.inc, in list order; false at the first one
+// |dll| lacks.
+bool ResolveAll(HMODULE dll, Pdfium& p) {
+#define PDFT_FN(name, member) \
+  if (!Resolve(dll, #name, &p.member)) return false;
+#include "pdfium_functions.inc"
+#undef PDFT_FN
+  return true;
 }
 
 bool IsInModule(HMODULE module, const void* address) {
@@ -139,24 +130,7 @@ BOOL CALLBACK LoadPdfium(PINIT_ONCE, PVOID, PVOID*) {
                                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
   if (!dll) return FALSE;
   Pdfium& p = g_pdfium;
-  if (!Resolve(dll, "FPDF_InitLibraryWithConfig", &p.InitLibraryWithConfig) ||
-      !Resolve(dll, "FPDF_LoadMemDocument64", &p.LoadMemDocument64) ||
-      !Resolve(dll, "FPDF_CloseDocument", &p.CloseDocument) ||
-      !Resolve(dll, "FPDF_GetFormType", &p.GetFormType) ||
-      !Resolve(dll, "FPDF_GetPageCount", &p.GetPageCount) ||
-      !Resolve(dll, "FPDF_GetPageSizeByIndexF", &p.GetPageSizeByIndexF) ||
-      !Resolve(dll, "FPDF_LoadPage", &p.LoadPage) ||
-      !Resolve(dll, "FPDF_ClosePage", &p.ClosePage) ||
-      !Resolve(dll, "FPDFBitmap_CreateEx", &p.BitmapCreateEx) ||
-      !Resolve(dll, "FPDFBitmap_FillRect", &p.BitmapFillRect) ||
-      !Resolve(dll, "FPDFBitmap_Destroy", &p.BitmapDestroy) ||
-      !Resolve(dll, "FPDF_RenderPageBitmap_Start", &p.RenderPageBitmapStart) ||
-      !Resolve(dll, "FPDF_RenderPage_Close", &p.RenderPageClose) ||
-      !Resolve(dll, "FPDFDOC_InitFormFillEnvironment", &p.InitFormFillEnvironment) ||
-      !Resolve(dll, "FPDFDOC_ExitFormFillEnvironment", &p.ExitFormFillEnvironment) ||
-      !Resolve(dll, "FORM_OnAfterLoadPage", &p.FormOnAfterLoadPage) ||
-      !Resolve(dll, "FORM_OnBeforeClosePage", &p.FormOnBeforeClosePage) ||
-      !Resolve(dll, "FPDF_FFLDraw", &p.FFLDraw)) {
+  if (!ResolveAll(dll, p)) {
     FreeLibrary(dll);
     return FALSE;
   }
@@ -217,13 +191,13 @@ bool IsAboveMediumIntegrity() {
 // (100, the default, shows the whole page). PDFTHUMBNAILS_SETTINGS can name another
 // file, which the tests use.
 int ReadZoomPercent() {
-  static const wchar_t kSettings[] = L"\\Programs\\PdfThumbnails\\settings.ini";
   wchar_t path[MAX_PATH];
-  DWORD length = GetEnvironmentVariableW(L"PDFTHUMBNAILS_SETTINGS", path, MAX_PATH);
+  DWORD length = GetEnvironmentVariableW(pdft::kLegacySettingsEnv, path, MAX_PATH);
   if (length == 0 || length >= MAX_PATH) {
     PWSTR folder = nullptr;
     if (FAILED(SHGetKnownFolderPath(kFolderIdLocalAppData, 0, nullptr, &folder))) return kMinZoom;
-    bool fits = wcscpy_s(path, MAX_PATH, folder) == 0 && wcscat_s(path, MAX_PATH, kSettings) == 0;
+    bool fits = wcscpy_s(path, MAX_PATH, folder) == 0 &&
+                wcscat_s(path, MAX_PATH, pdft::kLegacySettingsIni) == 0;
     CoTaskMemFree(folder);
     if (!fits) return kMinZoom;
   }

@@ -11,5 +11,6 @@ pdft_add_handler_def(pdft_handler)
 pdft_add_version_resource(pdft_handler FILETYPE VFT_DLL DESCRIPTION "${PDFT_DESCRIPTION}")
 pdft_harden(pdft_handler DLL)
 target_compile_options(pdft_handler PRIVATE /GR-)   # no RTTI, as in 1.1
-target_link_libraries(pdft_handler PRIVATE pdft_pdfium_headers ole32 uuid shell32 gdi32 advapi32)
+target_link_libraries(pdft_handler PRIVATE pdft_config pdft_pdfium_headers
+                                           ole32 uuid shell32 gdi32 advapi32)
 add_dependencies(pdft_handler pdft_pdfium_runtime)
