@@ -1,0 +1,73 @@
+# Weekly: compares the PDFium release pinned in cmake/Pins.cmake with the latest release of
+# bblanchon/pdfium-binaries and keeps one open issue (label security/pdfium) while they differ.
+# PDFium parses untrusted PDFs inside Explorer's thumbnail process, so new releases matter;
+# Dependabot cannot see Pins.cmake. Each bump is its own pull request (docs/BUILDING.md).
+
+name: pdfium-watch
+
+on:
+  schedule:
+    - cron: "23 5 * * 1"   # Mondays, 05:23 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pdfium-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Check out cmake/Pins.cmake
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: cmake/Pins.cmake
+          sparse-checkout-cone-mode: false
+
+      - name: Compare the pinned and the latest PDFium release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          pinned=$(sed -n 's/^set(PDFT_PDFIUM_TAG *"\([^"]*\)").*/\1/p' cmake/Pins.cmake)
+          latest=$(gh api repos/bblanchon/pdfium-binaries/releases/latest --jq .tag_name)
+          echo "pinned: ${pinned:-?}  latest: ${latest:-?}"
+          if [ -z "$pinned" ] || [ -z "$latest" ]; then
+            echo "::error::Could not read the pinned or the latest PDFium release."
+            exit 1
+          fi
+          if [ "$pinned" = "$latest" ]; then
+            echo "PDFium is current."
+            exit 0
+          fi
+
+          label="security/pdfium"
+          title="PDFium ${latest} is available (pinned: ${pinned})"
+          body=$(cat <<EOF
+          bblanchon/pdfium-binaries released **${latest}**: https://github.com/bblanchon/pdfium-binaries/releases/tag/${latest//\//%2F}
+          This repository pins **${pinned}** in \`cmake/Pins.cmake\`.
+
+          PDFium parses untrusted PDFs inside Explorer's thumbnail process. Bump it in a pull request of its own:
+          1. Update the tag, both archive URLs and SHA-256s, and both inner \`bin/pdfium.dll\` SHA-256s in \`cmake/Pins.cmake\`.
+          2. Check provenance: \`cmake -DARCH=x64 -DVERIFY_ATTESTATION=ON -P cmake/FetchPdfium.cmake\` (and \`-DARCH=arm64\`).
+          3. Build and test (\`scripts\\build.cmd x64-release\`, \`arm64-release\`), compare thumbnails with the previous build, and update THIRD-PARTY-NOTICES.md if the license files changed.
+
+          This issue is updated by the pdfium-watch workflow and can be closed once the pin matches.
+          EOF
+          )
+          gh label create "$label" --color B60205 \
+            --description "A newer PDFium release is available" 2>/dev/null || true
+          number=$(gh issue list --label "$label" --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --title "$title" --body "$body"
+            echo "Updated issue #$number"
+          else
+            gh issue create --title "$title" --body "$body" --label "$label"
+          fi

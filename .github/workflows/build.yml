@@ -1,0 +1,217 @@
+# Builds, tests and stages PdfThumbnails with MSVC through scripts\build.cmd, the same entry
+# point as a local build (docs/BUILDING.md).
+#
+#   build (ci-x64)    x64 Release: gates, unit and handler tests; artifacts
+#   build (ci-arm64)  ARM64 Release, cross-compiled on the x64 runner: gates; artifacts
+#   build (x64-debug) x64 Debug: gates, unit and handler tests (not on pull requests)
+#   test-arm64        the ARM64 test bundle, run natively on an ARM64 runner (not on pull requests)
+#
+# Repository variables (Settings > Secrets and variables > Actions > Variables), all optional:
+#   PDFT_WIN_X64_RUNNER  x64 runner label. Default windows-2025, which serves VS 2022 17.14 (v143)
+#                        and CMake 3.31 to private repositories; set windows-2025-vs2026 (VS 2026,
+#                        v145) once the repository is public.
+#   PDFT_VS_VERSION      vswhere version range for scripts\build.cmd, e.g. [18.0,19.0); empty =
+#                        the newest Visual Studio on the image.
+#   PDFT_ARM64_RUNNER    ARM64 runner label. Default windows-11-arm (windows-11-vs2026-arm works
+#                        too: the job needs only CTest).
+#   PDFT_ARM64_TESTS     "off" skips test-arm64, for when no ARM64 runner is available to the
+#                        repository's plan.
+#
+# Artifacts are unsigned developer builds, not releases: PdfThumbnails-<arch>-unsigned (the
+# runtime staging tree), symbols-<arch> (its PDBs), tests-<arch> (test bundle for test-arm64).
+# Each carries BUILDINFO.txt (runner image, Visual Studio, cl, link, CMake and Ninja versions).
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**"
+      - "!**.md"
+      - "!docs/**"
+      - "THIRD-PARTY-NOTICES.md"   # installed with the binaries and checked by gate.licenses
+  pull_request:
+    paths:
+      - "**"
+      - "!**.md"
+      - "!docs/**"
+      - "THIRD-PARTY-NOTICES.md"
+  workflow_dispatch:
+  workflow_call:   # for later release workflows (M3/M4)
+    inputs:
+      called:
+        description: Leave at the default; it gives a called run a concurrency group of its own.
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  # In a called workflow github.workflow is the caller's name, so a called run gets its own
+  # group; otherwise one group per pull request or branch.
+  group: ${{ inputs.called && format('build-called-{0}', github.run_id) || format('build-{0}', github.event.pull_request.number || github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && !inputs.called }}
+
+defaults:
+  run:
+    shell: cmd
+
+jobs:
+  build:
+    name: build (${{ matrix.preset }})
+    runs-on: ${{ vars.PDFT_WIN_X64_RUNNER || 'windows-2025' }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [ci-x64, ci-arm64, x64-debug]
+        exclude:
+          # Pull requests build only what ships (Windows minutes are limited on a private repo).
+          - preset: ${{ github.event_name == 'pull_request' && 'x64-debug' || 'none' }}
+    env:
+      PRESET: ${{ matrix.preset }}
+      PDFT_ARCH: ${{ contains(matrix.preset, 'arm64') && 'arm64' || 'x64' }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Pinned downloads (cmake/Pins.cmake), stored as <sha256>-<name>; every use re-checks the
+      # SHA-256, so the cache cannot change what gets built.
+      - name: Restore the download cache
+        id: downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/downloads
+          key: pdft-downloads-${{ env.PDFT_ARCH }}-${{ hashFiles('cmake/Pins.cmake') }}
+
+      - name: Fetch PDFium and verify its attestation (new pins only)
+        if: steps.downloads.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cmake -DARCH=%PDFT_ARCH% -DVERIFY_ATTESTATION=ON -P cmake/FetchPdfium.cmake
+
+      - name: Runner image, UAC and token
+        run: |
+          echo Runner image: %ImageOS% %ImageVersion%
+          reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLUA
+          reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v ConsentPromptBehaviorAdmin
+          whoami /groups | findstr /i /c:"Mandatory Label" /c:"S-1-5-32-544"
+          exit /b 0
+
+      - name: Configure, build and test (scripts\build.cmd)
+        env:
+          PDFT_VS_VERSION: ${{ vars.PDFT_VS_VERSION }}
+        run: |
+          set "PDFT_VERSION_SUFFIX=-ci+g%GITHUB_SHA:~0,8%"
+          call scripts\build.cmd %PRESET% || exit /b 1
+
+      # The runner is elevated (High integrity): the handler tests must have relaunched
+      # themselves at Medium, and the elevated-refusal test must have run, not skipped.
+      - name: Check the elevated test paths
+        if: env.PDFT_ARCH == 'x64'
+        run: |
+          set "BIN=out\build\%PRESET%\bin"
+          set "LOG=out\build\%PRESET%\Testing\Temporary\LastTest.log"
+          "%BIN%\pdft-run-medium.exe" --check-token
+          "%BIN%\pdft-run-medium.exe" -- "%BIN%\pdft-run-medium.exe" --check-token
+          findstr /c:"pdft: relaunched at Medium integrity" "%LOG%" || (echo ::error::The handler tests did not relaunch at Medium integrity& exit /b 1)
+          findstr /c:"ok: the handler refuses to render in an elevated process" "%LOG%" || (echo ::error::handler.refuses_elevated did not run elevated& exit /b 1)
+
+      - name: Stage runtime, symbols and tests
+        if: startsWith(matrix.preset, 'ci-')
+        run: |
+          set "INFO=out\stage\BUILDINFO.txt"
+          if not exist out\stage mkdir out\stage
+          copy /y "out\build\%PRESET%\buildinfo.txt" "%INFO%" >nul || exit /b 1
+          >> "%INFO%" echo(commit: %GITHUB_SHA%
+          >> "%INFO%" echo(runner_image: %ImageOS% %ImageVersion%
+          for %%C in (runtime symbols tests) do (
+            cmake --install "out\build\%PRESET%" --prefix "out\stage\%%C" --component %%C || exit /b 1
+            copy /y "%INFO%" "out\stage\%%C\BUILDINFO.txt" >nul || exit /b 1
+          )
+          type "%INFO%"
+
+      - name: Upload PdfThumbnails-${{ env.PDFT_ARCH }}-unsigned
+        if: startsWith(matrix.preset, 'ci-')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: PdfThumbnails-${{ env.PDFT_ARCH }}-unsigned
+          path: out/stage/runtime/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload symbols-${{ env.PDFT_ARCH }}
+        if: startsWith(matrix.preset, 'ci-')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: symbols-${{ env.PDFT_ARCH }}
+          path: out/stage/symbols/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload tests-${{ env.PDFT_ARCH }}
+        if: startsWith(matrix.preset, 'ci-')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tests-${{ env.PDFT_ARCH }}
+          path: out/stage/tests/
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: logs-${{ matrix.preset }}
+          path: |
+            out/build/${{ matrix.preset }}/buildinfo.txt
+            out/build/${{ matrix.preset }}/Testing/Temporary/
+            out/build/${{ matrix.preset }}/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  test-arm64:
+    needs: build
+    if: github.event_name != 'pull_request' && vars.PDFT_ARM64_TESTS != 'off'
+    runs-on: ${{ vars.PDFT_ARM64_RUNNER || 'windows-11-arm' }}
+    timeout-minutes: 30
+    permissions: {}
+    steps:
+      - name: Download tests-arm64
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tests-arm64
+          path: t
+
+      - name: Runner image, UAC and token
+        run: |
+          echo Runner image: %ImageOS% %ImageVersion%
+          type t\BUILDINFO.txt
+          reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLUA
+          reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v ConsentPromptBehaviorAdmin
+          whoami /groups | findstr /i /c:"Mandatory Label" /c:"S-1-5-32-544"
+          exit /b 0
+
+      - name: Unit and handler tests (native ARM64)
+        run: ctest --test-dir t -L "unit|handler|integration" --output-on-failure --no-tests=error --timeout 900
+
+      - name: Check the elevated test paths
+        run: |
+          t\pdft-run-medium.exe --check-token
+          t\pdft-run-medium.exe -- t\pdft-run-medium.exe --check-token
+          findstr /c:"pdft: relaunched at Medium integrity" t\Testing\Temporary\LastTest.log || (echo ::error::The handler tests did not relaunch at Medium integrity& exit /b 1)
+          findstr /c:"ok: the handler refuses to render in an elevated process" t\Testing\Temporary\LastTest.log || (echo ::error::handler.refuses_elevated did not run elevated& exit /b 1)
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: logs-test-arm64
+          path: t/Testing/Temporary/
+          if-no-files-found: ignore
+          retention-days: 7

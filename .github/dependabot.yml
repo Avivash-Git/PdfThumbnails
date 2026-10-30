@@ -1,0 +1,19 @@
+# Keeps the SHA-pinned GitHub Actions current: one grouped pull request a week. Dependabot
+# updates the commit SHA and the "# vX.Y.Z" comment together.
+# Not covered here: PDFium, GoogleTest and WIL are pinned in cmake/Pins.cmake (PDFium releases
+# are watched by .github/workflows/pdfium-watch.yml); clang-format is pinned deliberately in
+# .github/tools/requirements-format.txt (a new major version reformats code).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7   # let a new release settle before adopting it
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+    open-pull-requests-limit: 5
