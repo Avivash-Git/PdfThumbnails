@@ -1,6 +1,6 @@
 // thumbtest: checks PdfThumbnails.dll against real files.
 //
-//   thumbtest direct <PdfThumbnails.dll> <size> <outdir|-> <file.pdf|dir>...
+//   thumbtest direct [--zoom <percent>] <PdfThumbnails.dll> <size> <outdir|-> <file.pdf|dir>...
 //       Calls the DLL directly; no registration needed.
 //   thumbtest cache <size> <outdir|-> <file.pdf|dir>...
 //       Forces a fresh extraction through Explorer's thumbnail cache, i.e. the
@@ -11,7 +11,8 @@
 //       Same, but the cache loads the handler into this process instead.
 //   thumbtest shell <size> <outdir|-> <file.pdf|dir>...
 //       Asks the shell for the thumbnail Explorer would show (may be cached).
-//   thumbtest stress <PdfThumbnails.dll> <size> <threads> <rounds> <file.pdf|dir>...
+//   thumbtest stress [--zoom <percent>] <PdfThumbnails.dll> <size> <threads> <rounds>
+//                    <file.pdf|dir>...
 //       Renders the files concurrently from several threads.
 //   thumbtest makepdfs <dir>
 //       Writes the 18 synthetic test PDFs (edge cases, including files that must fail).
@@ -24,6 +25,14 @@
 // A directory stands for the *.pdf files directly inside it, in name order.
 // Prints one line per file: OK/FAIL, bitmap size, share of non-white pixels,
 // alpha type and milliseconds. With an outdir it also writes <name>.png there.
+//
+// --zoom <percent> (100 to 200) makes direct and stress render at that zoom, whether the DLL is a
+// 1.x build or a 2.0 one. For the run, HKCU is redirected to an empty private key that holds only
+// Software\PdfThumbnails\Zoom (REG_DWORD), which a 2.0 DLL reads first, and
+// PDFTHUMBNAILS_SETTINGS names a temporary settings.ini with the same zoom, which is all a 1.x
+// DLL reads. Both go away when thumbtest ends. The other modes refuse --zoom: they go through
+// Explorer or the registered class, and a redirected HKCU would hide per-user registrations.
+// Without --zoom the DLL reads the user's own settings.
 
 #include <windows.h>
 
@@ -40,13 +49,18 @@
 #include <cstdlib>
 #include <cwchar>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "project_config.h"
+#include "registry_sandbox.h"
+#include "temp_dir.h"
 #include "test_pdfs.h"
+#include "zoom.h"
 
 namespace {
 
@@ -564,17 +578,90 @@ int RunCompare(const std::wstring& a, const std::wstring& b, int tolerance) {
   return worst;
 }
 
+// ---- --zoom ----------------------------------------------------------------------------------
+// The redirected HKCU and the temporary settings.ini (see the top of this file). UndoZoom() runs
+// at the end of wmain and from the console control handler (Ctrl+C, closing the window); only a
+// crash leaves the private key and the temporary folder behind.
+struct ZoomState {
+  std::mutex lock;
+  std::unique_ptr<pdft::test::TempDir> dir;
+  std::unique_ptr<pdft::test::ScopedHkcuRedirect> registry;
+  bool environment = false;
+};
+ZoomState g_zoom;
+
+void UndoZoom() {
+  std::lock_guard<std::mutex> guard(g_zoom.lock);
+  g_zoom.registry.reset();  // the real HKCU again, and the private key deleted
+  if (g_zoom.environment) SetEnvironmentVariableW(pdft::kLegacySettingsEnv, nullptr);
+  g_zoom.environment = false;
+  g_zoom.dir.reset();  // settings.ini and its folder
+}
+
+BOOL WINAPI UndoZoomOnExit(DWORD) {
+  UndoZoom();
+  return FALSE;  // the default handler then ends the process
+}
+
+// Sets |zoom| up for this process. False, with a message, when something fails; UndoZoom()
+// removes whatever was made either way.
+bool ApplyZoom(int zoom) {
+  std::lock_guard<std::mutex> guard(g_zoom.lock);
+  SetConsoleCtrlHandler(UndoZoomOnExit, TRUE);
+  g_zoom.dir = std::make_unique<pdft::test::TempDir>(L"thumbtest");
+  if (!g_zoom.dir->ok()) {
+    std::printf("--zoom: cannot create a temporary folder\n");
+    return false;
+  }
+  // The 1.x settings file, as the 1.x manager writes it.
+  const std::wstring ini = g_zoom.dir->File(L"settings.ini");
+  const std::string text = "[Thumbnails]\r\nZoom=" + std::to_string(zoom) + "\r\n";
+  HANDLE file = CreateFileW(ini.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                            FILE_ATTRIBUTE_NORMAL, nullptr);
+  bool saved = false;
+  if (file != INVALID_HANDLE_VALUE) {
+    DWORD written = 0;
+    saved = WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr) &&
+            written == text.size();
+    CloseHandle(file);
+  }
+  if (!saved || !SetEnvironmentVariableW(pdft::kLegacySettingsEnv, ini.c_str())) {
+    std::printf("--zoom: cannot write %s\n", Utf8(ini).c_str());
+    return false;
+  }
+  g_zoom.environment = true;
+  // HKCU\<kRegKey>\Zoom, written through the private key's own handle.
+  g_zoom.registry = std::make_unique<pdft::test::ScopedHkcuRedirect>();
+  if (!g_zoom.registry->ok()) {
+    std::printf("--zoom: cannot redirect HKCU: 0x%08lX\n",
+                static_cast<unsigned long>(g_zoom.registry->error()));
+    return false;
+  }
+  const DWORD value = static_cast<DWORD>(zoom);
+  const LSTATUS status = RegSetKeyValueW(g_zoom.registry->key(), pdft::kRegKey,
+                                         pdft::kZoomValueName, REG_DWORD, &value, sizeof(value));
+  if (status != ERROR_SUCCESS) {
+    std::printf("--zoom: cannot write the registry value (error %ld)\n", status);
+    return false;
+  }
+  return true;
+}
+
 int Usage() {
   std::printf(
       "usage:\n"
-      "  thumbtest direct <PdfThumbnails.dll> <size> <outdir|-> <file.pdf|dir>...\n"
+      "  thumbtest direct [--zoom <percent>] <PdfThumbnails.dll> <size> <outdir|-> "
+      "<file.pdf|dir>...\n"
       "  thumbtest cache|cachenew|cacheinproc <size> <outdir|-> <file.pdf|dir>...\n"
       "  thumbtest shell <size> <outdir|-> <file.pdf|dir>...\n"
-      "  thumbtest stress <PdfThumbnails.dll> <size> <threads> <rounds> <file.pdf|dir>...\n"
+      "  thumbtest stress [--zoom <percent>] <PdfThumbnails.dll> <size> <threads> <rounds> "
+      "<file.pdf|dir>...\n"
       "  thumbtest makepdfs <dir>\n"
       "  thumbtest makesamples <dir>\n"
       "  thumbtest compare [--tolerance <n>] <a.png|dir> <b.png|dir>\n"
-      "A directory stands for the *.pdf files directly inside it, in name order.\n");
+      "A directory stands for the *.pdf files directly inside it, in name order.\n"
+      "--zoom (100 to 200) sets the zoom for this run, in a redirected HKCU and a temporary\n"
+      "settings.ini, so 1.x and 2.0 builds of the DLL render alike.\n");
   return 2;
 }
 
@@ -604,31 +691,56 @@ int wmain(int argc, wchar_t** argv) {
   }
   // Each mode's first file argument; at least one file or directory must follow.
   const bool cacheMode = mode == L"cache" || mode == L"cachenew" || mode == L"cacheinproc";
+  const bool inProcessMode = mode == L"direct" || mode == L"stress";
+  // [--zoom <percent>] right after the mode; the arguments below are counted without it.
+  std::vector<wchar_t*> args(argv, argv + argc);
+  int zoom = 0;
+  if (args.size() > 2 && std::wstring(args[2]) == L"--zoom") {
+    if (!inProcessMode) {
+      std::printf(
+          "--zoom works only with direct and stress: the other modes go through Explorer or the\n"
+          "registered class, and a redirected HKCU would hide per-user registrations.\n");
+      return Usage();
+    }
+    wchar_t* end = nullptr;
+    const long value = args.size() > 3 ? std::wcstol(args[3], &end, 10) : 0;
+    if (!end || end == args[3] || *end != L'\0' || value < pdft::kMinZoom ||
+        value > pdft::kMaxZoom) {
+      std::printf("--zoom takes a percentage from %d to %d\n", pdft::kMinZoom, pdft::kMaxZoom);
+      return Usage();
+    }
+    zoom = static_cast<int>(value);
+    args.erase(args.begin() + 2, args.begin() + 4);
+  }
+  const int count = static_cast<int>(args.size());
   const int first = mode == L"direct"                 ? 5
                     : (cacheMode || mode == L"shell") ? 4
                     : mode == L"stress"               ? 6
                                                       : 0;
-  if (first == 0 || argc <= first) return Usage();
+  if (first == 0 || count <= first) return Usage();
   std::vector<std::wstring> files;
-  for (int i = first; i < argc; ++i) {
-    if (!AddFiles(argv[i], &files)) return 2;
+  for (int i = first; i < count; ++i) {
+    if (!AddFiles(args[i], &files)) return 2;
   }
 
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   int result = 2;
-  if (mode == L"direct") {
-    result = RunDirect(argv[2], static_cast<UINT>(_wtoi(argv[3])), argv[4], files);
+  if (zoom && !ApplyZoom(zoom)) {
+    result = 2;
+  } else if (mode == L"direct") {
+    result = RunDirect(args[2], static_cast<UINT>(_wtoi(args[3])), args[4], files);
   } else if (cacheMode) {
     const int extraFlags = mode == L"cachenew"      ? WTS_INSTANCESURROGATE
                            : mode == L"cacheinproc" ? WTS_EXTRACTINPROC
                                                     : 0;
-    result = RunCache(static_cast<UINT>(_wtoi(argv[2])), extraFlags, argv[3], files);
+    result = RunCache(static_cast<UINT>(_wtoi(args[2])), extraFlags, args[3], files);
   } else if (mode == L"shell") {
-    result = RunShell(static_cast<UINT>(_wtoi(argv[2])), argv[3], files);
+    result = RunShell(static_cast<UINT>(_wtoi(args[2])), args[3], files);
   } else {
-    result = RunStress(argv[2], static_cast<UINT>(_wtoi(argv[3])), _wtoi(argv[4]), _wtoi(argv[5]),
+    result = RunStress(args[2], static_cast<UINT>(_wtoi(args[3])), _wtoi(args[4]), _wtoi(args[5]),
                        files);
   }
+  UndoZoom();  // nothing to undo without --zoom
   CoUninitialize();
   return result;
 }

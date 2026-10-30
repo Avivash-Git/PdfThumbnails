@@ -117,12 +117,15 @@ ctest --preset x64-release -L "unit|handler"
 | Label | What | Where it runs |
 |---|---|---|
 | `gate` | Static checks of the staged files: exports, imports (static C runtime, Windows DLLs only), hardening flags, no build paths inside the binaries, version resources, the 18 PDFium functions the handler binds, the PDFium hash, license files and notices, and the build id | every preset, both architectures |
-| `unit` | The test-PDF generator (byte-identical to the 1.x generator), Medium-integrity helpers, temporary folders, and the committed preview samples (`src\app\res`) | x64 presets; CI's ARM64 runner |
-| `handler` | `PdfThumbnails.dll` loaded in-process at Medium integrity: the crop table, pixels, the COM surface, error codes, an 8-thread stress test. Elevated, the program relaunches itself at Medium; `handler.refuses_elevated` checks that the DLL refuses to render when elevated and is skipped when not | x64 presets; CI's ARM64 runner |
+| `unit` | The crop math, zoom clamping and generated GUIDs, the test-PDF generator (byte-identical to the 1.x generator), Medium-integrity helpers, temporary folders, the HKCU redirection, and the committed preview samples (`src\app\res`) | x64 presets; CI's ARM64 runner |
+| `handler` | `PdfThumbnails.dll` loaded in-process at Medium integrity, with HKCU redirected to an empty private key: the crop table, pixels, the COM surface, error codes, where the zoom comes from (preview override, HKCU, `settings.ini`), an 8-thread stress test. Elevated, the program relaunches itself at Medium; `handler.refuses_elevated` checks that the DLL refuses to render when elevated and is skipped when not | x64 presets; CI's ARM64 runner |
 | `integration`, `system`, `e2e` | Added with the settings app. `system` and `e2e` change real machine state and never run in a developer build. | — |
 
 Useful environment variables for the handler tests:
 - `PDFT_TEST_HANDLER_DLL=<path>` tests another build of the handler (for example an older one).
+  A build without the HKCU zoom and the preview interface (any 1.x build) fails some of the
+  `ZoomPrecedence` and `PreviewOptions` tests; to compare one, also set
+  `GTEST_FILTER=-ZoomPrecedence.*:PreviewOptions.*`.
 - `PDFT_KEEP_TEMP=1` keeps the temporary folders under `%TEMP%\pdft-tests`.
 - `PDFT_STRESS_FULL=1` also runs the stress test over all 18 test PDFs, including the two slow ones.
 
@@ -134,9 +137,10 @@ first time it starts (CTest reports "Not Run"). Run the tests again.
 In `out\build\<preset>\bin\`:
 - `thumbtest makepdfs <dir>` writes the 18 synthetic edge-case PDFs; `makesamples <dir>` writes the
   settings app's two preview samples.
-- `thumbtest direct|stress ...` renders through the DLL directly; `cache|cachenew|cacheinproc|shell
-  ...` goes through Explorer's thumbnail pipeline; `compare <a> <b>` compares PNG files or
-  folders pixel by pixel.
+- `thumbtest direct|stress [--zoom <percent>] ...` renders through the DLL directly (`--zoom`
+  sets the zoom for the run in a redirected HKCU and a temporary `settings.ini`);
+  `cache|cachenew|cacheinproc|shell ...` goes through Explorer's thumbnail pipeline;
+  `compare <a> <b>` compares PNG files or folders pixel by pixel.
 - `pdft-run-medium [--] <program> [arguments]` runs a program at Medium integrity with a standard
   user's rights; `pdft-run-medium --check-token` prints the current token.
 

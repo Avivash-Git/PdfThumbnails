@@ -17,12 +17,18 @@
 namespace pdft::test {
 
 std::unique_ptr<TempDir> HandlerEnvironment::dir_;
+std::unique_ptr<ScopedHkcuRedirect> HandlerEnvironment::registry_;
 std::unique_ptr<HandlerHost> HandlerEnvironment::host_;
 
 void HandlerEnvironment::SetUp() {
   dir_ = std::make_unique<TempDir>(L"handler");
   ASSERT_TRUE(dir_->ok()) << "cannot create a temp folder";
-  // Before anything renders: the user's own settings.ini must never decide a test's zoom.
+  // Before anything renders: the handler reads its zoom from HKCU\Software\PdfThumbnails first,
+  // which exists on a PC with 2.0 installed, and from the user's own settings.ini after that.
+  // Neither may decide a test, so HKCU is an empty private key and the settings file a private
+  // one until TearDown.
+  registry_ = std::make_unique<ScopedHkcuRedirect>();
+  ASSERT_TRUE(registry_->ok()) << "cannot redirect HKCU: " << HresultText(registry_->error());
   ASSERT_TRUE(UseZoom(dir_->path(), 100));
 
   std::vector<GeneratedFile> files = MakeTestPdfs();
@@ -39,11 +45,14 @@ void HandlerEnvironment::SetUp() {
 
 void HandlerEnvironment::TearDown() {
   host_.reset();
+  registry_.reset();
   SetEnvironmentVariableW(pdft::kLegacySettingsEnv, nullptr);
   dir_.reset();
 }
 
 const HandlerHost& HandlerEnvironment::Host() { return *host_; }
+
+const ScopedHkcuRedirect& HandlerEnvironment::Registry() { return *registry_; }
 
 const std::wstring& HandlerEnvironment::Folder() { return dir_->path(); }
 
@@ -58,6 +67,10 @@ std::wstring HandlerEnvironment::Pdf(std::wstring_view prefix) {
 
 Rendered HandlerEnvironment::Render(std::wstring_view prefix, UINT cx) {
   return host_->RenderFile(Pdf(prefix), cx);
+}
+
+Rendered HandlerEnvironment::RenderAtZoom(std::wstring_view prefix, int zoom, UINT cx) {
+  return host_->RenderFileAtZoom(Pdf(prefix), cx, zoom);
 }
 
 void HandlerEnvironment::SetZoom(int zoom) {

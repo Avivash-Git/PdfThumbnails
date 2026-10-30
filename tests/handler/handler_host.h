@@ -23,8 +23,9 @@
 
 namespace pdft::test {
 
-// The handler DLL to test: PDFT_TEST_HANDLER_DLL if set (e.g. an older build, to compare),
-// else PdfThumbnails.dll next to the test program.
+// The handler DLL to test: PDFT_TEST_HANDLER_DLL if set (e.g. an older build, to compare; one
+// without the HKCU zoom fails some ZoomPrecedence and PreviewOptions tests), else
+// PdfThumbnails.dll next to the test program.
 inline constexpr wchar_t kHandlerDllEnv[] = L"PDFT_TEST_HANDLER_DLL";
 
 // One GetThumbnail result, with the bitmap copied out as top-down 0xAARRGGBB pixels.
@@ -63,15 +64,22 @@ class HandlerHost {
   Rendered RenderStream(IStream* stream, UINT cx) const;
   // The same on a read-only stream over |file|.
   Rendered RenderFile(const std::wstring& file, UINT cx) const;
+  // RenderFile as a preview does it: SetZoom(zoom) through IPdfThumbnailsPreviewOptions first.
+  Rendered RenderFileAtZoom(const std::wstring& file, UINT cx, int zoom) const;
 
  private:
+  // Render*() with SetZoom(*zoom) first when |zoom| is not null.
+  Rendered Render(IStream* stream, UINT cx, const int* zoom) const;
+  Rendered RenderPath(const std::wstring& file, UINT cx, const int* zoom) const;
+
   std::wstring path_;
   HMODULE module_ = nullptr;
   IClassFactory* factory_ = nullptr;
 };
 
 // Points PDFTHUMBNAILS_SETTINGS at <dir>\zoom-<zoom>.ini ([Thumbnails] Zoom=<zoom>), so the
-// handler never reads the user's own settings. False when the file cannot be written.
+// handler never reads the user's own settings.ini. (It reads HKCU first: the handler tests
+// redirect HKCU, see HandlerEnvironment.) False when the file cannot be written.
 bool UseZoom(const std::wstring& dir, int zoom);
 
 // "0x8004B200" etc.

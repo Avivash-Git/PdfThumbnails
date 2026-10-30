@@ -41,9 +41,10 @@ include(cmake/FetchVerified.cmake)
 include(cmake/Dependencies.cmake)
 pdft_generate_project_config()
 
+add_subdirectory(src/common)   # header-only: zoom, crop math, the private preview interface
 add_subdirectory(src/handler)
 if(PDFT_BUILD_TOOLS OR BUILD_TESTING)
-  add_subdirectory(tests/support)   # test PDFs, Medium-IL relaunch, temp dirs
+  add_subdirectory(tests/support)   # test PDFs, Medium-IL relaunch, temp dirs, HKCU redirection
 endif()
 if(PDFT_BUILD_TOOLS)
   add_subdirectory(tools/thumbtest)

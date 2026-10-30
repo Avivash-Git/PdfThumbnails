@@ -19,7 +19,8 @@ set(PDFT_COPYRIGHT             "Copyright (c) 2026 ${PDFT_PRODUCT_NAME} contribu
 # ---- COM and file names -----------------------------------------------------------------
 set(PDFT_HANDLER_CLSID         "{0C3534C4-5B7A-48AB-828D-1CD660DC447F}")   # NEVER changes
 set(PDFT_HANDLER_CLASS_NAME    "${PDFT_PRODUCT_NAME} PDF thumbnail provider")
-# PDFT_PREVIEW_IID (private preview interface) is generated in WP5.
+# The handler's private preview interface, IPdfThumbnailsPreviewOptions (src/common).
+set(PDFT_PREVIEW_IID           "{001DFB6F-50D4-456C-BFFD-3FAA8981ACD7}")
 set(PDFT_HANDLER_DLL           "${PDFT_PRODUCT_NAME}.dll")
 set(PDFT_PDFIUM_DLL            "${PDFT_PRODUCT_NAME}-pdfium.dll")
 set(PDFT_SETTINGS_EXE          "${PDFT_PRODUCT_NAME}Settings.exe")
@@ -97,7 +98,7 @@ endfunction()
 # TargetArch.cmake (the header records PDFT_ARCH).
 function(pdft_generate_project_config)
   foreach(name IN ITEMS PRODUCT_NAME DESCRIPTION COPYRIGHT HANDLER_CLSID HANDLER_CLASS_NAME
-                        HANDLER_DLL PDFIUM_DLL SETTINGS_EXE CLI_EXE REG_KEY TASK_FOLDER
+                        PREVIEW_IID HANDLER_DLL PDFIUM_DLL SETTINGS_EXE CLI_EXE REG_KEY TASK_FOLDER
                         TASK_PREFIX OBJECT_PREFIX INNO_APPID AUMID LEGACY_ROOT_NAME LEGACY_TASK
                         LEGACY_RUNONCE LEGACY_SETTINGS_ENV LEGACY_SETTINGS_INI
                         PDFCRAFT_PRODUCT_NAME PDFCRAFT_UPGRADE_CODE PDFCRAFT_SUBSCRIPTION
@@ -105,8 +106,8 @@ function(pdft_generate_project_config)
     pdft_c_string(PDFT_C_${name} "${PDFT_${name}}")
   endforeach()
   pdft_c_string(PDFT_C_PRODUCT_VERSION "${PROJECT_VERSION}${PDFT_VERSION_SUFFIX}")
-  foreach(name IN ITEMS HANDLER_CLSID THUMB_SLOT_IID SURROGATE_APPID PDFCRAFT_UPGRADE_CODE
-                        IID_INITIALIZE_WITH_STREAM FOLDERID_LOCAL_APPDATA)
+  foreach(name IN ITEMS HANDLER_CLSID PREVIEW_IID THUMB_SLOT_IID SURROGATE_APPID
+                        PDFCRAFT_UPGRADE_CODE IID_INITIALIZE_WITH_STREAM FOLDERID_LOCAL_APPDATA)
     pdft_guid_initializer(PDFT_GUID_${name} "${PDFT_${name}}")
   endforeach()
   set(dir "${CMAKE_BINARY_DIR}/generated")

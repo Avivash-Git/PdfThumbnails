@@ -37,7 +37,7 @@ Explorer fits every thumbnail into a square. A portrait page is narrower than th
 | 120 | about 8% | mostly margins and running headers |
 | 141 | about 15% | square crop; higher values crop no further for A4 |
 
-The setting lives in `%LOCALAPPDATA%\Programs\PdfThumbnails\settings.ini` (`[Thumbnails] Zoom=120`) and applies to thumbnails extracted from then on. Explorer keeps thumbnails it has already made, so run `refresh` afterwards to redo those. `refresh` restarts Explorer: the taskbar blinks and open File Explorer windows close.
+The setting lives in `%LOCALAPPDATA%\Programs\PdfThumbnails\settings.ini` (`[Thumbnails] Zoom=120`) and applies to thumbnails extracted from then on. A DLL built from this repository reads `HKCU\Software\PdfThumbnails\Zoom` (a DWORD, which the 2.0 settings app will write) first and falls back to `settings.ini` when that value is missing. Explorer keeps thumbnails it has already made, so run `refresh` afterwards to redo those. `refresh` restarts Explorer: the taskbar blinks and open File Explorer windows close.
 
 ## Where things are, and updating
 
@@ -105,10 +105,10 @@ dist\PdfThumbnails\PdfThumbnails.cmd install -Machine -AutoRepair
 - The `gate` tests (`ctest --preset x64-release -L gate`) check the staged files: the exports, the imports, the hardening flags, the version, every PDFium function the DLL binds, the PDFium hash and the license notices.
 - The runtime component holds the two DLLs, `LICENSE.txt`, `THIRD-PARTY-NOTICES.md` and `licenses\`. Until the 2.0 settings app exists, the 1.1 manager installs it, as above: it takes the build from the `bin\` folder next to `PdfThumbnails.ps1` (or from `dist\PdfThumbnails\bin` below it) and copies itself and that `bin\` to `%LOCALAPPDATA%\Programs\PdfThumbnails`. `dist\` is ignored by Git.
 - Tests (`scripts\build.cmd` runs them all; GoogleTest v1.18.0 is downloaded and checked like PDFium):
-  - `ctest --preset x64-release -L "unit|handler"` runs the test programs. `unit` covers the test-PDF generator and the test helpers. `handler` loads the built DLL in-process and checks every test PDF at several zoom levels (sizes, pixels, error codes, 8 threads at once). The DLL refuses to render in elevated processes, so from an elevated prompt the handler tests restart themselves at Medium integrity.
+  - `ctest --preset x64-release -L "unit|handler"` runs the test programs. `unit` covers the crop math, zoom clamping, the generated GUIDs, the test-PDF generator and the test helpers. `handler` loads the built DLL in-process and checks every test PDF at several zoom levels (sizes, pixels, error codes, 8 threads at once). The DLL refuses to render in elevated processes, so from an elevated prompt the handler tests restart themselves at Medium integrity.
   - `out\build\x64-release\bin\thumbtest.exe makepdfs <dir>` writes the 18 synthetic edge-case PDFs; `makesamples <dir>` writes the settings app's two preview samples (committed in `src\app\res`).
   - `thumbtest.exe` renders through the DLL directly (`direct`, `stress`) or through Explorer's pipeline (`cache`, `cachenew`, `cacheinproc`, `shell`); `compare <a> <b>` compares two PNGs, or two folders of PNGs, pixel by pixel.
-  - Set `PDFTHUMBNAILS_SETTINGS` to another `settings.ini` to test zoom levels in `direct` mode.
+  - `direct` and `stress` take `--zoom <percent>` (100 to 200) to test a zoom level. For the run, `thumbtest` redirects HKCU to an empty private key holding `Software\PdfThumbnails\Zoom` and points `PDFTHUMBNAILS_SETTINGS` at a temporary `settings.ini` with the same zoom, so a 1.x and a 2.0 build of the DLL render alike. The Explorer modes refuse it.
   - `pdft-run-medium.exe -- <program> [arguments]` runs a program at Medium integrity with a standard user's rights (for elevated prompts and CI).
   - With Smart App Control on, Windows may refuse to start a freshly built test program (CodeIntegrity event 3077); running the tests again usually works.
 

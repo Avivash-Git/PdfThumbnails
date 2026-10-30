@@ -4,8 +4,11 @@
 // Explorer creates this COM object in its isolated thumbnail process, hands it
 // the file as an IStream (IInitializeWithStream) and asks for a bitmap
 // (IThumbnailProvider). PDFium is loaded from this DLL's own folder under a
-// private file name. Registration is per-user and lives in PdfThumbnails.ps1,
-// so there is no DllRegisterServer here.
+// private file name. The settings app registers the class (until it ships, the
+// 1.x PowerShell manager, PdfThumbnails.ps1, does), so there is no
+// DllRegisterServer here. The zoom comes from HKCU\Software\PdfThumbnails, with
+// the 1.x settings.ini as fallback (see ReadZoomPercent); a preview can set its
+// own through a private interface (preview_override.h).
 
 #include <windows.h>
 
@@ -16,10 +19,13 @@
 #include <atomic>
 #include <new>
 
+#include "crop_math.h"
 #include "fpdf_formfill.h"
 #include "fpdf_progressive.h"
 #include "fpdfview.h"
+#include "preview_override.h"
 #include "project_config.h"
+#include "zoom.h"
 
 #ifndef WTS_E_FAILEDEXTRACTION
 #define WTS_E_FAILEDEXTRACTION ((HRESULT)0x8004B200L)
@@ -35,13 +41,14 @@ namespace {
 constexpr CLSID kClsidPdfThumbnails = pdft::kHandlerClsid;
 constexpr IID kIidThumbnailProvider = pdft::kThumbSlotIid;
 constexpr IID kIidInitializeWithStream = pdft::kIidInitializeWithStream;
+constexpr IID kIidPreviewOptions = pdft::kPreviewIid;
 constexpr GUID kFolderIdLocalAppData = pdft::kFolderIdLocalAppData;
 
 // Private name, so another extension's LoadLibrary("pdfium.dll") in the shared
 // thumbnail process can never bind to this copy, or this code to theirs.
 using pdft::kPdfiumDll;
-// Explorer does not ask for more than 2560 px; cap it anyway.
-constexpr UINT kMaxEdge = 2560;
+// Explorer does not ask for more than 2560 px; cap it anyway (crop_math.h).
+using pdft::kMaxEdge;
 // The whole file is read into memory first; bigger PDFs keep the plain icon.
 constexpr ULONGLONG kMaxFileBytes = 256ull << 20;
 // Time limits per thumbnail. Slower files keep the plain icon. Opening the
@@ -51,9 +58,8 @@ constexpr ULONGLONG kLockWaitMs = 15000;     // from the start, waiting for othe
 constexpr ULONGLONG kRenderBudgetMs = 8000;  // from getting PDFium to the finished page
 // Draw annotations too (stamps, highlights); form fields come from FPDF_FFLDraw.
 constexpr int kRenderFlags = FPDF_ANNOT;
-// Magnification in percent, from settings.ini (see ReadZoomPercent).
-constexpr int kMinZoom = 100;
-constexpr int kMaxZoom = 200;
+// Magnification in percent, 100 to 200 (zoom.h; see ReadZoomPercent).
+using pdft::kMinZoom;
 
 HMODULE g_module = nullptr;
 LONG g_serverRefs = 0;  // live objects + IClassFactory::LockServer locks
@@ -190,11 +196,10 @@ bool IsAboveMediumIntegrity() {
   return above;
 }
 
-// The user's magnification, read fresh for every thumbnail from
+// The zoom in the 1.x settings file, read exactly as 1.1 reads it:
 //   %LOCALAPPDATA%\Programs\PdfThumbnails\settings.ini   [Thumbnails] Zoom=<percent>
-// (100, the default, shows the whole page). PDFTHUMBNAILS_SETTINGS can name another
-// file, which the tests use.
-int ReadZoomPercent() {
+// PDFTHUMBNAILS_SETTINGS can name another file, which the tests use. 100 without one.
+int ReadLegacyZoomPercent() {
   wchar_t path[MAX_PATH];
   DWORD length = GetEnvironmentVariableW(pdft::kLegacySettingsEnv, path, MAX_PATH);
   if (length == 0 || length >= MAX_PATH) {
@@ -206,7 +211,23 @@ int ReadZoomPercent() {
     if (!fits) return kMinZoom;
   }
   UINT zoom = GetPrivateProfileIntW(L"Thumbnails", L"Zoom", kMinZoom, path);
-  return zoom < kMinZoom ? kMinZoom : zoom > kMaxZoom ? kMaxZoom : static_cast<int>(zoom);
+  return pdft::ClampZoom(zoom);
+}
+
+// The user's magnification (100, the default, shows the whole page), read fresh
+// for every thumbnail. The settings app saves it as a REG_DWORD:
+//   HKCU\Software\PdfThumbnails   Zoom=<percent>
+// When that value is missing, has another type (REG_SZ, REG_QWORD, ...) or cannot
+// be read, the 1.x settings file decides.
+int ReadZoomPercent() {
+  DWORD zoom = 0;
+  DWORD size = sizeof(zoom);
+  if (RegGetValueW(HKEY_CURRENT_USER, pdft::kRegKey, pdft::kZoomValueName, RRF_RT_REG_DWORD,
+                   nullptr, &zoom, &size) == ERROR_SUCCESS &&
+      size == sizeof(zoom)) {
+    return pdft::ClampZoom(zoom);
+  }
+  return ReadLegacyZoomPercent();
 }
 
 // The whole PDF in memory, so PDFium never calls back into COM.
@@ -264,25 +285,15 @@ FPDF_BOOL NeedToPauseNow(IFSDK_PAUSE* pause) {
 
 // Draws |page| (|size| in points) to fit an |edge| x |edge| square. Above 100%
 // |zoom| crops the page's longer side evenly (top and bottom of a portrait page)
-// so the rest fills more of the square, never cropping past a square.
-// Caller holds the PDFium lock.
+// so the rest fills more of the square, never cropping past a square
+// (ComputeCrop in crop_math.h). Caller holds the PDFium lock.
 HRESULT RenderPage(FPDF_PAGE page, FPDF_FORMHANDLE form, FS_SIZEF size, UINT edge, int zoom,
                    ULONGLONG deadline, HBITMAP* result) {
   const Pdfium& p = g_pdfium;
-  const double longSide = size.width >= size.height ? size.width : size.height;
-  const double shortSide = size.width >= size.height ? size.height : size.width;
-  double visible = longSide * 100.0 / zoom;  // points of the longer side that stay
-  if (visible < shortSide) visible = shortSide;
-  const double scale = edge / visible;  // pixels per point
-  // The whole page at that scale (at most 2x |edge|) and the part of it we keep.
-  int pageWidth = static_cast<int>(size.width * scale + 0.5);
-  int pageHeight = static_cast<int>(size.height * scale + 0.5);
-  if (pageWidth < 1) pageWidth = 1;
-  if (pageHeight < 1) pageHeight = 1;
-  const int width = pageWidth < static_cast<int>(edge) ? pageWidth : static_cast<int>(edge);
-  const int height = pageHeight < static_cast<int>(edge) ? pageHeight : static_cast<int>(edge);
-  const int left = (width - pageWidth) / 2;  // <= 0: centres the crop
-  const int top = (height - pageHeight) / 2;
+  // The bitmap, and the whole page at the chosen scale placed so the crop is centred.
+  const pdft::CropGeometry crop = pdft::ComputeCrop(size.width, size.height, edge, zoom);
+  const int width = crop.bmpW;
+  const int height = crop.bmpH;
 
   BITMAPINFO info = {};
   info.bmiHeader.biSize = sizeof(info.bmiHeader);
@@ -304,10 +315,12 @@ HRESULT RenderPage(FPDF_PAGE page, FPDF_FORMHANDLE form, FS_SIZEF size, UINT edg
     pause.user = &deadline;
     // PDFium only pauses once the deadline has passed, so anything other than
     // DONE means the page failed or was too slow.
-    status = p.RenderPageBitmapStart(bitmap, page, left, top, pageWidth, pageHeight, 0,
-                                     kRenderFlags, &pause);
-    if (status == FPDF_RENDER_DONE && form)
-      p.FFLDraw(form, bitmap, page, left, top, pageWidth, pageHeight, 0, kRenderFlags);
+    status = p.RenderPageBitmapStart(bitmap, page, crop.pageLeft, crop.pageTop, crop.pageW,
+                                     crop.pageH, 0, kRenderFlags, &pause);
+    if (status == FPDF_RENDER_DONE && form) {
+      p.FFLDraw(form, bitmap, page, crop.pageLeft, crop.pageTop, crop.pageW, crop.pageH, 0,
+                kRenderFlags);
+    }
     p.RenderPageClose(page);
     p.BitmapDestroy(bitmap);  // leaves the DIB alone
   }
@@ -368,17 +381,23 @@ HRESULT RenderFirstPage(const FileBuffer& file, UINT edge, int zoom, ULONGLONG d
 
 // ---- COM --------------------------------------------------------------------
 
-class PdfThumbnailProvider final : public IInitializeWithStream, public IThumbnailProvider {
+// Explorer uses IInitializeWithStream and IThumbnailProvider. Only a preview that
+// asks for the private IID gets IPdfThumbnailsPreviewOptions.
+class PdfThumbnailProvider final : public IInitializeWithStream,
+                                   public IThumbnailProvider,
+                                   public pdft::IPdfThumbnailsPreviewOptions {
  public:
   PdfThumbnailProvider() { InterlockedIncrement(&g_serverRefs); }
 
-  // IUnknown
+  // IUnknown. IID_IUnknown always gives the IInitializeWithStream pointer (COM identity).
   STDMETHODIMP QueryInterface(REFIID iid, void** object) override {
     if (!object) return E_POINTER;
     if (IsEqualIID(iid, IID_IUnknown) || IsEqualIID(iid, kIidInitializeWithStream)) {
       *object = static_cast<IInitializeWithStream*>(this);
     } else if (IsEqualIID(iid, kIidThumbnailProvider)) {
       *object = static_cast<IThumbnailProvider*>(this);
+    } else if (IsEqualIID(iid, kIidPreviewOptions)) {
+      *object = static_cast<pdft::IPdfThumbnailsPreviewOptions*>(this);
     } else {
       *object = nullptr;
       return E_NOINTERFACE;
@@ -419,13 +438,19 @@ class PdfThumbnailProvider final : public IInitializeWithStream, public IThumbna
     FileBuffer file;
     HRESULT hr = file.ReadAll(stream_, start + kReadBudgetMs);
     if (FAILED(hr)) return hr;
-    const int zoom = ReadZoomPercent();
+    const int zoom = previewZoom_ ? previewZoom_ : ReadZoomPercent();
     if (!AcquirePdfiumLock(start + kLockWaitMs)) return WTS_E_EXTRACTIONTIMEDOUT;
     hr = RenderFirstPage(file, cx < kMaxEdge ? cx : kMaxEdge, zoom,
                          GetTickCount64() + kRenderBudgetMs, bitmap);
     ReleasePdfiumLock();
     if (SUCCEEDED(hr)) *alpha = WTSAT_RGB;
     return hr;
+  }
+
+  // IPdfThumbnailsPreviewOptions: this object ignores the saved zoom from now on.
+  STDMETHODIMP SetZoom(int percent) override {
+    previewZoom_ = pdft::ClampZoom(percent);
+    return S_OK;
   }
 
  private:
@@ -436,6 +461,7 @@ class PdfThumbnailProvider final : public IInitializeWithStream, public IThumbna
 
   LONG refs_ = 1;
   IStream* stream_ = nullptr;
+  int previewZoom_ = 0;  // 0 until SetZoom; then kMinZoom..kMaxZoom
 };
 
 class ClassFactory final : public IClassFactory {

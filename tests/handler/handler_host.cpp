@@ -4,6 +4,7 @@
 
 #include <cstdio>
 
+#include "preview_override.h"
 #include "project_config.h"
 
 namespace pdft::test {
@@ -91,12 +92,32 @@ HRESULT HandlerHost::CreateProvider(IInitializeWithStream** init) const {
 }
 
 Rendered HandlerHost::RenderStream(IStream* stream, UINT cx) const {
+  return Render(stream, cx, nullptr);
+}
+
+Rendered HandlerHost::RenderFile(const std::wstring& file, UINT cx) const {
+  return RenderPath(file, cx, nullptr);
+}
+
+Rendered HandlerHost::RenderFileAtZoom(const std::wstring& file, UINT cx, int zoom) const {
+  return RenderPath(file, cx, &zoom);
+}
+
+Rendered HandlerHost::Render(IStream* stream, UINT cx, const int* zoom) const {
   Rendered result;
   const double start = NowMs();
   IInitializeWithStream* init = nullptr;
   IThumbnailProvider* provider = nullptr;
   HBITMAP bitmap = nullptr;
   result.hr = CreateProvider(&init);
+  if (SUCCEEDED(result.hr) && zoom) {
+    pdft::IPdfThumbnailsPreviewOptions* options = nullptr;
+    result.hr = init->QueryInterface(pdft::kPreviewIid, reinterpret_cast<void**>(&options));
+    if (SUCCEEDED(result.hr)) {
+      result.hr = options->SetZoom(*zoom);
+      options->Release();
+    }
+  }
   if (SUCCEEDED(result.hr)) result.hr = init->Initialize(stream, STGM_READ);
   if (SUCCEEDED(result.hr)) {
     result.hr = init->QueryInterface(pdft::kThumbSlotIid, reinterpret_cast<void**>(&provider));
@@ -110,7 +131,7 @@ Rendered HandlerHost::RenderStream(IStream* stream, UINT cx) const {
   return result;
 }
 
-Rendered HandlerHost::RenderFile(const std::wstring& file, UINT cx) const {
+Rendered HandlerHost::RenderPath(const std::wstring& file, UINT cx, const int* zoom) const {
   IStream* stream = nullptr;
   const HRESULT hr = SHCreateStreamOnFileEx(file.c_str(), STGM_READ | STGM_SHARE_DENY_NONE,
                                             FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &stream);
@@ -119,7 +140,7 @@ Rendered HandlerHost::RenderFile(const std::wstring& file, UINT cx) const {
     failed.hr = hr;
     return failed;
   }
-  Rendered result = RenderStream(stream, cx);
+  Rendered result = Render(stream, cx, zoom);
   stream->Release();
   return result;
 }

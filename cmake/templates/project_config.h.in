@@ -20,6 +20,10 @@ inline constexpr wchar_t kArch[] = L"@PDFT_ARCH@";
 inline constexpr wchar_t kHandlerClsidString[] = L"@PDFT_C_HANDLER_CLSID@";
 inline constexpr GUID kHandlerClsid = @PDFT_GUID_HANDLER_CLSID@;
 inline constexpr wchar_t kHandlerClassName[] = L"@PDFT_C_HANDLER_CLASS_NAME@";
+// IPdfThumbnailsPreviewOptions (src/common/preview_override.h), the handler's private interface
+// for previews at an unsaved zoom.
+inline constexpr wchar_t kPreviewIidString[] = L"@PDFT_C_PREVIEW_IID@";
+inline constexpr GUID kPreviewIid = @PDFT_GUID_PREVIEW_IID@;
 inline constexpr wchar_t kHandlerDll[] = L"@PDFT_C_HANDLER_DLL@";
 inline constexpr wchar_t kPdfiumDll[] = L"@PDFT_C_PDFIUM_DLL@";
 inline constexpr wchar_t kSettingsExe[] = L"@PDFT_C_SETTINGS_EXE@";

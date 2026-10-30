@@ -2,12 +2,15 @@
 # nothing runs at build time and cross-compiled ARM64 builds work; run them with
 #   ctest --preset x64-release -L "unit|handler"
 #
-#   unit.tests                pdft_unit_tests: test-PDF generator (byte-identical to the 1.x
-#                             generator), Medium-integrity support, temp folders
+#   unit.tests                pdft_unit_tests: crop math, zoom clamping, the generated GUIDs,
+#                             test-PDF generator (byte-identical to the 1.x generator),
+#                             Medium-integrity support, temp folders, HKCU redirection
 #   unit.samples              src/app/res/sample-*.pdf == `thumbtest makesamples` output
 #   handler.tests             pdft_handler_tests: PdfThumbnails.dll in-process at Medium
-#                             integrity (relaunches itself when elevated): crop table, pixels,
-#                             COM surface, error HRESULTs, 8-thread stress
+#                             integrity (relaunches itself when elevated) with HKCU redirected to
+#                             a private key: crop table, pixels, COM surface, error HRESULTs,
+#                             where the zoom comes from (preview override, HKCU, settings.ini),
+#                             8-thread stress
 #   handler.refuses_elevated  pdft_refuses_elevated: elevated, the DLL must refuse to render;
 #                             skipped (exit 77) when not elevated
 # Test support (tests/support) is added by the top-level CMakeLists.txt: thumbtest uses it too.
@@ -65,11 +68,16 @@ endfunction()
 # ---- unit ----------------------------------------------------------------------------------
 add_executable(pdft_unit_tests
   unit/main.cpp
+  unit/crop_math_test.cpp
+  unit/zoom_test.cpp
+  unit/project_config_test.cpp
   unit/test_pdfs_test.cpp
   unit/medium_il_test.cpp
-  unit/temp_dir_test.cpp)
+  unit/temp_dir_test.cpp
+  unit/registry_sandbox_test.cpp)
 pdft_harden(pdft_unit_tests TEST)
-target_link_libraries(pdft_unit_tests PRIVATE pdft_testsupport GTest::gtest bcrypt shell32)
+target_link_libraries(pdft_unit_tests PRIVATE pdft_testsupport pdft_common pdft_config GTest::gtest
+                                              bcrypt shell32 ole32 uuid)
 add_dependencies(pdft_unit_tests pdft_run_medium)   # RunMediumTool tests
 pdft_add_program_test(unit.tests pdft_unit_tests LABELS unit)
 
@@ -96,7 +104,7 @@ endif()
 # ---- handler -------------------------------------------------------------------------------
 add_library(pdft_handler_host STATIC handler/handler_host.cpp handler/handler_host.h)
 pdft_harden(pdft_handler_host LIB)
-target_link_libraries(pdft_handler_host PUBLIC pdft_testsupport pdft_config
+target_link_libraries(pdft_handler_host PUBLIC pdft_testsupport pdft_config pdft_common
                                                ole32 uuid shlwapi gdi32 user32)
 
 add_executable(pdft_handler_tests
@@ -104,6 +112,7 @@ add_executable(pdft_handler_tests
   handler/handler_env.h
   handler/render_dimensions_test.cpp
   handler/render_errors_test.cpp
+  handler/zoom_precedence_test.cpp
   handler/stress_test.cpp)
 pdft_harden(pdft_handler_tests TEST)
 target_link_libraries(pdft_handler_tests PRIVATE pdft_handler_host GTest::gtest)
