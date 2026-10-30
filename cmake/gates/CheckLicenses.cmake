@@ -1,8 +1,10 @@
 # gate.licenses: the staged tree carries every license and notice the binaries need, unchanged,
 # and THIRD-PARTY-NOTICES.md names every staged license file by its path.
 #   cmake -DSTAGE_DIR=<stage> -DPDFIUM_DIR=<extracted PDFium archive> -DPROJECT_LICENSE=<LICENSE>
-#         -DNOTICES=<THIRD-PARTY-NOTICES.md> [-DWIL_LICENSE=<WIL's LICENSE>] -P CheckLicenses.cmake
-# WIL_LICENSE is passed once a target compiles WIL in (the settings app).
+#         -DNOTICES=<THIRD-PARTY-NOTICES.md> [-DWIL_LICENSE=<WIL's LICENSE>]
+#         [-DGTEST_LICENSE=<GoogleTest's LICENSE>] -P CheckLicenses.cmake
+# WIL_LICENSE is passed once a target compiles WIL in (the settings app); GTEST_LICENSE when
+# the staged component is the test bundle (programs linked with GoogleTest).
 
 cmake_minimum_required(VERSION 3.31)
 include("${CMAKE_CURRENT_LIST_DIR}/PeTools.cmake")
@@ -29,6 +31,9 @@ pdft_same_file("THIRD-PARTY-NOTICES.md" "${NOTICES}")
 pdft_same_file("licenses/pdfium-binaries-LICENSE.txt" "${PDFIUM_DIR}/LICENSE")
 if(WIL_LICENSE)
   pdft_same_file("licenses/wil-LICENSE.txt" "${WIL_LICENSE}")
+endif()
+if(GTEST_LICENSE)
+  pdft_same_file("licenses/googletest-LICENSE.txt" "${GTEST_LICENSE}")
 endif()
 
 # Every license file in the PDFium archive, PDFium's own and FreeType's above all.

@@ -1,4 +1,5 @@
-# Third-party code, all of it downloaded against the pins in Pins.cmake.
+# Third-party code, all of it downloaded against the pins in Pins.cmake (GoogleTest: see the
+# end of this file).
 #
 # PDFium (per architecture):
 #   pdft_pdfium_headers  INTERFACE, SYSTEM include path for the headers only. Never link
@@ -50,3 +51,27 @@ add_custom_command(
   VERBATIM)
 add_custom_target(pdft_pdfium_runtime ALL DEPENDS "${PDFT_PDFIUM_RUNTIME}")
 unset(_pdft_pdfium_dll)
+
+# GoogleTest (test programs only; never shipped). pdft_add_googletest() defines GTest::gtest
+# and GTest::gtest_main from the pinned release archive and sets PDFT_GTEST_DIR (the extracted
+# sources, for its LICENSE). It is built with its own flags: no pdft_harden, no /WX from us.
+set(PDFT_GTEST_ARCHIVE "" CACHE FILEPATH
+    "Offline builds: a local googletest-<version>.tar.gz to use instead of downloading (checked against the pin)")
+
+function(pdft_add_googletest)
+  pdft_download_verified(archive
+    URL "${PDFT_GTEST_URL}"
+    SHA256 "${PDFT_GTEST_SHA256}"
+    LOCAL_FILE "${PDFT_GTEST_ARCHIVE}")
+  include(FetchContent)
+  FetchContent_Declare(googletest
+    URL "${archive}"
+    URL_HASH SHA256=${PDFT_GTEST_SHA256}
+    SYSTEM EXCLUDE_FROM_ALL)
+  # Static libraries with the static CRT (CMAKE_MSVC_RUNTIME_LIBRARY), GoogleTest only.
+  set(BUILD_GMOCK OFF)
+  set(INSTALL_GTEST OFF)
+  set(gtest_force_shared_crt OFF)
+  FetchContent_MakeAvailable(googletest)
+  set(PDFT_GTEST_DIR "${googletest_SOURCE_DIR}" PARENT_SCOPE)
+endfunction()

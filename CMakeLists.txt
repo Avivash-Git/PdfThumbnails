@@ -33,6 +33,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")   # DLLs and exes 
 set(CMAKE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 option(PDFT_BUILD_TOOLS "Build the developer tools (thumbtest)" ON)
+include(CTest)   # BUILD_TESTING (default ON): gates, unit and handler tests
 
 include(cmake/TargetArch.cmake)
 include(cmake/Hardening.cmake)
@@ -42,14 +43,18 @@ include(cmake/Dependencies.cmake)
 pdft_generate_project_config()
 
 add_subdirectory(src/handler)
+if(PDFT_BUILD_TOOLS OR BUILD_TESTING)
+  add_subdirectory(tests/support)   # test PDFs, Medium-IL relaunch, temp dirs
+endif()
 if(PDFT_BUILD_TOOLS)
-  add_subdirectory(tests/support)   # the test-PDF generator
   add_subdirectory(tools/thumbtest)
+endif()
+if(BUILD_TESTING)
+  add_subdirectory(tests)
 endif()
 
 include(cmake/Install.cmake)
 
-include(CTest)
 if(BUILD_TESTING)
   include(cmake/Gates.cmake)
 endif()

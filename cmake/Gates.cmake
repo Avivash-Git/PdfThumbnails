@@ -14,6 +14,8 @@
 #   gate.pdfium.binds          src/handler/pdfium_functions.inc has 18 entries, all exported
 #   gate.pdfium.hash           the staged PDFium DLL is the pinned one
 #   gate.licenses              every license and notice is staged and named in the notices
+#   gate.licenses.tests        the same for the tests component (test bundle), which also
+#                              carries GoogleTest's license (fixture gate.stage.tests)
 #   gate.buildid               cmake/BuildId.cmake: fixed vector + the staged DLLs
 #
 # Our own binaries register through pdft_add_binary_gates(); the settings exes (WP6) add theirs
@@ -103,6 +105,23 @@ pdft_add_gate(gate.licenses CheckLicenses.cmake
   "-DSTAGE_DIR=${PDFT_GATE_STAGE}" "-DPDFIUM_DIR=${PDFT_PDFIUM_DIR}"
   "-DPROJECT_LICENSE=${PROJECT_SOURCE_DIR}/LICENSE"
   "-DNOTICES=${PROJECT_SOURCE_DIR}/THIRD-PARTY-NOTICES.md" ${_pdft_wil_license})
+# The test bundle (CI artifact) redistributes PDFium and links GoogleTest: same check, own stage.
+if(DEFINED PDFT_GTEST_DIR)
+  set(_pdft_tests_stage "${CMAKE_BINARY_DIR}/gate-stage-tests")
+  add_test(NAME gate.stage.tests
+    COMMAND "${CMAKE_COMMAND}" "-DBUILD_DIR=${CMAKE_BINARY_DIR}" "-DSTAGE_DIR=${_pdft_tests_stage}"
+            "-DCONFIG=$<CONFIG>" -DCOMPONENT=tests -P "${PDFT_GATE_SCRIPTS}/Stage.cmake")
+  set_tests_properties(gate.stage.tests PROPERTIES LABELS gate FIXTURES_SETUP gate.stage.tests)
+  add_test(NAME gate.licenses.tests
+    COMMAND "${CMAKE_COMMAND}" "-DSTAGE_DIR=${_pdft_tests_stage}" "-DPDFIUM_DIR=${PDFT_PDFIUM_DIR}"
+            "-DPROJECT_LICENSE=${PROJECT_SOURCE_DIR}/LICENSE"
+            "-DNOTICES=${PROJECT_SOURCE_DIR}/THIRD-PARTY-NOTICES.md"
+            "-DGTEST_LICENSE=${PDFT_GTEST_DIR}/LICENSE" ${_pdft_wil_license}
+            -P "${PDFT_GATE_SCRIPTS}/CheckLicenses.cmake")
+  set_tests_properties(gate.licenses.tests PROPERTIES
+    LABELS gate FIXTURES_REQUIRED gate.stage.tests)
+  unset(_pdft_tests_stage)
+endif()
 pdft_add_gate(gate.buildid CheckBuildId.cmake
   "-DSCRIPT=${PROJECT_SOURCE_DIR}/cmake/BuildId.cmake" "-DWORK_DIR=${CMAKE_BINARY_DIR}/gate-buildid"
   "-DDLL=${PDFT_GATE_STAGE}/$<TARGET_FILE_NAME:pdft_handler>"

@@ -42,7 +42,8 @@ PDFium itself contains the following components:
 | --- | --- | --- |
 | [Windows Implementation Libraries (WIL)](https://github.com/microsoft/wil), Copyright Microsoft Corporation; header-only, compiled into `PdfThumbnailsSettings.exe` and `PdfThumbnailsCli.exe` | MIT | `licenses/wil-LICENSE.txt` |
 
-## Not shipped
+## Test programs (not part of a release)
 
-[GoogleTest](https://github.com/google/googletest) (BSD-3-Clause) is used only by the test
-programs, which are not part of a release.
+| Component | License | Full text |
+| --- | --- | --- |
+| [GoogleTest](https://github.com/google/googletest), Copyright 2008 Google Inc.; linked into the test programs (`pdft_unit_tests.exe`, `pdft_handler_tests.exe`, `pdft_refuses_elevated.exe`) only | BSD-3-Clause | `licenses/googletest-LICENSE.txt` (test bundle only) |

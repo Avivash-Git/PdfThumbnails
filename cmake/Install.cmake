@@ -7,8 +7,10 @@
 #              licenses/wil-LICENSE.txt                      (once the app compiles WIL in)
 #            The gate.* tests stage this component and check it (cmake/Gates.cmake).
 #   symbols  PDBs of our own binaries
-#   tests    developer tools next to the runtime they exercise (thumbtest), with the same
-#            notices, because the bundle redistributes PDFium too
+#   tests    the test programs and developer tools next to the runtime they exercise
+#            (pdft_unit_tests, pdft_handler_tests, pdft_refuses_elevated, pdft-run-medium,
+#            thumbtest), with the same notices, because the bundle redistributes PDFium too,
+#            plus licenses/googletest-LICENSE.txt (the test programs link GoogleTest)
 
 include_guard(GLOBAL)
 
@@ -38,9 +40,25 @@ pdft_install_notices(runtime)
 install(FILES "$<TARGET_PDB_FILE:pdft_handler>" DESTINATION . COMPONENT symbols)
 
 # ---- tests --------------------------------------------------------------------------------
-if(TARGET thumbtest)
-  install(FILES "$<TARGET_FILE:thumbtest>" "$<TARGET_FILE:pdft_handler>" "${PDFT_PDFIUM_RUNTIME}"
+set(_pdft_test_programs "")
+foreach(_pdft_target IN ITEMS thumbtest pdft_run_medium pdft_unit_tests pdft_handler_tests
+                             pdft_refuses_elevated)
+  if(TARGET ${_pdft_target})
+    list(APPEND _pdft_test_programs ${_pdft_target})
+  endif()
+endforeach()
+if(_pdft_test_programs)
+  install(FILES "$<TARGET_FILE:pdft_handler>" "${PDFT_PDFIUM_RUNTIME}"
           DESTINATION . COMPONENT tests)
   pdft_install_notices(tests)
-  install(FILES "$<TARGET_PDB_FILE:thumbtest>" DESTINATION . COMPONENT symbols)
+  foreach(_pdft_target IN LISTS _pdft_test_programs)
+    install(FILES "$<TARGET_FILE:${_pdft_target}>" DESTINATION . COMPONENT tests)
+    install(FILES "$<TARGET_PDB_FILE:${_pdft_target}>" DESTINATION . COMPONENT symbols)
+  endforeach()
 endif()
+if(DEFINED PDFT_GTEST_DIR)   # set by tests/CMakeLists.txt
+  install(FILES "${PDFT_GTEST_DIR}/LICENSE"
+          DESTINATION licenses RENAME googletest-LICENSE.txt COMPONENT tests)
+endif()
+unset(_pdft_test_programs)
+unset(_pdft_target)
