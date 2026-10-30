@@ -11,9 +11,52 @@
 #   handler.refuses_elevated  pdft_refuses_elevated: elevated, the DLL must refuse to render;
 #                             skipped (exit 77) when not elevated
 # Test support (tests/support) is added by the top-level CMakeLists.txt: thumbtest uses it too.
+#
+# The same tests also run from the installed test bundle, a flat folder made with
+#   cmake --install <build> --prefix <folder> --component tests
+#   ctest --test-dir <folder> -L "unit|handler"
+# CI builds ARM64 on an x64 host and runs the ARM64 bundle on an ARM64 runner. The bundle's
+# CTestTestfile.cmake is generated at the end of this file from the registrations below, with
+# paths relative to the bundle: register program tests with pdft_add_program_test() so both
+# lists stay the same.
 
 pdft_add_googletest()
 set(PDFT_GTEST_DIR "${PDFT_GTEST_DIR}" PARENT_SCOPE)   # for Install.cmake (its LICENSE)
+
+set_property(GLOBAL PROPERTY PDFT_BUNDLE_TESTS "")
+
+# pdft_bundle_test(<name> COMMAND <word>... [PROPERTIES <property> <value>...])
+# Adds one test to the installed bundle only. CTest runs bundle tests in the bundle folder and
+# defines no path variables there (not even CMAKE_CURRENT_LIST_DIR), so paths are relative to
+# the folder ("./<program>"). Words may use generator expressions.
+function(pdft_bundle_test name)
+  cmake_parse_arguments(PARSE_ARGV 1 arg "" "" "COMMAND;PROPERTIES")
+  set(text "add_test([==[${name}]==]")
+  foreach(word IN LISTS arg_COMMAND)
+    string(APPEND text " \"${word}\"")
+  endforeach()
+  string(APPEND text ")\n")
+  if(arg_PROPERTIES)
+    string(APPEND text "set_tests_properties([==[${name}]==] PROPERTIES")
+    foreach(word IN LISTS arg_PROPERTIES)
+      string(APPEND text " [==[${word}]==]")
+    endforeach()
+    string(APPEND text ")\n")
+  endif()
+  set_property(GLOBAL APPEND_STRING PROPERTY PDFT_BUNDLE_TESTS "${text}")
+endfunction()
+
+# pdft_add_program_test(<name> <target> [<property> <value>...])
+# A test that runs <target>'s program with no arguments, in the build tree and in the bundle.
+function(pdft_add_program_test name target)
+  add_test(NAME ${name} COMMAND ${target})
+  if(ARGN)
+    set_tests_properties(${name} PROPERTIES ${ARGN})
+  endif()
+  pdft_bundle_test(${name}
+    COMMAND "./$<TARGET_FILE_NAME:${target}>"
+    PROPERTIES ${ARGN})
+endfunction()
 
 # ---- unit ----------------------------------------------------------------------------------
 add_executable(pdft_unit_tests
@@ -24,8 +67,7 @@ add_executable(pdft_unit_tests
 pdft_harden(pdft_unit_tests TEST)
 target_link_libraries(pdft_unit_tests PRIVATE pdft_testsupport GTest::gtest bcrypt shell32)
 add_dependencies(pdft_unit_tests pdft_run_medium)   # RunMediumTool tests
-add_test(NAME unit.tests COMMAND pdft_unit_tests)
-set_tests_properties(unit.tests PROPERTIES LABELS unit)
+pdft_add_program_test(unit.tests pdft_unit_tests LABELS unit)
 
 if(TARGET thumbtest)
   add_test(NAME unit.samples
@@ -34,6 +76,15 @@ if(TARGET thumbtest)
             "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/samples"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/CheckSamples.cmake")
   set_tests_properties(unit.samples PROPERTIES LABELS unit)
+  # No CMAKE_COMMAND in a bundle either: it runs the cmake on PATH.
+  pdft_bundle_test(unit.samples
+    COMMAND cmake "-DTHUMBTEST=./$<TARGET_FILE_NAME:thumbtest>" -DCOMMITTED_DIR=samples
+            -DWORK_DIR=samples-work -P CheckSamples.cmake
+    PROPERTIES LABELS unit)
+  install(FILES CheckSamples.cmake DESTINATION . COMPONENT tests)
+  install(FILES "${PROJECT_SOURCE_DIR}/src/app/res/sample-document.pdf"
+                "${PROJECT_SOURCE_DIR}/src/app/res/sample-slide.pdf"
+          DESTINATION samples COMPONENT tests)
 endif()
 
 # ---- handler -------------------------------------------------------------------------------
@@ -51,13 +102,20 @@ add_executable(pdft_handler_tests
 pdft_harden(pdft_handler_tests TEST)
 target_link_libraries(pdft_handler_tests PRIVATE pdft_handler_host GTest::gtest)
 add_dependencies(pdft_handler_tests pdft_handler)   # PdfThumbnails.dll (+ PDFium) next to it
-add_test(NAME handler.tests COMMAND pdft_handler_tests)
 # Serial: the stress test wants the machine to itself, and its timing budgets are 1.1's.
-set_tests_properties(handler.tests PROPERTIES LABELS handler RUN_SERIAL TRUE)
+pdft_add_program_test(handler.tests pdft_handler_tests LABELS handler RUN_SERIAL TRUE)
 
 add_executable(pdft_refuses_elevated handler/refuses_elevated.cpp)
 pdft_harden(pdft_refuses_elevated TEST)
 target_link_libraries(pdft_refuses_elevated PRIVATE pdft_handler_host)
 add_dependencies(pdft_refuses_elevated pdft_handler)
-add_test(NAME handler.refuses_elevated COMMAND pdft_refuses_elevated)
-set_tests_properties(handler.refuses_elevated PROPERTIES LABELS handler SKIP_RETURN_CODE 77)
+pdft_add_program_test(handler.refuses_elevated pdft_refuses_elevated
+                      LABELS handler SKIP_RETURN_CODE 77)
+
+# ---- installed test bundle -----------------------------------------------------------------
+get_property(_pdft_bundle_tests GLOBAL PROPERTY PDFT_BUNDLE_TESTS)
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/bundle/CTestTestfile.cmake"
+     CONTENT "# Generated by tests/CMakeLists.txt: the tests of the installed test bundle.\n# Run: ctest --test-dir <this folder> -L \"unit|handler\"\n${_pdft_bundle_tests}")
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/bundle/CTestTestfile.cmake"
+        DESTINATION . COMPONENT tests)
+unset(_pdft_bundle_tests)

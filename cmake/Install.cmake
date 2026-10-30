@@ -6,11 +6,14 @@
 #              licenses/pdfium-binaries-LICENSE.txt
 #              licenses/wil-LICENSE.txt                      (once the app compiles WIL in)
 #            The gate.* tests stage this component and check it (cmake/Gates.cmake).
-#   symbols  PDBs of our own binaries
-#   tests    the test programs and developer tools next to the runtime they exercise
-#            (pdft_unit_tests, pdft_handler_tests, pdft_refuses_elevated, pdft-run-medium,
-#            thumbtest), with the same notices, because the bundle redistributes PDFium too,
-#            plus licenses/googletest-LICENSE.txt (the test programs link GoogleTest)
+#   symbols  PDBs of the binaries in runtime (the test programs carry theirs in tests)
+#   tests    the test programs and developer tools (with their PDBs) next to the runtime they
+#            exercise (pdft_unit_tests, pdft_handler_tests, pdft_refuses_elevated,
+#            pdft-run-medium, thumbtest), with the same notices, because the bundle
+#            redistributes PDFium too, plus licenses/googletest-LICENSE.txt (the test programs
+#            link GoogleTest), and a CTestTestfile.cmake with relative paths
+#            (tests/CMakeLists.txt), so `ctest --test-dir <dir>` runs the bundle on another
+#            machine (CI: the ARM64 runner)
 
 include_guard(GLOBAL)
 
@@ -52,8 +55,8 @@ if(_pdft_test_programs)
           DESTINATION . COMPONENT tests)
   pdft_install_notices(tests)
   foreach(_pdft_target IN LISTS _pdft_test_programs)
-    install(FILES "$<TARGET_FILE:${_pdft_target}>" DESTINATION . COMPONENT tests)
-    install(FILES "$<TARGET_PDB_FILE:${_pdft_target}>" DESTINATION . COMPONENT symbols)
+    install(FILES "$<TARGET_FILE:${_pdft_target}>" "$<TARGET_PDB_FILE:${_pdft_target}>"
+            DESTINATION . COMPONENT tests)
   endforeach()
 endif()
 if(DEFINED PDFT_GTEST_DIR)   # set by tests/CMakeLists.txt
