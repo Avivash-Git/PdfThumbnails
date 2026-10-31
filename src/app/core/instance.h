@@ -29,9 +29,13 @@ namespace pdft {
 [[nodiscard]] HRESULT GetCurrentUserSid(std::wstring* sid) noexcept;
 
 // The descriptor of the app's named objects (pure): full access for |userSid|, SYSTEM and
-// Administrators, and a Medium integrity label with no-write-up, so a Medium and a High process
-// of the user can both open it and a Low one cannot change it. With |everyoneSynchronize|,
-// everyone may also wait on it (an installer started by another account checks for it).
+// Administrators, and a Medium integrity label with no-write-up, no-read-up and no-execute-up,
+// so a Medium and a High process of the user can both open it and a process of the same user
+// below Medium (a sandboxed browser part, say) cannot open it at all. No-execute-up matters
+// most: waiting on a mutex needs SYNCHRONIZE, which a mutex counts as execute access, so with
+// no-write-up alone a Low process could wait on the operation lock, own it and keep every check
+// out. With |everyoneSynchronize|, everyone may also wait on it (an installer started by another
+// account checks for it).
 std::wstring NamedObjectSddl(std::wstring_view userSid, bool everyoneSynchronize);
 
 // The names (pure). The operation lock lives in the Global namespace: the same user signed in
@@ -83,9 +87,15 @@ class OperationLock {
  public:
   // What Acquire returns when another process held the lock for the whole wait.
   static constexpr HRESULT kBusy = __HRESULT_FROM_WIN32(ERROR_BUSY);
+  // What Acquire returns when the lock's name belongs to an object that a process below Medium
+  // integrity created (before any of the app's processes did): the label keeps such processes
+  // from opening the app's own lock, but whoever creates a name first owns it. Waiting on that
+  // object would let the other process decide when checks run, so Acquire never does.
+  static constexpr HRESULT kTakenByLowerIntegrity = __HRESULT_FROM_WIN32(ERROR_INVALID_LABEL);
 
   // Waits up to |waitMs| for the lock. S_OK: *lock holds it. kBusy: another process still has
-  // it. A holder that ended without releasing it counts as released (abandoned() is then true).
+  // it. kTakenByLowerIntegrity: see above. A holder that ended without releasing it counts as
+  // released (abandoned() is then true).
   [[nodiscard]] static HRESULT Acquire(DWORD waitMs, std::optional<OperationLock>* lock) noexcept;
 
   OperationLock(OperationLock&&) noexcept = default;

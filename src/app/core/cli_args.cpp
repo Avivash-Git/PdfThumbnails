@@ -31,7 +31,8 @@ constexpr VerbInfo kVerbs[] = {
     {Verb::kCheck, L"--check", kNone, L"", Writes::kYes, false, false, false, false,
      L"Check, and repair what is safe to repair (what the scheduled checks run)."},
     {Verb::kFix, L"--fix", kNone, L"", Writes::kYes, false, false, false, false,
-     L"Repair everything, damage for all users included (asks for administrator rights)."},
+     L"Repair what --check repairs; --take-back also takes the .pdf slots back from another "
+     L"handler (asks first, or --yes). The part for all users needs administrator rights."},
     {Verb::kZoom, L"--zoom", kOptional, L"<100-200>", Writes::kWithValue, false, false, false,
      false,
      L"Show the thumbnail zoom, or set it and refresh the thumbnails (100 shows the whole page)."},

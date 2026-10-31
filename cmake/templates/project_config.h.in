@@ -36,6 +36,8 @@ inline constexpr wchar_t kCliExe[] = L"@PDFT_C_CLI_EXE@";
 inline constexpr wchar_t kRegKey[] = L"@PDFT_C_REG_KEY@";
 inline constexpr wchar_t kTaskFolder[] = L"@PDFT_C_TASK_FOLDER@";
 inline constexpr wchar_t kTaskPrefix[] = L"@PDFT_C_TASK_PREFIX@";
+// The check task's name in the root folder, when the task folder cannot be made (+ user SID).
+inline constexpr wchar_t kTaskRootPrefix[] = L"@PDFT_C_TASK_ROOT_PREFIX@";
 inline constexpr wchar_t kObjectPrefix[] = L"@PDFT_C_OBJECT_PREFIX@";
 inline constexpr wchar_t kInnoAppId[] = L"@PDFT_C_INNO_APPID@";
 inline constexpr wchar_t kAumid[] = L"@PDFT_C_AUMID@";

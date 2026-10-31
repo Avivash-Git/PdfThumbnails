@@ -1,7 +1,13 @@
 # The settings app: two executables built from one code base.
 #   pdft_appcore           STATIC   everything but the window (namespace pdft): start-up
 #                                   hardening, COM security, the command line, the log, output,
-#                                   named objects, the process context
+#                                   named objects, the process context; what the checks read
+#                                   and repair (the COM class and .pdf slots, settings, build
+#                                   folders, DLL headers, 1.x leftovers, Smart App Control,
+#                                   PdfCraft, the check task, Explorer's settings and the
+#                                   Explorer test); the check itself (gathering, findings,
+#                                   repairs, the operation lock around them); its reports (the
+#                                   status text, the JSON status, the masked diagnostics)
 #   PdfThumbnailsSettings  WIN32    ${PDFT_SETTINGS_EXE}: the window, scheduled checks, elevated
 #                                   steps; shows no console window
 #   PdfThumbnailsCli       console  ${PDFT_CLI_EXE}: terminals and scripts (a shell waits for it
@@ -12,18 +18,38 @@
 
 add_library(pdft_appcore STATIC
   core/app_main.cpp core/app_main.h
+  core/build_folder.cpp core/build_folder.h
+  core/check.cpp core/check.h
   core/cli_args.cpp core/cli_args.h
   core/com_security.cpp core/com_security.h
   core/commands.cpp core/commands.h
   core/context.cpp core/context.h
+  core/delay_load.cpp core/delay_load.h
+  core/diagnostics.cpp core/diagnostics.h
+  core/evaluate.cpp core/evaluate.h
   core/exit_code.h
+  core/explorer_settings.cpp core/explorer_settings.h
   core/instance.cpp core/instance.h
+  core/json.cpp core/json.h
+  core/legacy.cpp core/legacy.h
+  core/live_test.cpp core/live_test.h
   core/log.cpp core/log.h
   core/mode.h
   core/output.cpp core/output.h
   core/paths.cpp core/paths.h
+  core/pdfcraft.cpp core/pdfcraft.h
+  core/pe_info.cpp core/pe_info.h
+  core/registration.cpp core/registration.h
+  core/registry_roots.cpp core/registry_roots.h
+  core/repair.cpp core/repair.h
+  core/sac.cpp core/sac.h
+  core/settings.cpp core/settings.h
+  core/snapshot.cpp core/snapshot.h
   core/startup.cpp core/startup.h
+  core/status_format.cpp core/status_format.h
   core/strings.cpp core/strings.h
+  core/system_probes.cpp core/system_probes.h
+  core/tasks.cpp core/tasks.h
   core/wmi_registry.cpp core/wmi_registry.h
   res/resource_ids.h)
 target_include_directories(pdft_appcore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/core"
@@ -32,7 +58,11 @@ pdft_harden(pdft_appcore LIB)
 # KnownDLLs only (gate.imports.*). uuid is a static library of GUIDs (the known-folder IDs), not
 # a DLL.
 target_link_libraries(pdft_appcore PUBLIC pdft_config pdft_common pdft_wil
-                                   PRIVATE ole32 oleaut32 advapi32 shell32 user32 uuid)
+                                   PRIVATE ole32 oleaut32 advapi32 shell32 shlwapi user32 uuid)
+# Not KnownDLLs: CNG (build ids hash the DLLs), the event log (Code Integrity blocks) and
+# Windows Installer (finding PdfCraft). The event-log and Windows Installer code checks that its
+# DLL loads before the first call (delay_load.h), so a missing one is an answer, not a crash.
+pdft_delay_load(pdft_appcore bcrypt.dll wevtapi.dll msi.dll)
 
 # pdft_add_app_exe(<target> <WIN32|CONSOLE> <file name> <manifest template> <description>
 #                  <source>...)

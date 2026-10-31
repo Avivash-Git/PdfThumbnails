@@ -1,5 +1,6 @@
 #include "instance.h"
 
+#include <aclapi.h>
 #include <sddl.h>
 #include <wil/result_macros.h>
 
@@ -16,6 +17,31 @@ namespace {
 std::wstring& NameSuffix() {
   static std::wstring suffix;
   return suffix;
+}
+
+// Whether the object's integrity label is below Medium. An object without a label counts as
+// Medium, as Windows treats it.
+HRESULT LabelIsBelowMedium(HANDLE object, bool* below) noexcept {
+  *below = false;
+  PACL sacl = nullptr;
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  const DWORD error = GetSecurityInfo(object, SE_KERNEL_OBJECT, LABEL_SECURITY_INFORMATION, nullptr,
+                                      nullptr, nullptr, &sacl, &descriptor);
+  RETURN_IF_WIN32_ERROR(error);
+  wil::unique_hlocal freeDescriptor(descriptor);
+  DWORD rid = SECURITY_MANDATORY_MEDIUM_RID;
+  for (DWORD i = 0; sacl && i < sacl->AceCount; ++i) {
+    ACE_HEADER* ace = nullptr;
+    if (!GetAce(sacl, i, reinterpret_cast<void**>(&ace)) ||
+        ace->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE) {
+      continue;
+    }
+    PSID label = &reinterpret_cast<SYSTEM_MANDATORY_LABEL_ACE*>(ace)->SidStart;
+    const UCHAR count = *GetSidSubAuthorityCount(label);
+    if (count > 0) rid = *GetSidSubAuthority(label, count - 1u);
+  }
+  *below = rid < SECURITY_MANDATORY_MEDIUM_RID;
+  return S_OK;
 }
 
 }  // namespace
@@ -49,7 +75,7 @@ std::wstring NamedObjectSddl(std::wstring_view userSid, bool everyoneSynchronize
   sddl += userSid;
   sddl += L")(A;;GA;;;SY)(A;;GA;;;BA)";
   if (everyoneSynchronize) sddl += L"(A;;0x00100000;;;WD)";  // SYNCHRONIZE
-  sddl += L"S:(ML;;NW;;;ME)";
+  sddl += L"S:(ML;;NWNRNX;;;ME)";
   return sddl;
 }
 
@@ -138,6 +164,11 @@ HRESULT OperationLock::Acquire(DWORD waitMs, std::optional<OperationLock>* lock)
       CreateNamedMutex(OperationLockName(sid), sid, false, 0, std::addressof(mutex), &existed));
   // It exists, but this process may not wait on it: whoever made it keeps everyone else out.
   if (!mutex) return kBusy;
+  if (existed) {
+    bool belowMedium = false;
+    RETURN_IF_FAILED(LabelIsBelowMedium(mutex.get(), &belowMedium));
+    if (belowMedium) return kTakenByLowerIntegrity;
+  }
   bool abandoned = false;
   switch (WaitForSingleObject(mutex.get(), waitMs)) {
     case WAIT_OBJECT_0:

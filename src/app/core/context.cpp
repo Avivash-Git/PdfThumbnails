@@ -11,6 +11,7 @@
 #include <unordered_map>
 
 #include "paths.h"
+#include "pe_info.h"
 #include "project_config.h"
 #include "strings.h"
 #include "wmi_registry.h"
@@ -203,16 +204,8 @@ RegistryViews DecideFromViews(std::span<const ValueViews> values, bool packagedA
   return packagedAncestor ? RegistryViews::kUnknown : RegistryViews::kAgree;
 }
 
-Arch ArchFromMachine(USHORT machine) noexcept {
-  switch (machine) {
-    case IMAGE_FILE_MACHINE_AMD64:
-      return Arch::kX64;
-    case IMAGE_FILE_MACHINE_ARM64:
-      return Arch::kArm64;
-    default:
-      return Arch::kOther;
-  }
-}
+// The same mapping as for DLLs, so a process and a DLL of one architecture always compare equal.
+Arch ArchFromMachine(USHORT machine) noexcept { return MachineToArch(machine); }
 
 HRESULT FindPackagedAncestor(std::optional<std::wstring>* packageFullName) noexcept try {
   packageFullName->reset();

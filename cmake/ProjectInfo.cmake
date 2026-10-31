@@ -30,6 +30,9 @@ set(PDFT_CLI_EXE               "${PDFT_PRODUCT_NAME}Cli.exe")
 set(PDFT_REG_KEY               "Software\\${PDFT_PRODUCT_NAME}")
 set(PDFT_TASK_FOLDER           "\\${PDFT_PRODUCT_NAME}")
 set(PDFT_TASK_PREFIX           "Check ")
+# Where the check task goes when the folder above cannot be made (a standard user without the
+# right to create folders in the root): "<this><user SID>" in the root folder.
+set(PDFT_TASK_ROOT_PREFIX      "${PDFT_PRODUCT_NAME} check ")
 set(PDFT_OBJECT_PREFIX         "${PDFT_PRODUCT_NAME}")    # mutexes, window class, messages
 set(PDFT_INNO_APPID            "{B4584E00-A586-4C24-996D-6032BFDEDE2F}")   # reserved for M3
 set(PDFT_AUMID                 "${PDFT_PRODUCT_NAME}.Settings")            # reserved (toasts)
@@ -103,7 +106,7 @@ endfunction()
 function(pdft_generate_project_config)
   foreach(name IN ITEMS PRODUCT_NAME DESCRIPTION COPYRIGHT HANDLER_CLSID HANDLER_CLASS_NAME
                         PREVIEW_IID HANDLER_DLL PDFIUM_DLL SETTINGS_EXE CLI_EXE REG_KEY TASK_FOLDER
-                        TASK_PREFIX OBJECT_PREFIX INNO_APPID AUMID DEV_TASK_FOLDER DEV_RUN_PREFIX
+                        TASK_PREFIX TASK_ROOT_PREFIX OBJECT_PREFIX INNO_APPID AUMID DEV_TASK_FOLDER DEV_RUN_PREFIX
                         LEGACY_ROOT_NAME LEGACY_TASK
                         LEGACY_RUNONCE LEGACY_SETTINGS_ENV LEGACY_SETTINGS_INI
                         PDFCRAFT_PRODUCT_NAME PDFCRAFT_UPGRADE_CODE PDFCRAFT_SUBSCRIPTION

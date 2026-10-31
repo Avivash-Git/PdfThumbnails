@@ -7,15 +7,37 @@
 #                             Medium-integrity support, temp folders, HKCU redirection; the app's
 #                             pure parts: command line, strings, paths, log, output, exit codes,
 #                             virtualization verdicts, named-object descriptors, start-up
-#                             hardening, the COM descriptor, the executables' string tables;
-#                             pdft-run-outside's pure parts (its request file, command lines,
-#                             exit codes)
+#                             hardening, the COM descriptor, the executables' string tables,
+#                             registry value decoding, PE header and version-resource parsing
+#                             (synthetic files), build ids, slot and zoom decisions, the 1.x
+#                             leftover classifier, the Smart App Control verdict, task
+#                             triggers, the Explorer test's probe PDF and --test-file checks,
+#                             Explorer settings and the Windows build string; the check's
+#                             findings, repair plans and exit codes; the reports: the status
+#                             text line by line, the JSON status (escaping, schema 1, checked by
+#                             a strict JSON reader) and the diagnostics' masking; the --fix
+#                             confirmation rules; pdft-run-outside's pure parts (its request
+#                             file, command lines, exit codes)
 #   unit.samples              src/app/res/sample-*.pdf == `thumbtest makesamples` output
 #   integration.tests         pdft_integration_tests: the app's core against the real system
 #                             (COM under the app's security, WMI, Task Scheduler read-only, named
 #                             objects across processes, the process tree, the registry canary)
-#                             and both executables run with captured output; writes nothing to
-#                             the real profile but the canary's volatile probe key
+#                             and both executables run with captured output; the registration,
+#                             settings, build ids, DLL headers and 1.x leftovers through private
+#                             registry keys and temporary folders; read-only: Smart App Control,
+#                             the Code Integrity log, PdfCraft (Windows Installer, Uninstall
+#                             keys), the check task and 1.x's task, Explorer settings, the
+#                             Windows build; the whole check (gathering, repairs, the record,
+#                             the lock, also against a process below Medium integrity) through
+#                             private keys, folders under %TEMP% and fakes for everything
+#                             Windows-wide; probe PDFs in %TEMP% (deleted); the diagnostics' log
+#                             reader on files under %TEMP%; --status (text and JSON) and
+#                             --diagnostics of both executables against the real state,
+#                             read-only, without the Explorer test; never extracts a thumbnail;
+#                             writes nothing to the real profile but the canary's volatile probe
+#                             key, those private keys (HKCU\Software\<product>-Test\<GUID>,
+#                             deleted afterwards) and, unelevated, the start and end lines that
+#                             every command run appends to the app's log
 #   handler.tests             pdft_handler_tests: PdfThumbnails.dll in-process at Medium
 #                             integrity (relaunches itself when elevated) with HKCU redirected to
 #                             a private key: crop table, pixels, COM surface, error HRESULTs,
@@ -88,14 +110,30 @@ add_executable(pdft_unit_tests
   unit/registry_sandbox_test.cpp)
 if(TARGET pdft_appcore)
   target_sources(pdft_unit_tests PRIVATE
+    unit/build_folder_test.cpp
     unit/cli_args_test.cpp
     unit/context_decision_test.cpp
+    unit/diagnostics_test.cpp
+    unit/evaluate_test.cpp
+    unit/explorer_settings_test.cpp
+    unit/json_test.cpp
+    unit/legacy_test.cpp
+    unit/live_test_test.cpp
     unit/log_test.cpp
     unit/output_test.cpp
     unit/paths_test.cpp
+    unit/pe_info_test.cpp
+    unit/registration_test.cpp
+    unit/registry_roots_test.cpp
+    unit/repair_test.cpp
     unit/resources_test.cpp
+    unit/sac_test.cpp
+    unit/settings_test.cpp
+    unit/snapshot_fixtures.h
     unit/startup_test.cpp
-    unit/strings_test.cpp)
+    unit/status_format_test.cpp
+    unit/strings_test.cpp
+    unit/tasks_test.cpp)
   target_link_libraries(pdft_unit_tests PRIVATE pdft_appcore)
   # main.cpp's start-up hardening child needs the app's start-up code (startup.h).
   target_compile_definitions(pdft_unit_tests PRIVATE PDFT_UNIT_TESTS_WITH_APP=1)
@@ -163,23 +201,41 @@ pdft_add_program_test(handler.refuses_elevated pdft_refuses_elevated
                       LABELS handler SKIP_RETURN_CODE 77)
 
 # ---- integration ---------------------------------------------------------------------------
-# Writes nothing to the real profile except the registry canary's volatile probe key, which it
-# deletes; starts itself (child modes in integration/main.cpp) and the two executables, a
-# writing command of theirs only where its writes are swallowed anyway. Its named objects carry
-# a suffix of the run's own, so it never takes or waits for a running app's.
+# Writes nothing to the real profile except the registry canary's volatile probe key and private
+# test keys (HKCU\Software\<product>-Test\<GUID>), which it deletes, and the start and end lines
+# the executables' read-only commands (--status, --diagnostics) append to the app's log when not
+# elevated; starts itself (child modes in integration/main.cpp) and the two executables, a
+# writing command of theirs only where its writes are swallowed anyway; never starts a thumbnail
+# extraction. Its named objects carry a
+# suffix of the run's own, so it never takes or waits for a running app's.
 if(TARGET pdft_appcore)
   add_executable(pdft_integration_tests
     integration/main.cpp
+    integration/build_info_test.cpp
+    integration/check_test.cpp
     integration/child_process.cpp integration/child_process.h
     integration/com_security_test.cpp
     integration/context_test.cpp
+    integration/diagnostics_files_test.cpp
     integration/exes_test.cpp
-    integration/instance_test.cpp)
+    integration/instance_test.cpp
+    integration/live_test_files_test.cpp
+    integration/probes_test.cpp
+    integration/registration_test.cpp
+    integration/settings_test.cpp)
   pdft_harden(pdft_integration_tests TEST)
   target_link_libraries(pdft_integration_tests PRIVATE pdft_appcore pdft_testsupport GTest::gtest
                                                        ole32 oleaut32 advapi32 user32)
-  add_dependencies(pdft_integration_tests PdfThumbnailsCli PdfThumbnailsSettings)
+  # The handler and PDFium next to it are read (headers, version, build id), never loaded.
+  add_dependencies(pdft_integration_tests PdfThumbnailsCli PdfThumbnailsSettings pdft_handler
+                                          pdft_pdfium_runtime)
   pdft_add_program_test(integration.tests pdft_integration_tests LABELS integration)
+  if(NOT CMAKE_CROSSCOMPILING)
+    # The build tree has cmake and the build-id script, so the app's build id is compared with
+    # the script's; the test bundle has neither and skips that comparison.
+    set_tests_properties(integration.tests PROPERTIES ENVIRONMENT
+      "PDFT_TEST_CMAKE=${CMAKE_COMMAND};PDFT_TEST_BUILDID_SCRIPT=${PROJECT_SOURCE_DIR}/cmake/BuildId.cmake")
+  endif()
 endif()
 
 # ---- DLL planting (gate.planting, registered in cmake/Gates.cmake) --------------------------

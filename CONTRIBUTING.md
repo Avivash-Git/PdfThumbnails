@@ -58,6 +58,17 @@ build machine, and strings such as "Rebuild thumbnails…" or "0.14.0 → 0.15.0
 differently on another machine). A unit test loads such strings from the built executables and
 compares them with the exact text.
 
+### Reports and personal data
+
+- The texts the reports show (`--status`, the JSON `text` fields, `--check`/`--fix` output) are
+  built in `src/app/core/status_format.cpp`, so they can move into the string table with the
+  settings window. Write a non-ASCII character in C++ source as a `\u` escape (`L" \u00B7 "`).
+- Everything `--diagnostics` shows goes through `BuildDiagnostics`
+  (`src/app/core/diagnostics.cpp`), which masks the whole report at the end: the profile folder,
+  the user, computer and domain names and every SID. Add new details there, never next to it.
+- The log never gets PDF paths or names, or anything else the user typed (a `--test-file` or
+  `--out` path is shown on the console only).
+
 ### Tests that start freshly built programs
 
 Windows may refuse to start a program that was just built and is not signed: Smart App Control or

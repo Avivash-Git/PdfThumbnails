@@ -28,9 +28,9 @@ bool MakePipe(HANDLE* read, HANDLE* write, bool childReads) {
 }
 
 // Starts |exe| with |in|, |out| and |err| as its standard handles, which are the only handles
-// it inherits (null: none).
+// it inherits (null: none); with |token|, as that token.
 HRESULT Spawn(const std::wstring& exe, const std::wstring& arguments, HANDLE in, HANDLE out,
-              HANDLE err, PROCESS_INFORMATION* process) {
+              HANDLE err, PROCESS_INFORMATION* process, HANDLE token = nullptr) {
   std::vector<HANDLE> handles;
   for (HANDLE handle : {in, out, err}) {
     if (handle && std::find(handles.begin(), handles.end(), handle) == handles.end()) {
@@ -55,9 +55,14 @@ HRESULT Spawn(const std::wstring& exe, const std::wstring& arguments, HANDLE in,
   startup.StartupInfo.hStdOutput = out;
   startup.StartupInfo.hStdError = err;
   std::wstring commandLine = QuoteArgument(exe) + L" " + arguments;
-  if (SUCCEEDED(hr) && !CreateProcessW(exe.c_str(), commandLine.data(), nullptr, nullptr, TRUE,
-                                       CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr,
-                                       nullptr, &startup.StartupInfo, process)) {
+  const DWORD flags = CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
+  const BOOL started =
+      SUCCEEDED(hr) &&
+      (token ? CreateProcessAsUserW(token, exe.c_str(), commandLine.data(), nullptr, nullptr, TRUE,
+                                    flags, nullptr, nullptr, &startup.StartupInfo, process)
+             : CreateProcessW(exe.c_str(), commandLine.data(), nullptr, nullptr, TRUE, flags,
+                              nullptr, nullptr, &startup.StartupInfo, process));
+  if (SUCCEEDED(hr) && !started) {
     hr = LastError();
   }
   DeleteProcThreadAttributeList(startup.lpAttributeList);
@@ -139,7 +144,7 @@ PipedChild::~PipedChild() {
   Close(&output_);
 }
 
-HRESULT PipedChild::Start(const std::wstring& exe, const std::wstring& arguments) {
+HRESULT PipedChild::Start(const std::wstring& exe, const std::wstring& arguments, HANDLE token) {
   HANDLE inRead = nullptr;
   HANDLE outWrite = nullptr;
   if (!MakePipe(&inRead, &input_, true) || !MakePipe(&output_, &outWrite, false)) {
@@ -149,7 +154,7 @@ HRESULT PipedChild::Start(const std::wstring& exe, const std::wstring& arguments
     return hr;
   }
   PROCESS_INFORMATION process = {};
-  const HRESULT hr = Spawn(exe, arguments, inRead, outWrite, outWrite, &process);
+  const HRESULT hr = Spawn(exe, arguments, inRead, outWrite, outWrite, &process, token);
   Close(&inRead);
   Close(&outWrite);
   if (FAILED(hr)) return hr;

@@ -12,11 +12,13 @@
 #include <sddl.h>
 #include <wil/resource.h>
 
+#include <cstdio>
 #include <memory>
 #include <optional>
 #include <string>
 
 #include "child_process.h"
+#include "medium_il.h"
 #include "project_config.h"
 
 namespace pdft {
@@ -71,6 +73,91 @@ TEST(OperationLock, AHolderThatEndsWithoutReleasingCountsAsGone) {
   ASSERT_HRESULT_SUCCEEDED(OperationLock::Acquire(5000, &lock));
   ASSERT_TRUE(lock);
   EXPECT_TRUE(lock->abandoned());
+}
+
+// A primary token like this process's, labelled Low integrity.
+HRESULT CreateLowToken(wil::unique_handle* token) {
+  HANDLE medium = nullptr;
+  HRESULT hr = test::CreateMediumTokenForSelf(test::MediumToken::kLabelOnly, &medium);
+  if (FAILED(hr)) return hr;
+  wil::unique_handle owned(medium);
+  BYTE low[SECURITY_MAX_SID_SIZE];
+  DWORD size = sizeof(low);
+  if (!CreateWellKnownSid(WinLowLabelSid, nullptr, low, &size)) {
+    return HRESULT_FROM_WIN32(GetLastError());
+  }
+  TOKEN_MANDATORY_LABEL label = {};
+  label.Label.Attributes = SE_GROUP_INTEGRITY;
+  label.Label.Sid = low;
+  if (!SetTokenInformation(owned.get(), TokenIntegrityLevel, &label,
+                           sizeof(label) + GetLengthSid(low))) {
+    return HRESULT_FROM_WIN32(GetLastError());
+  }
+  *token = std::move(owned);
+  return S_OK;
+}
+
+// Restores the run's own name suffix when it goes away.
+class SuffixScope {
+ public:
+  explicit SuffixScope(const std::wstring& suffix) { SetObjectNameSuffixForTesting(suffix); }
+  ~SuffixScope() { SetObjectNameSuffixForTesting(test::NamedObjectSuffix()); }
+};
+
+// A process of the same user below Medium integrity (a sandboxed part of a browser, say) must
+// not be able to keep checks out: it cannot open the lock to wait on it (the label denies a
+// lower process SYNCHRONIZE, which a mutex counts as execute access), and if it creates the
+// lock's name before any of the app's processes, Acquire refuses to wait on that object instead
+// of waiting for whoever made it.
+TEST(OperationLock, ProcessesBelowMediumCannotHoldIt) {
+  if (test::CurrentIntegrityRid() < SECURITY_MANDATORY_MEDIUM_RID) {
+    GTEST_SKIP() << "needs a test process at Medium integrity or above";
+  }
+  const std::wstring sid = Sid();
+  std::optional<OperationLock> held;
+  ASSERT_HRESULT_SUCCEEDED(OperationLock::Acquire(5000, &held));
+  const std::wstring heldName = OperationLockName(sid);
+  const std::wstring freshSuffix = test::NamedObjectSuffix() + L".squat";
+  std::wstring freshName;
+  {
+    SuffixScope scope(freshSuffix);
+    freshName = OperationLockName(sid);
+  }
+
+  wil::unique_handle low;
+  ASSERT_HRESULT_SUCCEEDED(CreateLowToken(std::addressof(low)));
+  test::PipedChild child;
+  const HRESULT started = child.Start(test::SelfPath(),
+                                      L"--pdft-child squat-lock " + test::QuoteArgument(heldName) +
+                                          L" " + test::QuoteArgument(freshName),
+                                      low.get());
+  if (test::IsApplicationControlBlock(started)) {
+    GTEST_SKIP() << "Application Control blocked the test program at Low integrity";
+  }
+  ASSERT_HRESULT_SUCCEEDED(started);
+  EXPECT_EQ(child.ReadLine(), "il=0x1000");
+  const std::string open = child.ReadLine();
+  EXPECT_EQ(open.rfind("open=no", 0), 0u) << open;
+  const std::string create = child.ReadLine();
+  std::printf("[ low integrity ] %s, %s\n", open.c_str(), create.c_str());
+  {
+    SuffixScope scope(freshSuffix);
+    std::optional<OperationLock> lock;
+    const ULONGLONG before = GetTickCount64();
+    const HRESULT hr = OperationLock::Acquire(5000, &lock);
+    if (create == "create=yes") {
+      // The name is the other process's object: refused at once, never waited on.
+      EXPECT_EQ(hr, OperationLock::kTakenByLowerIntegrity);
+      EXPECT_LT(GetTickCount64() - before, 2000u);
+      EXPECT_FALSE(lock);
+    } else {
+      EXPECT_EQ(create.rfind("create=no", 0), 0u) << create;
+      EXPECT_HRESULT_SUCCEEDED(hr);
+      EXPECT_TRUE(lock);
+    }
+  }
+  child.CloseInput();
+  EXPECT_EQ(child.Wait(30000), 0u);
 }
 
 TEST(OperationLock, LivesInTheGlobalNamespace) {
@@ -161,7 +248,8 @@ TEST(NamedObjects, DescriptorGrantsTheUserAndCarriesAMediumLabel) {
   }
   EXPECT_EQ(userRights & MUTEX_ALL_ACCESS, static_cast<ACCESS_MASK>(MUTEX_ALL_ACCESS));
 
-  // Labelled Medium, no-write-up: a Medium and a High process of the user can both open it.
+  // Labelled Medium, no-write-up, no-read-up and no-execute-up: a Medium and a High process of
+  // the user can both open it, a lower one cannot open it at all.
   bool medium = false;
   for (DWORD i = 0; sacl && i < sacl->AceCount; ++i) {
     ACE_HEADER* ace = nullptr;
@@ -169,8 +257,11 @@ TEST(NamedObjects, DescriptorGrantsTheUserAndCarriesAMediumLabel) {
         ace->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE) {
       auto* label = reinterpret_cast<SYSTEM_MANDATORY_LABEL_ACE*>(ace);
       PSID labelSid = &label->SidStart;
+      constexpr ACCESS_MASK kAll = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP |
+                                   SYSTEM_MANDATORY_LABEL_NO_READ_UP |
+                                   SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP;
       medium = *GetSidSubAuthority(labelSid, 0) == SECURITY_MANDATORY_MEDIUM_RID &&
-               (label->Mask & SYSTEM_MANDATORY_LABEL_NO_WRITE_UP) != 0;
+               (label->Mask & kAll) == kAll;
     }
   }
   EXPECT_TRUE(medium);

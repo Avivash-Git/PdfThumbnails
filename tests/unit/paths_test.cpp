@@ -8,7 +8,6 @@
 #include <gtest/gtest.h>
 #include <knownfolders.h>
 #include <shlobj.h>
-#include <winioctl.h>
 
 #include <cwctype>
 #include <filesystem>
@@ -49,43 +48,7 @@ bool MakeFile(const std::wstring& path) {
   return true;
 }
 
-// Makes the empty folder |link| a junction to the folder |target| (absolute). Unlike a symbolic
-// link, a junction needs no privilege.
-bool MakeJunction(const std::wstring& link, const std::wstring& target) {
-  // REPARSE_DATA_BUFFER's mount-point form (the structure is in the driver kit's headers only).
-  struct MountPoint {
-    DWORD tag;
-    WORD dataLength;
-    WORD reserved;
-    WORD substituteOffset;
-    WORD substituteLength;
-    WORD printOffset;
-    WORD printLength;
-    wchar_t paths[1];
-  };
-  const std::wstring substitute = L"\\??\\" + target;
-  std::vector<BYTE> buffer(sizeof(MountPoint) + (substitute.size() + target.size() + 2) * 2);
-  auto* data = reinterpret_cast<MountPoint*>(buffer.data());
-  data->tag = IO_REPARSE_TAG_MOUNT_POINT;
-  data->substituteOffset = 0;
-  data->substituteLength = static_cast<WORD>(substitute.size() * 2);
-  data->printOffset = static_cast<WORD>(data->substituteLength + 2);
-  data->printLength = static_cast<WORD>(target.size() * 2);
-  wchar_t* paths = data->paths;
-  substitute.copy(paths, substitute.size());
-  target.copy(paths + substitute.size() + 1, target.size());
-  const DWORD pathBytes = data->printOffset + data->printLength + 2u;
-  data->dataLength = static_cast<WORD>(4 * sizeof(WORD) + pathBytes);
-  HANDLE handle = CreateFileW(link.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                              FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-  if (handle == INVALID_HANDLE_VALUE) return false;
-  DWORD returned = 0;
-  const BOOL ok =
-      DeviceIoControl(handle, FSCTL_SET_REPARSE_POINT, data, 2 * sizeof(DWORD) + data->dataLength,
-                      nullptr, 0, &returned, nullptr);
-  CloseHandle(handle);
-  return ok != FALSE;
-}
+using test::MakeJunction;
 
 TEST(Paths, IsUnderLexically) {
   struct Row {

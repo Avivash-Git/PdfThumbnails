@@ -143,6 +143,14 @@ TEST(Commands, CannotRunHereWhenTheCheckFailedOnANormalPc) {
   EXPECT_NE(CannotRunHereMessage(context).find(L"registry virtualized"), std::wstring::npos);
 }
 
+// --check and --fix refuse an elevated process with a message of their own, worded like the
+// others (scripts look for the prefix) and pointing to a normal prompt.
+TEST(Commands, CannotRunHereWhenElevated) {
+  const std::wstring message = ElevatedRefusalMessage();
+  EXPECT_EQ(message.rfind(L"Cannot run here: running as administrator", 0), 0u) << message;
+  EXPECT_NE(message.find(L"normal (not administrator) prompt"), std::wstring::npos) << message;
+}
+
 TEST(Commands, ElevatedProcessesNeverLog) {
   ProcessContext context;
   context.elevated = false;
@@ -199,15 +207,40 @@ TEST(Commands, VersionText) {
             std::wstring(kProductName) + L" " + kProductVersion + L" (" + kArch + L")");
 }
 
+TEST(Commands, TakingSlotsBackNeedsYesWithoutAConsole) {
+  CliArgs args;
+  args.verb = Verb::kFix;
+  args.takeBack = true;
+  EXPECT_TRUE(TakeBackNeedsYes(args, false));
+  EXPECT_FALSE(TakeBackNeedsYes(args, true)) << "a console can be asked";
+  args.yes = true;
+  EXPECT_FALSE(TakeBackNeedsYes(args, false));
+  args.yes = false;
+  args.takeBack = false;
+  EXPECT_FALSE(TakeBackNeedsYes(args, false)) << "a plain --fix takes nothing back";
+  args.verb = Verb::kCheck;
+  args.takeBack = true;
+  EXPECT_FALSE(TakeBackNeedsYes(args, false));
+}
+
+TEST(Commands, YesAnswers) {
+  for (const wchar_t* yes : {L"y", L"Y", L"yes", L"YES", L" y\r\n", L"\tYes "}) {
+    EXPECT_TRUE(IsYesAnswer(yes)) << yes;
+  }
+  for (const wchar_t* no : {L"", L"\r\n", L"n", L"no", L"N", L"yy", L"ye", L"yes please", L"j"}) {
+    EXPECT_FALSE(IsYesAnswer(no)) << no;
+  }
+}
+
 TEST(NamedObjects, Descriptor) {
   // A made-up user SID in the Microsoft Entra form (S-1-12-1-...): the repository's publish check
   // rejects anything shaped like a local or domain account's SID, even an invented one.
   constexpr wchar_t kSid[] = L"S-1-12-1-1-2-3-4";
   EXPECT_EQ(NamedObjectSddl(kSid, false),
-            L"D:(A;;GA;;;S-1-12-1-1-2-3-4)(A;;GA;;;SY)(A;;GA;;;BA)S:(ML;;NW;;;ME)");
+            L"D:(A;;GA;;;S-1-12-1-1-2-3-4)(A;;GA;;;SY)(A;;GA;;;BA)S:(ML;;NWNRNX;;;ME)");
   EXPECT_EQ(NamedObjectSddl(kSid, true),
             L"D:(A;;GA;;;S-1-12-1-1-2-3-4)(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00100000;;;WD)"
-            L"S:(ML;;NW;;;ME)");
+            L"S:(ML;;NWNRNX;;;ME)");
   for (bool everyone : {false, true}) {
     PSECURITY_DESCRIPTOR descriptor = nullptr;
     EXPECT_TRUE(ConvertStringSecurityDescriptorToSecurityDescriptorW(

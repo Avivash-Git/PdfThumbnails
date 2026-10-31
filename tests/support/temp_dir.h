@@ -30,4 +30,8 @@ class TempDir {
 // path no longer exists afterwards.
 bool RemoveTree(const std::wstring& path);
 
+// Makes the empty folder |link| a junction to the folder |target| (absolute). Unlike a symbolic
+// link, a junction needs no privilege.
+bool MakeJunction(const std::wstring& link, const std::wstring& target);
+
 }  // namespace pdft::test

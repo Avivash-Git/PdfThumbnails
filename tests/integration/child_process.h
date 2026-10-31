@@ -40,7 +40,8 @@ class PipedChild {
   // Closes its input and, if it has not ended within 10 s, ends it.
   ~PipedChild();
 
-  HRESULT Start(const std::wstring& exe, const std::wstring& arguments);
+  // With |token| (a primary token), the child runs as that token instead of this process's.
+  HRESULT Start(const std::wstring& exe, const std::wstring& arguments, HANDLE token = nullptr);
   // The next line of its output, without the line end; empty when the output ended first.
   std::string ReadLine();
   // Closes its standard input: it reads end of file.

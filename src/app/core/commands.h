@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <string>
+#include <string_view>
 
 #include "cli_args.h"
 #include "context.h"
@@ -23,10 +24,19 @@ using OpenWindowFn = int (*)() noexcept;
 //   --elevated <step>: refused for now with E_NOTIMPL (the elevated steps come with installing).
 //   No command in the command-line executable: starts the settings executable when this
 //   console is its own (started by a double-click), else prints the help.
+//   --fix --take-back without --yes and without a console to ask on: exit 2 before anything is
+//   read (TakeBackNeedsYes).
 //   Everything else: reads the process context. A command that writes runs the registry canary
 //   first and stops with exit 8 when the registry is (or may be) virtualized; on a PC where no
 //   packaged app explains that, the refusal is logged. Then the log (ShouldLog), the installer
-//   mutexes, and the command itself.
+//   mutexes, and the command itself:
+//     --status       read-only report (text or --json); exit 0, 1 or 6
+//     --check        the check with the safe repairs (--no-repair: none); exit 0, 1, 4, 6, 7, 8
+//     --fix          the same, and with --take-back the slots another handler holds (asks
+//                    first); the machine-wide part is only described, exit 1 then
+//     --diagnostics  the masked report on standard output, the clipboard (--copy) or a file
+//                    (--out)
+//   Commands not built yet say so and exit 5.
 // May throw std::bad_alloc; AppMain's callers catch everything.
 int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWindow);
 
@@ -38,6 +48,11 @@ std::wstring VersionText();
 // ancestor and with a canary that could not decide, it says that the check itself failed (with
 // its HRESULT) instead: there is no container to leave then.
 std::wstring CannotRunHereMessage(const ProcessContext& context);
+
+// Why --check and --fix refuse an elevated process (pure): the repairs change only the user's
+// own settings and files, which an administrator process does not write. Starts like
+// CannotRunHereMessage ("Cannot run here: ").
+std::wstring ElevatedRefusalMessage();
 
 // Whether a command run in |context| writes the log (pure): never in an elevated process. The
 // log folder lies in the user's profile, which the user's unelevated processes control: they
@@ -57,5 +72,14 @@ std::wstring StartMessage(Mode mode, const ProcessContext& context);
 // into a window that closes at once. A console without a window (a hidden or detached start)
 // does not count.
 bool ShouldStartSettingsWindow(DWORD consoleProcessCount, bool hasConsoleWindow) noexcept;
+
+// Taking slots back from another handler must be confirmed (pure): --fix --take-back needs
+// --yes unless standard input is a console with a window to ask on. Scripts and tasks get a
+// usage error (exit 2) before anything is read, whatever the slots hold.
+bool TakeBackNeedsYes(const CliArgs& args, bool canAskOnConsole) noexcept;
+
+// The answer to a [y/N] question means yes (pure): "y" or "yes", ignoring case and surrounding
+// white space. Anything else, nothing included, is no.
+bool IsYesAnswer(std::wstring_view answer) noexcept;
 
 }  // namespace pdft

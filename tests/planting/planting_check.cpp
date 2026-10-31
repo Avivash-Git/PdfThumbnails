@@ -284,10 +284,10 @@ int Check(const Options& options) {
   const std::string version = Utf8(std::wstring(pdft::kProductName) + L" " + pdft::kProductVersion +
                                    L" (" + pdft::kArch + L")\r\n");
   std::vector<Command> commands = {{L"--version", {0}}, {L"--help", {0}}};
-  // Elevated only: a non-elevated --status would write the user's real log. Exit 5 while the
-  // command is not built yet; 0, 1 or 6 once it reports.
+  // Elevated only: a non-elevated --status would write the user's real log. 0 healthy, 1
+  // problems, 6 not installed (a CI runner).
   const bool elevated = IsElevated();
-  if (elevated) commands.push_back({L"--status --no-live-test", {0, 1, 5, 6}});
+  if (elevated) commands.push_back({L"--status --no-live-test", {0, 1, 6}});
   std::printf("%s: %s\n", elevated ? "elevated" : "not elevated",
               elevated ? "also running --status --no-live-test"
                        : "--version and --help only (--status would write the user's log)");

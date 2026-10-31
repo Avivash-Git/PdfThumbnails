@@ -17,6 +17,11 @@
 //   ancestor <depth>             depth > 0: starts itself with depth - 1 (same standard output)
 //                                and returns its exit code; depth 0: prints the packaged
 //                                ancestor ("none")
+//   squat-lock <held> <fresh>    run below Medium integrity: prints its integrity level, tries
+//                                to open the mutex <held> to wait on it ("open=yes"/"open=no
+//                                <error>"), then to create and own the mutex <fresh> ("create=
+//                                yes"/"create=no <error>"), and keeps it until its standard
+//                                input closes
 
 #include <windows.h>
 
@@ -54,6 +59,36 @@ int HoldLock(bool release) {
   }
   if (!release) TerminateProcess(GetCurrentProcess(), 0);  // ends without releasing it
   lock.reset();
+  return 0;
+}
+
+// What a process of the same user below Medium integrity can do to the operation lock.
+int SquatLock(const wchar_t* held, const wchar_t* fresh) {
+  char text[64];
+  sprintf_s(text, "il=0x%04lX\n", pdft::test::CurrentIntegrityRid());
+  Print(text);
+  HANDLE opened = OpenMutexW(SYNCHRONIZE, FALSE, held);
+  if (opened) {
+    Print("open=yes\n");
+    CloseHandle(opened);
+  } else {
+    sprintf_s(text, "open=no %lu\n", GetLastError());
+    Print(text);
+  }
+  HANDLE created = CreateMutexW(nullptr, TRUE, fresh);
+  const DWORD error = GetLastError();
+  if (created && error != ERROR_ALREADY_EXISTS) {
+    Print("create=yes\n");
+  } else {
+    sprintf_s(text, "create=no %lu\n", created ? ERROR_ALREADY_EXISTS : error);
+    Print(text);
+  }
+  char buffer[64];
+  DWORD read = 0;
+  while (ReadFile(GetStdHandle(STD_INPUT_HANDLE), buffer, sizeof(buffer), &read, nullptr) &&
+         read > 0) {
+  }
+  if (created) CloseHandle(created);
   return 0;
 }
 
@@ -97,6 +132,7 @@ int wmain(int argc, wchar_t** argv) {
       return HoldLock(false);
     }
     if (mode == L"ancestor" && argc == 4) return Ancestor(_wtoi(argv[3]));
+    if (mode == L"squat-lock" && argc == 5) return SquatLock(argv[3], argv[4]);
     return 2;
   }
 

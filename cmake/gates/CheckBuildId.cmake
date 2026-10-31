@@ -5,7 +5,8 @@
 # The fixed vector below was computed independently with the 1.1 manager's PowerShell code
 # (Install-Files: Get-FileHash ... -join '', SHA256 over the ASCII, first 4 bytes, 'x2').
 # (The 1.1 DLLs give 1.1.0.0-67a1323e.)
-# The comparison with the app's C++ ComputeBuildId() is added with the app (§3.9, WP7).
+# The app's C++ ComputeBuildId() is compared with this script by the integration tests
+# (tests/integration/build_info_test.cpp), on the DLLs the build puts next to them.
 
 cmake_minimum_required(VERSION 4.3)
 include("${CMAKE_CURRENT_LIST_DIR}/PeTools.cmake")
