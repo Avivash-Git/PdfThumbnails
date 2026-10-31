@@ -355,6 +355,24 @@ bool Has(const std::wstring& text, std::wstring_view part) {
   return text.find(part) != std::wstring::npos;
 }
 
+// How SDDL writes the account |sid|: as its alias when it has one ("LA" for the built-in
+// Administrator, the account CI's runners use), else as the SID string.
+std::wstring SddlSid(const std::wstring& sid) {
+  PSID binary = nullptr;
+  if (!ConvertStringSidToSidW(sid.c_str(), &binary)) return sid;
+  const wil::unique_hlocal owned(binary);
+  SECURITY_DESCRIPTOR descriptor;
+  wil::unique_hlocal_string text;
+  if (!InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION) ||
+      !SetSecurityDescriptorOwner(&descriptor, binary, FALSE) ||
+      !ConvertSecurityDescriptorToStringSecurityDescriptorW(
+          &descriptor, SDDL_REVISION_1, OWNER_SECURITY_INFORMATION, text.put(), nullptr)) {
+    return sid;
+  }
+  const std::wstring_view owner(text.get());
+  return owner.starts_with(L"O:") ? std::wstring(owner.substr(2)) : sid;
+}
+
 bool NeedsXmlEscape(std::wstring_view text) {
   return text.find_first_of(L"&<>'\"") != std::wstring_view::npos;
 }
@@ -1139,7 +1157,7 @@ TEST_F(TaskFolderElevated, DeleteTaskFolderAllUsersRemovesEveryUsersTask) {
   ASSERT_TRUE(InFolder());
   const std::wstring userTask = TaskSddl(InFolder().get());
   std::printf("[ tasks ] a standard user's task in the folder: %s\n", Narrow(userTask).c_str());
-  EXPECT_TRUE(Has(userTask, L"(A;ID;FA;;;" + context_.userSid + L")")) << Narrow(userTask);
+  EXPECT_TRUE(Has(userTask, L"(A;ID;FA;;;" + SddlSid(context_.userSid) + L")")) << Narrow(userTask);
   // Another user's task in the folder, one in a subfolder, and under the root-folder name.
   ASSERT_HRESULT_SUCCEEDED(RegisterPlain(service_.get(), location_.folder,
                                          std::wstring(kTaskPrefix) + L"S-1-12-1-1-2-3-4", program_,

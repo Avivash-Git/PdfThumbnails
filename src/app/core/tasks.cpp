@@ -189,8 +189,13 @@ struct DeleteOutcome {
   HRESULT first = S_OK;
   bool deleted = false;
 
+  // The result of a deletion: S_OK deleted something, S_FALSE found nothing to delete.
   void Note(HRESULT hr) noexcept {
     if (hr == S_OK) deleted = true;
+    NoteFailure(hr);
+  }
+  // The result of a step that deletes nothing, such as listing a folder.
+  void NoteFailure(HRESULT hr) noexcept {
     if (FAILED(hr) && SUCCEEDED(first)) first = hr;
   }
   HRESULT Result() const noexcept { return FAILED(first) ? first : deleted ? S_OK : S_FALSE; }
@@ -200,12 +205,12 @@ struct DeleteOutcome {
 void EmptyFolder(ITaskFolder* folder, int depth, DeleteOutcome* outcome) {
   std::vector<std::wstring> names;
   HRESULT hr = TaskNames(folder, &names);
-  outcome->Note(hr);
+  outcome->NoteFailure(hr);
   if (SUCCEEDED(hr)) {
     for (const std::wstring& name : names) outcome->Note(DeleteTaskNamed(folder, name));
   }
   hr = SubfolderNames(folder, &names);
-  outcome->Note(hr);
+  outcome->NoteFailure(hr);
   if (FAILED(hr)) return;
   for (const std::wstring& name : names) {
     if (depth >= kMaxFolderDepth) {
@@ -216,7 +221,7 @@ void EmptyFolder(ITaskFolder* folder, int depth, DeleteOutcome* outcome) {
     hr = MakeBstr(name, subfolderName);
     wil::com_ptr_nothrow<ITaskFolder> subfolder;
     if (SUCCEEDED(hr)) hr = folder->GetFolder(subfolderName.get(), subfolder.put());
-    outcome->Note(hr);
+    outcome->NoteFailure(hr);
     if (FAILED(hr)) continue;
     EmptyFolder(subfolder.get(), depth + 1, outcome);
     outcome->Note(folder->DeleteFolder(subfolderName.get(), 0));
@@ -908,7 +913,7 @@ HRESULT DeleteTaskFolderAllUsers(std::wstring_view folder, std::wstring_view roo
   // The tasks that went under the root-folder name instead.
   std::vector<std::wstring> names;
   const HRESULT listed = TaskNames(root.get(), &names);
-  outcome.Note(listed);
+  outcome.NoteFailure(listed);
   if (SUCCEEDED(listed)) {
     for (const std::wstring& name : names) {
       if (IStartsWith(name, rootPrefix) &&
