@@ -57,6 +57,7 @@ enum class FindingId {
   kThumbnailsDisabledByPolicy,
   kChecksOff,        // no check task
   kTaskStaleAction,  // the task runs another program than the installed settings executable
+                     // (repaired only while that program is there)
   kTaskDisabled,     // the task is disabled
   kCleanupPending,   // 1.x's clean-up would delete the per-user folder at the next sign-in
   kV1Leftovers,      // 1.x left files, settings, its task or its classes
@@ -104,6 +105,10 @@ std::vector<Finding> Evaluate(const Snapshot& snapshot);
 // The per-user class's DLL after a repair (pure): the registered one when it is a complete 2.x
 // per-user build for this Windows, else ChooseUserBuildDll. std::nullopt when there is none.
 std::optional<std::filesystem::path> UserClassTarget(const Snapshot& snapshot);
+
+// The check task |task| runs |program| with the check's arguments (pure): the path compared
+// ignoring case and the quotes some tools add around it, the arguments exactly.
+bool TaskRunsProgram(const TaskState& task, const std::filesystem::path& program) noexcept;
 
 // Healthy: no finding keeps thumbnails from working (pure).
 bool HealthyFromFindings(std::span<const Finding> findings) noexcept;

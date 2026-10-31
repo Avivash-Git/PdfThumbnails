@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "check_schedule.h"
 #include "evaluate.h"
 #include "exit_code.h"
 #include "live_test.h"
@@ -63,6 +64,26 @@ std::wstring TestFileProblemText(TestFileProblem problem);
 // One line about a repair step and what became of it (pure): "Done: point the empty .pdf slot
 // at PdfThumbnails". May throw std::bad_alloc.
 std::wstring RepairOutcomeText(const RepairOutcome& outcome);
+
+// The two checkboxes as the Checks line and --checks show them (pure): "after PdfCraft updates:
+// on · at sign-in: off". May throw std::bad_alloc.
+std::wstring ChecksStateText(bool afterPdfCraft, bool atSignIn);
+
+// The --checks value that asks for these checkboxes (pure): "default" (both), "pdfcraft",
+// "signin" or "none".
+const wchar_t* ChecksValue(bool afterPdfCraft, bool atSignIn) noexcept;
+
+// What --checks prints (pure): |out| for standard output, |error| for standard error.
+struct ScheduleReport {
+  std::vector<std::wstring> out;
+  std::wstring error;
+};
+
+// The report of a change of the check task that was not refused for its context or busy (the
+// command says why then): after a change, the checkboxes as the task has them now and where the
+// task is; for an install that cannot run the task, or a change that failed, why. May throw
+// std::bad_alloc.
+ScheduleReport ScheduleResultReport(const ScheduleResult& result);
 
 // What the administrator step |verb| would do, as the end of "The machine-wide part needs an
 // administrator to ..." (pure). May throw std::bad_alloc.

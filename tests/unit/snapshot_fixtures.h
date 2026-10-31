@@ -102,9 +102,11 @@ inline void AddSoundTask(Snapshot* s) {
   s->task.path = std::wstring(kTaskFolder) + L"\\" + kTaskPrefix + s->context.userSid;
   s->task.actionPath = (s->installRoot / kSettingsExe).native();
   s->task.actionArgs = kCheckTaskArguments;
+  s->task.options = OptionsFromCheckboxes(true, true);
 }
 
 inline void MakeHealthy(Snapshot* s) {
+  s->settingsExeFound = true;  // a 2.x install has the program the task runs
   s->slots = {kOurs, kOurs};
   s->effective = kOurs;
   s->live = LiveTest{S_OK, {96, 96}, 200};

@@ -1,7 +1,8 @@
 // pdft_integration_tests: the app's core modules against the real system (COM, WMI, Task
 // Scheduler, named objects, the process tree) and the two executables run as a script would.
 // Writes nothing to the real profile except the canary's volatile probe key, which it deletes;
-// the executables' writing command is started only where its writes are swallowed anyway.
+// the executables' writing command is started only where its writes are swallowed anyway. In
+// Task Scheduler it registers test tasks of its own (tasks_test.cpp) and deletes them again.
 //
 // main() sets up COM exactly like the app (InitializeComSecurity, once), so the COM tests show
 // what works under the app's own COM security. It also gives the app's named objects a suffix
@@ -22,11 +23,25 @@
 //                                <error>"), then to create and own the mutex <fresh> ("create=
 //                                yes"/"create=no <error>"), and keeps it until its standard
 //                                input closes
+//   apply-task <folder> <name> <fallback name> <program>
+//                                registers the check task with both triggers through
+//                                ApplyTaskOptions, as whatever token it runs with (the tests
+//                                start it with a standard user's token), at <folder>\<name> or
+//                                \<fallback name>, running <program>; prints
+//                                "apply-task hr=0x<HRESULT> elevated=<0|1>"
+//   make-folder <folder>         makes the top-level Task Scheduler folder <folder> with the
+//                                root folder's permissions inherited, as whatever token it runs
+//                                with (the tests start it with a standard user's token, so that
+//                                user owns it); prints "make-folder hr=0x<HRESULT>"
 
 #include <windows.h>
 
 #include <gtest/gtest.h>
 #include <objbase.h>
+#include <oleauto.h>
+#include <taskschd.h>
+#include <wil/com.h>
+#include <wil/resource.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -39,6 +54,7 @@
 #include "instance.h"
 #include "medium_il.h"
 #include "strings.h"
+#include "tasks.h"
 
 namespace {
 
@@ -118,6 +134,49 @@ int Ancestor(int depth) {
   return 0;
 }
 
+int ApplyTask(const wchar_t* folder, const wchar_t* name, const wchar_t* fallbackName,
+              const wchar_t* program) {
+  if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) return 3;
+  pdft::ProcessContext context;
+  HRESULT hr = pdft::GetProcessContext(pdft::ContextProbe::kNone, &context);
+  if (SUCCEEDED(hr)) {
+    const pdft::TaskLocation location{folder, name, L"\\", fallbackName, context.userSid};
+    hr =
+        pdft::ApplyTaskOptions(location, pdft::OptionsFromCheckboxes(true, true), program, context);
+  }
+  char text[64];
+  sprintf_s(text, "apply-task hr=0x%08lX elevated=%d\n", static_cast<unsigned long>(hr),
+            context.elevated ? 1 : 0);
+  Print(text);
+  CoUninitialize();
+  return 0;
+}
+
+int MakeFolder(const wchar_t* folder) {
+  if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) return 3;
+  HRESULT hr = S_OK;
+  {
+    wil::com_ptr_nothrow<ITaskService> service;
+    hr = CoCreateInstance(__uuidof(TaskScheduler), nullptr, CLSCTX_INPROC_SERVER,
+                          IID_PPV_ARGS(service.put()));
+    VARIANT empty;
+    VariantInit(&empty);
+    if (SUCCEEDED(hr)) hr = service->Connect(empty, empty, empty, empty);
+    wil::com_ptr_nothrow<ITaskFolder> root;
+    const wil::unique_bstr rootPath = wil::make_bstr_nothrow(L"\\");
+    const wil::unique_bstr path = wil::make_bstr_nothrow(folder);
+    if (SUCCEEDED(hr) && (!rootPath || !path)) hr = E_OUTOFMEMORY;
+    if (SUCCEEDED(hr)) hr = service->GetFolder(rootPath.get(), root.put());
+    wil::com_ptr_nothrow<ITaskFolder> made;
+    if (SUCCEEDED(hr)) hr = root->CreateFolder(path.get(), empty, made.put());
+  }
+  char text[48];
+  sprintf_s(text, "make-folder hr=0x%08lX\n", static_cast<unsigned long>(hr));
+  Print(text);
+  CoUninitialize();
+  return 0;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -133,6 +192,8 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (mode == L"ancestor" && argc == 4) return Ancestor(_wtoi(argv[3]));
     if (mode == L"squat-lock" && argc == 5) return SquatLock(argv[3], argv[4]);
+    if (mode == L"apply-task" && argc == 7) return ApplyTask(argv[3], argv[4], argv[5], argv[6]);
+    if (mode == L"make-folder" && argc == 4) return MakeFolder(argv[3]);
     return 2;
   }
 

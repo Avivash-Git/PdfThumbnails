@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <knownfolders.h>
 #include <shlobj.h>
+#include <wil/resource.h>
 
 #include <cstdio>
 #include <optional>
@@ -21,11 +22,14 @@
 #include "commands.h"
 #include "context.h"
 #include "diagnostics.h"
+#include "evaluate.h"
 #include "instance.h"
 #include "json_check.h"
 #include "medium_il.h"
 #include "project_config.h"
+#include "snapshot.h"
 #include "strings.h"
+#include "system_probes.h"
 
 namespace pdft {
 namespace {
@@ -270,6 +274,113 @@ TEST_P(Exes, CheckAndFixAreRefusedWhereWritesAreSwallowed) {
     EXPECT_NE(run.err.find(WideToUtf8Lossy(ancestor)), std::string::npos) << run.err;
     EXPECT_EQ(run.out, "");
   }
+}
+
+// --checks writes the user's check task, so it runs only where a guard refuses it before it reads
+// or changes anything: the virtualization guard here (see WhyAWritingCommandMayNotRunHere).
+TEST_P(Exes, ChecksAreRefusedWhereWritesAreSwallowed) {
+  std::wstring ancestor;
+  if (const std::optional<std::string> why = WhyAWritingCommandMayNotRunHere(&ancestor)) {
+    GTEST_SKIP() << *why;
+  }
+  for (const wchar_t* value : {L"default", L"pdfcraft,signin", L"pdfcraft", L"signin", L"none"}) {
+    const std::wstring arguments = std::wstring(L"--checks ") + value;
+    test::CapturedRun run;
+    RUN_OR_SKIP(arguments, run);
+    std::printf("%ls %ls -> exit %lu: %s", GetParam(), arguments.c_str(), run.exitCode,
+                run.err.c_str());
+    EXPECT_EQ(run.exitCode, 8u) << WideToUtf8Lossy(arguments);
+    EXPECT_EQ(run.err.rfind("Cannot run here: ", 0), 0u) << run.err;
+    EXPECT_NE(run.err.find(WideToUtf8Lossy(ancestor)), std::string::npos) << run.err;
+    EXPECT_EQ(run.out, "");
+  }
+}
+
+// A value that is not one of the five is a usage error before anything is read, anywhere.
+TEST_P(Exes, ChecksValueIsChecked) {
+  for (const wchar_t* arguments : {L"--checks bogus", L"--checks", L"--checks=signin,pdfcraft"}) {
+    test::CapturedRun run;
+    RUN_OR_SKIP(arguments, run);
+    EXPECT_EQ(run.exitCode, 2u) << WideToUtf8Lossy(arguments);
+    EXPECT_NE(run.err.find("--checks"), std::string::npos) << run.err;
+    EXPECT_NE(run.err.find("Run --help"), std::string::npos) << run.err;
+    EXPECT_EQ(run.err.find("Cannot run here"), std::string::npos) << run.err;
+    EXPECT_EQ(run.out, "");
+  }
+}
+
+// Elevated where the registry is the real one (CI), --checks stops at its elevation guard (exit
+// 8) before it reads anything; the task itself refuses an elevated caller too, and nothing is
+// installed there either (exit 6), so a wrong order still changes nothing.
+TEST_P(Exes, ChecksAreRefusedElevated) {
+  ProcessContext context;
+  ASSERT_HRESULT_SUCCEEDED(GetProcessContext(ContextProbe::kWrite, &context));
+  if (!context.elevated) GTEST_SKIP() << "not elevated here (CI runs elevated)";
+  if (context.virtualization != Virtualization::kNo) {
+    GTEST_SKIP() << "the registry may be virtualized here, so the virtualization guard answers "
+                    "first";
+  }
+  test::CapturedRun run;
+  RUN_OR_SKIP(L"--checks default", run);
+  std::printf("%ls --checks default (elevated) -> exit %lu: %s", GetParam(), run.exitCode,
+              run.err.c_str());
+  EXPECT_EQ(run.exitCode, 8u);
+  EXPECT_EQ(run.err.rfind(WideToUtf8Lossy(ChecksElevatedRefusalMessage()), 0), 0u) << run.err;
+  EXPECT_EQ(run.out, "");
+}
+
+// Where nothing is installed and the registry is the real one (CI), --checks answers "not
+// installed" (exit 6) without registering anything. It runs at Medium integrity, with a
+// standard user's token where the test runs elevated. Skipped wherever something is installed
+// (this PC has 1.1), because there it could really change the task.
+TEST_P(Exes, ChecksNeedAnInstall) {
+  ProcessContext context;
+  ASSERT_HRESULT_SUCCEEDED(GetProcessContext(ContextProbe::kWrite, &context));
+  if (context.virtualization != Virtualization::kNo) {
+    GTEST_SKIP() << "the registry may be virtualized here, so the virtualization guard answers "
+                    "first (checked by ChecksAreRefusedWhereWritesAreSwallowed)";
+  }
+  GatherOptions options;
+  options.liveTest = false;
+  options.context = context;
+  Snapshot snapshot;
+  ASSERT_HRESULT_SUCCEEDED(GatherSnapshot(RegistryRoots{}, options, RealSystemProbes(), &snapshot));
+  if (!HasFinding(Evaluate(snapshot), FindingId::kNotInstalled)) {
+    GTEST_SKIP() << "something is installed here, so --checks would really change the check task";
+  }
+  if (Refused().count(GetParam())) GTEST_SKIP() << "Application Control refused it before";
+
+  std::string output;
+  DWORD exitCode = 0;
+  if (context.elevated) {
+    wil::unique_handle token;
+    ASSERT_HRESULT_SUCCEEDED(
+        test::CreateMediumTokenForSelf(test::MediumToken::kFiltered, token.put()));
+    test::PipedChild child;
+    const HRESULT started = child.Start(Exe(), L"--checks default", token.get());
+    if (test::IsApplicationControlBlock(started)) {
+      Refused().insert(GetParam());
+      GTEST_SKIP() << "Application Control refused to start " << ::testing::PrintToString(Exe());
+    }
+    ASSERT_HRESULT_SUCCEEDED(started);
+    child.CloseInput();
+    for (std::string line = child.ReadLine(); !line.empty(); line = child.ReadLine()) {
+      output += line + "\n";
+    }
+    exitCode = child.Wait(kTimeoutMs);
+  } else {
+    test::CapturedRun run;
+    RUN_OR_SKIP(L"--checks default", run);
+    output = run.out + run.err;
+    exitCode = run.exitCode;
+  }
+  std::printf("%ls --checks default (not installed) -> exit %lu: %s", GetParam(), exitCode,
+              output.c_str());
+  if (exitCode == 8 && output.find("registry check") != std::string::npos) {
+    GTEST_SKIP() << "the executable's own registry check could not decide: " << output;
+  }
+  EXPECT_EQ(exitCode, 6u) << output;
+  EXPECT_NE(output.find(" is not installed"), std::string::npos) << output;
 }
 
 // Taking slots back needs --yes when there is no console to ask on, and that is decided before

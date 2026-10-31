@@ -157,6 +157,8 @@ TEST(PlanRepairs, ReportOnlyFindingsPlanNothing) {
       Make(FindingId::kIconsOnly, FixKind::kUserAction, false),
       Make(FindingId::kTaskDisabled, FixKind::kUserAction, false),
       Make(FindingId::kChecksOff, FixKind::kUserAction, false),
+      // The installed program is not there: a task registered again would point at nothing.
+      Make(FindingId::kTaskStaleAction, FixKind::kUserAction, false),
       Make(FindingId::kV1Leftovers, FixKind::kNone, false),
       Make(FindingId::kPdfCraftChanged, FixKind::kNone, false),
   };

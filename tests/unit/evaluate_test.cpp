@@ -89,9 +89,11 @@ void AddTask(Snapshot* s) {
   s->task.atSignIn = true;
   s->task.actionPath = (s->installRoot / kSettingsExe).native();
   s->task.actionArgs = kCheckTaskArguments;
+  s->task.options = OptionsFromCheckboxes(true, true);
 }
 
 void Healthy(Snapshot* s) {
+  s->settingsExeFound = true;  // a 2.x install has the program the task runs
   s->slots = {kOurs, kOurs};
   s->effective = kOurs;
   s->live = LiveTest{S_OK, {96, 96}, 200};
@@ -542,6 +544,52 @@ TEST(Evaluate, Task) {
   s.task.enabled = false;
   ExpectKind(*Find(Evaluate(s), FindingId::kTaskDisabled), Severity::kWarning, false,
              FixKind::kUserAction);
+
+  // Without the installed program the task cannot be pointed at it: reported, not repaired.
+  AddTask(&s);
+  s.task.actionPath = (kUserRoot / kSettingsExe).native();
+  s.settingsExeFound = false;
+  stale = *Find(Evaluate(s), FindingId::kTaskStaleAction);
+  ExpectKind(stale, Severity::kWarning, false, FixKind::kUserAction);
+  EXPECT_EQ(stale.path, kMachineRoot / kSettingsExe);
+
+  // Neither of the check's triggers (a daily one, or an event trigger with another query, reads
+  // as none): registering it again with the same triggers would delete it, so --checks it is.
+  AddTask(&s);
+  s.settingsExeFound = true;
+  s.task.actionPath = (kUserRoot / kSettingsExe).native();
+  s.task.options = {TriggerSetting::kAbsent, TriggerSetting::kAbsent, true};
+  stale = *Find(Evaluate(s), FindingId::kTaskStaleAction);
+  ExpectKind(stale, Severity::kWarning, false, FixKind::kUserAction);
+  EXPECT_TRUE(PlanRepairs(s, Evaluate(s), RepairMode::kSafe).user.empty());
+  // One disabled trigger is still one to keep.
+  s.task.options.atSignIn = TriggerSetting::kDisabled;
+  ExpectKind(*Find(Evaluate(s), FindingId::kTaskStaleAction), Severity::kWarning, false,
+             FixKind::kAuto);
+}
+
+// The program a task may run is the installed settings executable, there, in the root of the
+// scope the snapshot found.
+TEST(Evaluate, InstalledSettingsExe) {
+  Snapshot s = MachineInstall();
+  EXPECT_EQ(InstalledSettingsExe(s), kMachineRoot / kSettingsExe);
+  s.installRoot = kMachineRoot / L"";  // a trailing separator names the same folder
+  EXPECT_EQ(InstalledSettingsExe(s), kMachineRoot / kSettingsExe);
+  s = UserInstall();
+  EXPECT_EQ(InstalledSettingsExe(s), kUserRoot / kSettingsExe);
+
+  s.settingsExeFound = false;  // a 1.x build has none
+  EXPECT_FALSE(InstalledSettingsExe(s));
+  s = UserInstall();
+  s.installRoot = kMachineRoot;  // not the root of its scope
+  EXPECT_FALSE(InstalledSettingsExe(s));
+  s = UserInstall();
+  s.paths.userRoot = L"relative\root";
+  s.installRoot = s.paths.userRoot;
+  EXPECT_FALSE(InstalledSettingsExe(s));
+  s = Empty();
+  s.settingsExeFound = true;
+  EXPECT_FALSE(InstalledSettingsExe(s));  // nothing installed
 }
 
 TEST(Evaluate, CleanupPendingOnlyWhileInstalled) {

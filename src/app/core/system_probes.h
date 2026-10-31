@@ -4,7 +4,8 @@
 // Scheduler and the Explorer test. The code that gathers the state takes them through this
 // interface, so its tests can answer every question with a fake and never read the PC's real
 // state, start a thumbnail surrogate or depend on what is installed. Everything that reads the
-// registry takes RegistryRoots instead.
+// registry takes RegistryRoots instead. The one write here is the check task's (registering
+// it, or deleting it), which no redirection reaches either: tests record it instead.
 
 #pragma once
 
@@ -39,6 +40,11 @@ class SystemProbes {
   [[nodiscard]] virtual HRESULT ReadTask(const TaskLocation& location,
                                          TaskState* state) const noexcept = 0;
   [[nodiscard]] virtual HRESULT LegacyTaskExists(bool* exists) const noexcept = 0;
+  // Registers the check task, or deletes it when |options| has no trigger (ApplyTaskOptions).
+  [[nodiscard]] virtual HRESULT ApplyTaskOptions(const TaskLocation& location,
+                                                 const TaskOptions& options,
+                                                 const std::filesystem::path& program,
+                                                 const ProcessContext& context) const noexcept = 0;
   // The real one first deletes probe PDFs that earlier runs left in %TEMP% (SweepStaleProbes).
   [[nodiscard]] virtual HRESULT RunLiveTest(UINT size, const std::filesystem::path* file,
                                             DWORD timeoutMs, LiveTest* result) const noexcept = 0;

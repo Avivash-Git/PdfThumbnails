@@ -34,6 +34,9 @@ using OpenWindowFn = int (*)() noexcept;
 //     --check        the check with the safe repairs (--no-repair: none); exit 0, 1, 4, 6, 7, 8
 //     --fix          the same, and with --take-back the slots another handler holds (asks
 //                    first); the machine-wide part is only described, exit 1 then
+//     --checks       registers the user's check task with the triggers asked for, or deletes it
+//                    (none); exit 0, 4, 5, 6 (not installed, or no settings executable for the
+//                    task to run), 8 (also when elevated)
 //     --diagnostics  the masked report on standard output, the clipboard (--copy) or a file
 //                    (--out)
 //   Commands not built yet say so and exit 5.
@@ -53,6 +56,10 @@ std::wstring CannotRunHereMessage(const ProcessContext& context);
 // own settings and files, which an administrator process does not write. Starts like
 // CannotRunHereMessage ("Cannot run here: ").
 std::wstring ElevatedRefusalMessage();
+
+// Why --checks refuses an elevated process (pure): the check task belongs to the signed-in user
+// and runs with their own rights. Starts like CannotRunHereMessage ("Cannot run here: ").
+std::wstring ChecksElevatedRefusalMessage();
 
 // Whether a command run in |context| writes the log (pure): never in an elevated process. The
 // log folder lies in the user's profile, which the user's unelevated processes control: they

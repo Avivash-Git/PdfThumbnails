@@ -6,7 +6,8 @@
 #                                   folders, DLL headers, 1.x leftovers, Smart App Control,
 #                                   PdfCraft, the check task, Explorer's settings and the
 #                                   Explorer test); the check itself (gathering, findings,
-#                                   repairs, the operation lock around them); its reports (the
+#                                   repairs, the operation lock around them); when the checks
+#                                   run (the user's check task); its reports (the
 #                                   status text, the JSON status, the masked diagnostics)
 #   PdfThumbnailsSettings  WIN32    ${PDFT_SETTINGS_EXE}: the window, scheduled checks, elevated
 #                                   steps; shows no console window
@@ -20,6 +21,7 @@ add_library(pdft_appcore STATIC
   core/app_main.cpp core/app_main.h
   core/build_folder.cpp core/build_folder.h
   core/check.cpp core/check.h
+  core/check_schedule.cpp core/check_schedule.h
   core/cli_args.cpp core/cli_args.h
   core/com_security.cpp core/com_security.h
   core/commands.cpp core/commands.h

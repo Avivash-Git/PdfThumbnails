@@ -97,6 +97,9 @@ struct Snapshot {
   // none (1.x's rule). |installRoot| is that scope's root (empty for none).
   Scope scope = Scope::kNone;
   std::filesystem::path installRoot;
+  // <installRoot>\<settings executable> is a file: the program the check task runs. A 1.x build
+  // has none.
+  bool settingsExeFound = false;
   std::optional<ClassReg> machineClass;
   std::optional<ClassReg> userClass;
   SlotValues slots;
@@ -179,5 +182,12 @@ std::optional<std::filesystem::path> ChooseUserBuildDll(const Snapshot& snapshot
 
 // |dll| lies directly in |folder| (pure, lexical, ignoring case).
 bool DllIsInFolder(const std::filesystem::path& dll, const std::filesystem::path& folder);
+
+// The program the check task runs (pure): <install root>\<settings executable> of the install
+// |snapshot| found, when its root is the one |snapshot.paths| names for its scope and the file
+// was there (settingsExeFound). std::nullopt otherwise: nothing installed, or an install without
+// it (a 1.x build), where a task would point at a program that is not there. The program that
+// asks plays no part: a copy started from a build tree still names the installed one.
+std::optional<std::filesystem::path> InstalledSettingsExe(const Snapshot& snapshot);
 
 }  // namespace pdft

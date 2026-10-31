@@ -151,6 +151,15 @@ TEST(Commands, CannotRunHereWhenElevated) {
   EXPECT_NE(message.find(L"normal (not administrator) prompt"), std::wstring::npos) << message;
 }
 
+// --checks refuses an elevated process too, saying why for the task.
+TEST(Commands, ChecksCannotRunElevated) {
+  const std::wstring message = ChecksElevatedRefusalMessage();
+  EXPECT_EQ(message.rfind(L"Cannot run here: running as administrator", 0), 0u) << message;
+  EXPECT_NE(message.find(L"check task"), std::wstring::npos) << message;
+  EXPECT_NE(message.find(L"--checks from a normal (not administrator) prompt"), std::wstring::npos)
+      << message;
+}
+
 TEST(Commands, ElevatedProcessesNeverLog) {
   ProcessContext context;
   context.elevated = false;

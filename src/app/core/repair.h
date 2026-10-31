@@ -3,7 +3,8 @@
 // What a check repairs on its own is safe: it fills empty slots but never takes one from another
 // handler (the user may have chosen it), registers the per-user class again, removes a per-user
 // class that hides the machine-wide one, removes 1.x's pending clean-up while installed, rewrites
-// a broken zoom value and removes per-user build folders nothing uses. Taking slots back needs an
+// a broken zoom value, registers the check task again when it runs another program than the
+// installed one, and removes per-user build folders nothing uses. Taking slots back needs an
 // explicit request. The machine-wide part needs an administrator step, which the plan names but
 // this code never runs.
 
@@ -19,6 +20,7 @@
 #include "evaluate.h"
 #include "registry_roots.h"
 #include "snapshot.h"
+#include "system_probes.h"
 
 namespace pdft {
 
@@ -36,7 +38,7 @@ struct RepairStep {
     kFillSlot,           // an empty slot -> our handler
     kTakeBackSlot,       // a slot of another handler -> our handler
     kRewriteZoom,        // the Zoom value -> |zoom|
-    kReRegisterTask,     // the task again, same triggers, the installed program (not yet applied)
+    kReRegisterTask,     // the task again, same triggers, the installed program |path|
     kRemoveUserBuild,    // the per-user build folder |path|
   };
   Kind kind = Kind::kFillSlot;
@@ -74,23 +76,37 @@ enum class RepairResult {
   kDone,
   kUnchanged,   // nothing to do any more (someone else did it meanwhile, or it changed)
   kKept,        // a build folder still in use: left for the next check
-  kNotApplied,  // not done here: this build cannot change tasks yet (re-registering the task),
-                // or an elevated process does not delete in the user's profile (a build folder)
+  kNotApplied,  // not done here, for the reason RepairOutcome::notApplied gives
   kFailed,
+};
+
+// Why a step was not applied.
+enum class NotApplied {
+  kNone,
+  kElevated,   // an elevated process neither deletes in the user's profile nor registers the
+               // user's task: a normal check does
+  kNoProgram,  // the installed settings executable is not there (any more): a task must never
+               // point at a program that is missing
+  kNoTrigger,  // the task has neither of the check's triggers: registering it again with the
+               // same triggers would delete it
 };
 
 struct RepairOutcome {
   RepairStep step;
   RepairResult result = RepairResult::kFailed;
   HRESULT hr = S_OK;
+  NotApplied notApplied = NotApplied::kNone;  // with RepairResult::kNotApplied
 };
 
-// Applies |plan|'s per-user steps through |roots|, each checked again against the registry and
-// the files as they are now, and logged (step, slot or folder name, result; no paths). A step
-// that fails is recorded in |outcomes| and the others still run; nothing throws. Fails only when
-// out of memory. The administrator step is never run.
-[[nodiscard]] HRESULT ApplyUserRepairs(const RegistryRoots& roots, const Snapshot& snapshot,
-                                       const RepairPlan& plan,
+// Applies |plan|'s per-user steps through |roots| (and the check task through |probes|), each
+// checked again against the registry, the files and the task as they are now, and logged (step,
+// slot or folder name, result; no paths). A step that fails is recorded in |outcomes| and the
+// others still run; nothing throws. Fails only when out of memory. The administrator step is
+// never run. The task is registered again only unelevated, only for the installed settings
+// executable while it is there (InstalledSettingsExe), and with the triggers and the enabled
+// state it has now, so what someone turned off stays off.
+[[nodiscard]] HRESULT ApplyUserRepairs(const RegistryRoots& roots, const SystemProbes& probes,
+                                       const Snapshot& snapshot, const RepairPlan& plan,
                                        std::vector<RepairOutcome>* outcomes) noexcept;
 
 // Whether any outcome changed a slot or a class (Explorer must then be told; pure).

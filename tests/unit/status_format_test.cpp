@@ -441,8 +441,12 @@ TEST(StatusFormat, TaskAndZoomProblems) {
                                0),
             0u)
       << checks->text;
-  EXPECT_NE(checks->hint.find(L"--checks default"), std::wstring::npos) << checks->hint;
-  EXPECT_NE(checks->hint.find(L"--check registers it again"), std::wstring::npos) << checks->hint;
+  // The checkbox the task shows on stays on when it is turned on again.
+  EXPECT_NE(checks->hint.find(L"--checks pdfcraft turns it on again"), std::wstring::npos)
+      << checks->hint;
+  EXPECT_NE(checks->hint.find(L"--check registers it again with the same triggers"),
+            std::wstring::npos)
+      << checks->hint;
 
   s = MachineInstallSnapshot();
   s.zoom.decision = {200, ZoomOrigin::kRegistry, ZoomValueState::kOutOfRange};
@@ -475,6 +479,172 @@ TEST(StatusFormat, TaskAndZoomProblems) {
   s.last->pdfcraftVersion = L"0.13.0";
   EXPECT_TRUE(FindLine(Lines(s), L"Default app", ' ',
                        std::wstring(kPdfCraftProductName) + L" 0.14.0 (0.13.0 at the last check)"));
+}
+
+// The checks are off: the Checks line names --checks only where it would work, which needs the
+// installed settings executable (this PC's 1.x build has none) and a normal prompt.
+TEST(StatusFormat, ChecksOffHintOnlyWhereChecksCanTurnThemOn) {
+  Snapshot s = MachineInstallSnapshot();
+  s.task = {};
+  std::optional<StatusLine> checks = FindLine(Lines(s), L"Checks", ' ');
+  ASSERT_TRUE(checks);
+  EXPECT_EQ(checks->text, L"off");
+  EXPECT_EQ(checks->hint, L"--checks default turns them on");
+
+  s.context.elevated = true;
+  checks = FindLine(Lines(s), L"Checks", ' ');
+  ASSERT_TRUE(checks);
+  EXPECT_EQ(checks->hint,
+            L"--checks default turns them on (from a normal, not administrator, prompt)");
+
+  // Installed, but without the program the task would run.
+  s.context.elevated = false;
+  s.settingsExeFound = false;
+  checks = FindLine(Lines(s), L"Checks", ' ');
+  ASSERT_TRUE(checks);
+  EXPECT_EQ(checks->hint, L"");
+
+  // This PC: 1.1 installed, 1.x's task still there.
+  checks = FindLine(Lines(ThisPcSnapshot()), L"Checks", ' ');
+  ASSERT_TRUE(checks);
+  EXPECT_EQ(checks->hint, L"");
+  EXPECT_EQ(checks->text.find(L"--checks"), std::wstring::npos);
+
+  // Nothing installed: no finding, no hint.
+  checks = FindLine(Lines(EmptySnapshot()), L"Checks", ' ');
+  ASSERT_TRUE(checks);
+  EXPECT_EQ(checks->hint, L"");
+}
+
+TEST(StatusFormat, TaskDisabledAndStaleWithoutTheProgram) {
+  Snapshot s = MachineInstallSnapshot();
+  s.task.enabled = false;
+  s.task.afterPdfCraft = false;
+  s.task.atSignIn = false;  // no trigger on: turning it on again asks for both
+  std::optional<StatusLine> checks = FindLine(Lines(s), L"Checks", '!');
+  ASSERT_TRUE(checks);
+  EXPECT_EQ(checks->hint, L"--checks default turns it on again");
+
+  s.task.atSignIn = true;
+  checks = FindLine(Lines(s), L"Checks", '!');
+  ASSERT_TRUE(checks);
+  EXPECT_EQ(checks->hint, L"--checks signin turns it on again");
+
+  // The installed program is gone: --checks cannot register, the check cannot repair.
+  s.settingsExeFound = false;
+  s.task.actionPath = L"D:\\Elsewhere\\" + std::wstring(kSettingsExe);
+  checks = FindLine(Lines(s), L"Checks", '!');
+  ASSERT_TRUE(checks);
+  EXPECT_EQ(checks->hint, L"Turn it on again in Task Scheduler; Reinstall " + kProduct +
+                              L"; until then --checks none removes the task");
+  ExpectHintsOnProblems(s);
+
+  // The program is there but the task has neither of the check's triggers: the check cannot
+  // register it again with the same ones, --checks can with the ones the user picks.
+  s = MachineInstallSnapshot();
+  s.task.afterPdfCraft = false;
+  s.task.atSignIn = false;
+  s.task.options = {TriggerSetting::kAbsent, TriggerSetting::kAbsent, true};
+  s.task.actionPath = L"D:\\Elsewhere\\" + std::wstring(kSettingsExe);
+  checks = FindLine(Lines(s), L"Checks", '!');
+  ASSERT_TRUE(checks);
+  EXPECT_EQ(checks->hint, L"--checks default registers it again with both triggers");
+  ExpectHintsOnProblems(s);
+}
+
+TEST(StatusFormat, ChecksTexts) {
+  EXPECT_EQ(ChecksStateText(true, false), L"after " + std::wstring(kPdfCraftProductName) +
+                                              L" updates: on" + kDotText + L"at sign-in: off");
+  EXPECT_EQ(std::wstring(ChecksValue(true, true)), L"default");
+  EXPECT_EQ(std::wstring(ChecksValue(true, false)), L"pdfcraft");
+  EXPECT_EQ(std::wstring(ChecksValue(false, true)), L"signin");
+  EXPECT_EQ(std::wstring(ChecksValue(false, false)), L"none");
+}
+
+// What --checks prints after it changed the task, or why it did not.
+TEST(StatusFormat, ChecksReports) {
+  ScheduleResult result;
+  result.before = UserInstallSnapshot();
+  result.code = ExitCode::kOk;
+  result.askedAfterPdfCraft = true;
+  result.askedAtSignIn = false;
+  result.program = kUserRoot / kSettingsExe;
+  result.after.exists = true;
+  result.after.enabled = true;
+  result.after.afterPdfCraft = true;
+  result.after.atFallback = true;
+  result.after.path = L"\\" + kProduct + L" check S-1-12-1-1-2-3-4";
+  result.after.actionPath = result.program.native();
+  result.after.actionArgs = kCheckTaskArguments;
+  ScheduleReport report = ScheduleResultReport(result);
+  EXPECT_EQ(report.error, L"");
+  ASSERT_EQ(report.out.size(), 2u);
+  EXPECT_EQ(report.out[0], L"Checks: " + ChecksStateText(true, false));
+  EXPECT_EQ(report.out[1], L"Check task: " + result.after.path + L", runs " +
+                               result.program.native() + L" " + kCheckTaskArguments);
+
+  // Read back failed: what was asked for, and why the task is not shown.
+  result.readError = E_ACCESSDENIED;
+  result.after = {};
+  report = ScheduleResultReport(result);
+  ASSERT_EQ(report.out.size(), 2u);
+  EXPECT_EQ(report.out[0], L"Checks: " + ChecksStateText(true, false));
+  EXPECT_EQ(report.out[1], L"The check task was changed but could not be read back: 0x80070005");
+
+  // Off: removed, or there was none; 1.x's task is named, never touched.
+  result = {};
+  result.before = ThisPcSnapshot();
+  result.code = ExitCode::kOk;
+  result.remove = true;
+  report = ScheduleResultReport(result);
+  ASSERT_EQ(report.out.size(), 2u);
+  EXPECT_EQ(report.out[0], L"Checks: off (there was no check task)");
+  EXPECT_EQ(report.out[1], L"The 1.x task " + std::wstring(kLegacyTask) +
+                               L" is still there; it was left as it is.");
+  result.before = UserInstallSnapshot();
+  report = ScheduleResultReport(result);
+  EXPECT_EQ(report.out, (std::vector<std::wstring>{L"Checks: off (the check task was removed)"}));
+
+  // Refused: nothing installed, a 1.x build, an install without the program.
+  result = {};
+  result.refusal = ScheduleRefusal::kNotInstalled;
+  result.code = ExitCode::kNotInstalled;
+  report = ScheduleResultReport(result);
+  EXPECT_TRUE(report.out.empty());
+  EXPECT_EQ(report.error.rfind(kProduct + L" is not installed", 0), 0u) << report.error;
+  result.refusal = ScheduleRefusal::kNoSettingsExe;
+  result.before = ThisPcSnapshot();
+  report = ScheduleResultReport(result);
+  EXPECT_TRUE(report.out.empty());
+  EXPECT_EQ(report.error, L"The installed " + kProduct + L" is a 1.x build, which has no " +
+                              (kMachineRoot / kSettingsExe).native() +
+                              L" for the scheduled checks to run. Install this version first.");
+  result.before = MachineInstallSnapshot();
+  result.before.settingsExeFound = false;
+  report = ScheduleResultReport(result);
+  EXPECT_EQ(report.error, (kMachineRoot / kSettingsExe).native() +
+                              L" is not there, so a scheduled check would have nothing to run. "
+                              L"Reinstall " +
+                              kProduct + L".");
+  result.before = EmptySnapshot();
+  report = ScheduleResultReport(result);
+  EXPECT_NE(report.error.find(L"Run --check first"), std::wstring::npos) << report.error;
+
+  // The change failed.
+  result = {};
+  result.before = UserInstallSnapshot();
+  result.code = ExitCode::kFailed;
+  result.error = E_ACCESSDENIED;
+  report = ScheduleResultReport(result);
+  EXPECT_TRUE(report.out.empty());
+  EXPECT_EQ(report.error, L"Could not change the check task: 0x80070005");
+  result.error = kSomeTriggersFailed;
+  report = ScheduleResultReport(result);
+  EXPECT_EQ(report.error.rfind(L"Task Scheduler registered the check task but could not set up "
+                               L"all of its triggers (0x8004131B)",
+                               0),
+            0u)
+      << report.error;
 }
 
 TEST(StatusFormat, WhereTheWindowsChecksCannotRun) {
@@ -649,9 +819,26 @@ TEST(StatusFormat, RepairOutcomes) {
             L"2.0.0.0-00000000");
   outcome.step.kind = RepairStep::Kind::kReRegisterTask;
   outcome.step.path = kUserRoot / kSettingsExe;
+  outcome.result = RepairResult::kDone;
+  EXPECT_EQ(RepairOutcomeText(outcome),
+            L"Done: register the check task again for " + (kUserRoot / kSettingsExe).native());
   outcome.result = RepairResult::kNotApplied;
-  EXPECT_EQ(RepairOutcomeText(outcome).rfind(L"Not done, this build cannot change tasks yet: ", 0),
+  outcome.notApplied = NotApplied::kElevated;
+  EXPECT_EQ(RepairOutcomeText(outcome).rfind(
+                L"Not done, running as administrator (a normal check does it): ", 0),
             0u);
+  outcome.notApplied = NotApplied::kNoProgram;
+  EXPECT_EQ(RepairOutcomeText(outcome).rfind(L"Not done, the installed program is not there: ", 0),
+            0u);
+  outcome.notApplied = NotApplied::kNoTrigger;
+  EXPECT_NE(RepairOutcomeText(outcome).find(L"(choose them with --checks)"), std::wstring::npos);
+  outcome.step.kind = RepairStep::Kind::kRemoveUserBuild;
+  outcome.step.path = kUserRoot / L"app" / L"2.0.0.0-00000000";
+  outcome.notApplied = NotApplied::kElevated;
+  EXPECT_EQ(RepairOutcomeText(outcome),
+            L"Not done, running as administrator (a normal check removes it): remove the old "
+            L"build folder 2.0.0.0-00000000");
+  outcome.notApplied = NotApplied::kNone;
   outcome.step.kind = RepairStep::Kind::kRewriteZoom;
   outcome.step.zoom = 200;
   outcome.result = RepairResult::kFailed;

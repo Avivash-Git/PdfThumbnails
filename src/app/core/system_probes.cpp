@@ -26,6 +26,11 @@ class RealProbes final : public SystemProbes {
   HRESULT LegacyTaskExists(bool* exists) const noexcept override {
     return pdft::LegacyTaskExists(exists);
   }
+  HRESULT ApplyTaskOptions(const TaskLocation& location, const TaskOptions& options,
+                           const std::filesystem::path& program,
+                           const ProcessContext& context) const noexcept override {
+    return pdft::ApplyTaskOptions(location, options, program, context);
+  }
   HRESULT RunLiveTest(UINT size, const std::filesystem::path* file, DWORD timeoutMs,
                       LiveTest* result) const noexcept override {
     // Leftovers of runs that crashed or whose surrogate never returned; best effort.

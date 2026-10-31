@@ -20,8 +20,8 @@
 #                             file, command lines, exit codes)
 #   unit.samples              src/app/res/sample-*.pdf == `thumbtest makesamples` output
 #   integration.tests         pdft_integration_tests: the app's core against the real system
-#                             (COM under the app's security, WMI, Task Scheduler read-only, named
-#                             objects across processes, the process tree, the registry canary)
+#                             (COM under the app's security, WMI, Task Scheduler, named objects
+#                             across processes, the process tree, the registry canary)
 #                             and both executables run with captured output; the registration,
 #                             settings, build ids, DLL headers and 1.x leftovers through private
 #                             registry keys and temporary folders; read-only: Smart App Control,
@@ -30,14 +30,21 @@
 #                             Windows build; the whole check (gathering, repairs, the record,
 #                             the lock, also against a process below Medium integrity) through
 #                             private keys, folders under %TEMP% and fakes for everything
-#                             Windows-wide; probe PDFs in %TEMP% (deleted); the diagnostics' log
-#                             reader on files under %TEMP%; --status (text and JSON) and
-#                             --diagnostics of both executables against the real state,
-#                             read-only, without the Explorer test; never extracts a thumbnail;
+#                             Windows-wide, --checks the same way; probe PDFs in %TEMP%
+#                             (deleted); the diagnostics' log reader on files under %TEMP%; the
+#                             check task written (each checkbox combination, the folder or the
+#                             root-folder name, one copy per user, the check's repair of a stale
+#                             task, a run through Task Scheduler) in a task folder and under
+#                             root-folder names of its own, deleted afterwards (elevated also the
+#                             protected task folder and the uninstall's removal of every user's
+#                             task); --status (text and JSON) and --diagnostics of both
+#                             executables against the real state, read-only, without the
+#                             Explorer test; --checks of both only where a guard refuses it (8,
+#                             or 6 where nothing is installed); never extracts a thumbnail;
 #                             writes nothing to the real profile but the canary's volatile probe
 #                             key, those private keys (HKCU\Software\<product>-Test\<GUID>,
 #                             deleted afterwards) and, unelevated, the start and end lines that
-#                             every command run appends to the app's log
+#                             every command run appends to the app's log, and its own test tasks
 #   handler.tests             pdft_handler_tests: PdfThumbnails.dll in-process at Medium
 #                             integrity (relaunches itself when elevated) with HKCU redirected to
 #                             a private key: crop table, pixels, COM surface, error HRESULTs,
@@ -204,9 +211,10 @@ pdft_add_program_test(handler.refuses_elevated pdft_refuses_elevated
 # Writes nothing to the real profile except the registry canary's volatile probe key and private
 # test keys (HKCU\Software\<product>-Test\<GUID>), which it deletes, and the start and end lines
 # the executables' read-only commands (--status, --diagnostics) append to the app's log when not
-# elevated; starts itself (child modes in integration/main.cpp) and the two executables, a
-# writing command of theirs only where its writes are swallowed anyway; never starts a thumbnail
-# extraction. Its named objects carry a
+# elevated, and test tasks in a Task Scheduler folder and under root-folder names of its own,
+# which it deletes; starts itself (child modes in integration/main.cpp), the two executables, a
+# writing command of theirs only where its writes are swallowed anyway, and pdft-run-medium.exe
+# once through Task Scheduler; never starts a thumbnail extraction. Its named objects carry a
 # suffix of the run's own, so it never takes or waits for a running app's.
 if(TARGET pdft_appcore)
   add_executable(pdft_integration_tests
@@ -222,13 +230,16 @@ if(TARGET pdft_appcore)
     integration/live_test_files_test.cpp
     integration/probes_test.cpp
     integration/registration_test.cpp
-    integration/settings_test.cpp)
+    integration/settings_test.cpp
+    integration/tasks_test.cpp)
   pdft_harden(pdft_integration_tests TEST)
   target_link_libraries(pdft_integration_tests PRIVATE pdft_appcore pdft_testsupport GTest::gtest
                                                        ole32 oleaut32 advapi32 user32)
   # The handler and PDFium next to it are read (headers, version, build id), never loaded.
   add_dependencies(pdft_integration_tests PdfThumbnailsCli PdfThumbnailsSettings pdft_handler
                                           pdft_pdfium_runtime)
+  # The check task tests point their tasks at pdft-run-medium.exe, and run it once (--exit 0).
+  add_dependencies(pdft_integration_tests pdft_run_medium)
   pdft_add_program_test(integration.tests pdft_integration_tests LABELS integration)
   if(NOT CMAKE_CROSSCOMPILING)
     # The build tree has cmake and the build-id script, so the app's build id is compared with

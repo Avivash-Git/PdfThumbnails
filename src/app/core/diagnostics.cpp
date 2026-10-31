@@ -486,17 +486,27 @@ std::wstring BuildDiagnostics(const Snapshot& s, std::span<const Finding> findin
       L", settings.ini " +
       (s.zoom.legacyIniZoom ? std::to_wstring(*s.zoom.legacyIniZoom) : std::wstring(L"none")) +
       L" (" + s.zoom.legacyIni.native() + L")");
+  add(L"  Task program: " + (s.installRoot.empty()
+                                 ? std::wstring(L"none (nothing installed)")
+                                 : (s.installRoot / kSettingsExe).native() +
+                                       (s.settingsExeFound ? L" (there)" : L" (missing)")));
   if (s.task.exists) {
-    add(L"  Check task:   " + s.task.path + L", enabled " + YesNo(s.task.enabled) + L", after " +
-        kPdfCraftProductName + L" updates " + YesNo(s.task.afterPdfCraft) + L", at sign-in " +
-        YesNo(s.task.atSignIn) + L", runs \"" + s.task.actionPath + L"\" " + s.task.actionArgs);
+    add(L"  Check task:   " + s.task.path + (s.task.atFallback ? L" (root-folder name)" : L"") +
+        L", enabled " + YesNo(s.task.enabled) + L", after " + kPdfCraftProductName + L" updates " +
+        YesNo(s.task.afterPdfCraft) + L", at sign-in " + YesNo(s.task.atSignIn) + L", runs \"" +
+        s.task.actionPath + L"\" " + s.task.actionArgs);
     add(L"  Last run:     " +
         (s.task.lastRun ? TaskTimeText(*s.task.lastRun) : std::wstring(L"never")) +
         (s.task.lastResult ? L", result " + HResultText(static_cast<HRESULT>(*s.task.lastResult))
                            : std::wstring()));
   } else {
-    add(L"  Check task:   none (looked for " + s.taskLocation.folder + L"\\" + s.taskLocation.name +
-        L")");
+    std::wstring looked = s.taskLocation.folder + L"\\" + s.taskLocation.name;
+    if (!s.taskLocation.fallbackName.empty()) {
+      looked += L" and " + s.taskLocation.fallbackFolder +
+                (s.taskLocation.fallbackFolder.ends_with(L'\\') ? L"" : L"\\") +
+                s.taskLocation.fallbackName;
+    }
+    add(L"  Check task:   none (looked for " + looked + L")");
   }
   if (s.last) {
     add(L"  Last check:   " + Widen(IsoUtcText(s.last->time)) + L", exit code " +

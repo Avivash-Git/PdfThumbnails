@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "check.h"
+#include "check_schedule.h"
 #include "diagnostics.h"
 #include "evaluate.h"
 #include "instance.h"
@@ -257,6 +258,42 @@ int RunFixCommand(const CliArgs& args, const ProcessContext& context, Output& ou
   return ReportCheck(hr, result, context, false, out);
 }
 
+int RunChecksCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
+  if (!args.checks) {
+    // The parser makes the value required; this only keeps a caller from passing none.
+    out.Error(L"--checks needs a value. Run --help");
+    return Code(ExitCode::kUsage);
+  }
+  ScheduleOptions options;
+  options.afterPdfCraft = args.checks->afterPdfCraft;
+  options.atSignIn = args.checks->atSignIn;
+  options.context = context;
+  ScheduleResult result;
+  if (const HRESULT hr = ChangeCheckSchedule(options, RegistryRoots{}, RealSystemProbes(), &result);
+      FAILED(hr)) {
+    out.Error(L"Cannot read the state of the installation: " + HResultText(hr));
+    return Code(ExitCode::kFailed);
+  }
+  if (result.refusal == ScheduleRefusal::kWrongContext) {
+    out.Error(CannotRunHereMessage(context));
+    return Code(result.code);
+  }
+  if (result.refusal == ScheduleRefusal::kElevated) {
+    out.Error(ChecksElevatedRefusalMessage());
+    return Code(result.code);
+  }
+  if (result.busy) {
+    out.Error(
+        L"Another check or change is running and did not finish within 30 seconds; try again "
+        L"later.");
+    return Code(result.code);
+  }
+  const ScheduleReport report = ScheduleResultReport(result);
+  for (const std::wstring& line : report.out) out.Line(line);
+  if (!report.error.empty()) out.Error(report.error);
+  return Code(result.code);
+}
+
 HRESULT CopyToClipboard(std::wstring_view text) noexcept {
   // Another program may hold the clipboard for a moment.
   bool opened = false;
@@ -398,6 +435,12 @@ std::wstring ElevatedRefusalMessage() {
          L"normal (not administrator) prompt.";
 }
 
+std::wstring ChecksElevatedRefusalMessage() {
+  return L"Cannot run here: running as administrator. The check task belongs to the signed-in "
+         L"user and runs with their own rights; run --checks from a normal (not administrator) "
+         L"prompt.";
+}
+
 bool ShouldStartSettingsWindow(DWORD consoleProcessCount, bool hasConsoleWindow) noexcept {
   return consoleProcessCount == 1 && hasConsoleWindow;
 }
@@ -516,6 +559,9 @@ int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWin
       break;
     case Verb::kFix:
       code = RunFixCommand(args, context, out);
+      break;
+    case Verb::kChecks:
+      code = RunChecksCommand(args, context, out);
       break;
     case Verb::kDiagnostics:
       code = RunDiagnostics(args, context, out);

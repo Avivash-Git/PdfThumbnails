@@ -336,11 +336,16 @@ std::vector<Finding> Evaluate(const Snapshot& s) {
       add(Make(FindingId::kChecksOff, Severity::kInfo, false, FixKind::kUserAction));
     } else {
       if (!s.installRoot.empty()) {
-        const std::filesystem::path expected = s.installRoot / kSettingsExe;
-        if (!IEquals(Unquoted(s.task.actionPath), expected.native()) ||
-            s.task.actionArgs != kCheckTaskArguments) {
-          add(Make(FindingId::kTaskStaleAction, Severity::kWarning, false, FixKind::kAuto)).path =
-              expected;
+        // Registered again only for a program that is there: never a task that points at
+        // nothing (an install without the settings executable needs reinstalling first).
+        const std::optional<std::filesystem::path> program = InstalledSettingsExe(s);
+        const std::filesystem::path expected = program.value_or(s.installRoot / kSettingsExe);
+        if (!TaskRunsProgram(s.task, expected)) {
+          // Registered again "with the same triggers" only when it has one of the check's own:
+          // with neither, that would delete it, and --checks picks the triggers instead.
+          const FixKind fix =
+              program && !HasNoTriggers(s.task.options) ? FixKind::kAuto : FixKind::kUserAction;
+          add(Make(FindingId::kTaskStaleAction, Severity::kWarning, false, fix)).path = expected;
         }
       }
       if (!s.task.enabled) {
@@ -393,6 +398,11 @@ std::vector<Finding> Evaluate(const Snapshot& s) {
         s.windowsChecksSkip;
   }
   return findings;
+}
+
+bool TaskRunsProgram(const TaskState& task, const std::filesystem::path& program) noexcept {
+  return IEquals(Unquoted(task.actionPath), program.native()) &&
+         task.actionArgs == kCheckTaskArguments;
 }
 
 bool HealthyFromFindings(std::span<const Finding> findings) noexcept {

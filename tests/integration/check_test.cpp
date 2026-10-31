@@ -1,10 +1,12 @@
-// The check end to end (snapshot.h, evaluate.h, repair.h, check.h): gathering, judging,
-// repairing and recording against a private registry key (ScopedRegistrySandbox, through
-// RegistryRoots) and install roots in a folder under %TEMP%, with every Windows-wide question
-// (the process context, what Windows resolves, Smart App Control, the Code Integrity log,
-// PdfCraft, the tasks, the Explorer test) answered by a fake. Nothing here reads or writes the
-// real classes, slots, settings or per-user folder, starts a thumbnail extraction or tells
-// Explorer anything. Build folders hold copies of the built DLLs, which are read, never loaded.
+// The check end to end (snapshot.h, evaluate.h, repair.h, check.h) and --checks
+// (check_schedule.h): gathering, judging, repairing and recording against a private registry key
+// (ScopedRegistrySandbox, through RegistryRoots) and install roots in a folder under %TEMP%, with
+// every Windows-wide question (the process context, what Windows resolves, Smart App Control, the
+// Code Integrity log, PdfCraft, the tasks, the Explorer test) answered by a fake, which also
+// records what would be written to Task Scheduler instead of writing it. Nothing here reads or
+// writes the real classes, slots, settings, per-user folder or tasks, starts a thumbnail
+// extraction or tells Explorer anything. Build folders hold copies of the built DLLs, which are
+// read, never loaded; settings executables are empty files, never started.
 
 #include <windows.h>
 
@@ -20,12 +22,14 @@
 #include <string>
 #include <vector>
 
+#include "check_schedule.h"
 #include "child_process.h"
 #include "log.h"
 #include "pe_info.h"
 #include "project_config.h"
 #include "registry_sandbox.h"
 #include "settings.h"
+#include "status_format.h"
 #include "strings.h"
 #include "temp_dir.h"
 
@@ -101,6 +105,26 @@ class FakeProbes final : public SystemProbes {
     *exists = legacyTask;
     return S_OK;
   }
+  // Records the change and makes the task look like Task Scheduler would afterwards.
+  HRESULT ApplyTaskOptions(const TaskLocation& location, const TaskOptions& options,
+                           const std::filesystem::path& program,
+                           const ProcessContext& used) const noexcept override {
+    applied.push_back(Applied{location, options, program, used.elevated});
+    if (FAILED(applyError)) return applyError;
+    if (HasNoTriggers(options)) {
+      task = {};
+      return S_OK;
+    }
+    task.exists = true;
+    task.enabled = options.enabled;
+    task.afterPdfCraft = options.afterPdfCraft == TriggerSetting::kEnabled;
+    task.atSignIn = options.atSignIn == TriggerSetting::kEnabled;
+    task.path = location.folder + L"\\" + location.name;
+    task.actionPath = program.native();
+    task.actionArgs = kCheckTaskArguments;
+    task.options = options;
+    return S_OK;
+  }
   HRESULT RunLiveTest(UINT size, const std::filesystem::path* file, DWORD,
                       LiveTest* result) const noexcept override {
     ++liveRuns;
@@ -116,8 +140,9 @@ class FakeProbes final : public SystemProbes {
   SacReading sac;
   std::vector<BlockCount> counts;
   PdfCraftInfo pdfcraft;
-  TaskState task;
+  mutable TaskState task;  // ApplyTaskOptions changes it
   bool legacyTask = false;
+  HRESULT applyError = S_OK;  // what ApplyTaskOptions returns instead of changing the task
   LiveTest live{S_OK, {96, 96}, 150};
   HRESULT testFileError = S_OK;  // a test file's run cannot start (no probe thread, ...)
 
@@ -127,6 +152,13 @@ class FakeProbes final : public SystemProbes {
   mutable int liveRuns = 0;
   mutable UINT liveSize = 0;
   mutable std::vector<DWORD> waits;
+  struct Applied {
+    TaskLocation location;
+    TaskOptions options;
+    std::filesystem::path program;
+    bool elevated = false;
+  };
+  mutable std::vector<Applied> applied;
 };
 
 std::wstring BuiltFile(const wchar_t* name) { return test::SelfFolder() + L"\\" + name; }
@@ -216,6 +248,35 @@ class CheckEngine : public ::testing::Test {
     options.paths = paths_;
     options.lockWaitMs = 5000;
     return options;
+  }
+
+  // The settings executable of the install at |root|: an empty file, never started.
+  std::filesystem::path PlaceSettingsExe(const std::filesystem::path& root) {
+    std::error_code error;
+    std::filesystem::create_directories(root, error);
+    const std::filesystem::path exe = root / kSettingsExe;
+    std::ofstream(exe) << "";
+    EXPECT_TRUE(Exists(exe));
+    return exe;
+  }
+
+  // The fake user's check task, as it would be registered.
+  TaskLocation Location() const {
+    TaskLocation location;
+    EXPECT_HRESULT_SUCCEEDED(DefaultTaskLocation(probes_.context.userSid, &location));
+    return location;
+  }
+
+  ScheduleResult Schedule(bool afterPdfCraft, bool atSignIn) {
+    ScheduleOptions options;
+    options.afterPdfCraft = afterPdfCraft;
+    options.atSignIn = atSignIn;
+    options.context = probes_.context;
+    options.paths = paths_;
+    options.lockWaitMs = 5000;
+    ScheduleResult result;
+    EXPECT_HRESULT_SUCCEEDED(ChangeCheckSchedule(options, roots_, probes_, &result));
+    return result;
   }
 
   CheckResult Run(RepairMode mode = RepairMode::kSafe) {
@@ -590,7 +651,7 @@ TEST_F(CheckEngine, RefusedWhenElevated) {
   ASSERT_FALSE(plan.user.empty());
   s.context.elevated = true;
   std::vector<RepairOutcome> outcomes;
-  ASSERT_HRESULT_SUCCEEDED(ApplyUserRepairs(roots_, s, plan, &outcomes));
+  ASSERT_HRESULT_SUCCEEDED(ApplyUserRepairs(roots_, probes_, s, plan, &outcomes));
   bool removalSeen = false;
   for (const RepairOutcome& outcome : outcomes) {
     if (outcome.step.kind != RepairStep::Kind::kRemoveUserBuild) continue;
@@ -745,6 +806,289 @@ TEST_F(CheckEngine, WindowsChecksAndTheExplorerTestNeedExplorersView) {
   s = Gather();
   EXPECT_EQ(s.liveSkip, LiveTestSkip::kNotOurHandler);
   EXPECT_EQ(probes_.liveRuns, 0);
+}
+
+// ---- --checks ---------------------------------------------------------------------------------
+
+TEST_F(CheckEngine, ChecksRegisterTheTaskForTheInstalledSettingsExe) {
+  InstallPerUser();
+  const std::filesystem::path exe = PlaceSettingsExe(paths_.userRoot);
+  const struct {
+    bool afterPdfCraft, atSignIn;
+  } cases[] = {{true, true}, {true, false}, {false, true}};
+  for (const auto& c : cases) {
+    probes_.applied.clear();
+    const ScheduleResult result = Schedule(c.afterPdfCraft, c.atSignIn);
+    EXPECT_EQ(result.code, ExitCode::kOk);
+    EXPECT_EQ(result.refusal, ScheduleRefusal::kNone);
+    ASSERT_EQ(probes_.applied.size(), 1u);
+    const FakeProbes::Applied& applied = probes_.applied[0];
+    EXPECT_EQ(applied.location.folder, Location().folder);
+    EXPECT_EQ(applied.location.name, Location().name);
+    EXPECT_EQ(applied.location.fallbackName, Location().fallbackName);
+    EXPECT_EQ(applied.options.afterPdfCraft,
+              c.afterPdfCraft ? TriggerSetting::kEnabled : TriggerSetting::kAbsent);
+    EXPECT_EQ(applied.options.atSignIn,
+              c.atSignIn ? TriggerSetting::kEnabled : TriggerSetting::kAbsent);
+    EXPECT_TRUE(applied.options.enabled);
+    EXPECT_TRUE(IEquals(applied.program.native(), exe.native())) << applied.program;
+    EXPECT_FALSE(applied.elevated);
+    // The task as read back afterwards, and what --checks prints from it.
+    EXPECT_TRUE(result.after.exists);
+    EXPECT_EQ(result.after.afterPdfCraft, c.afterPdfCraft);
+    EXPECT_EQ(result.after.atSignIn, c.atSignIn);
+    const ScheduleReport report = ScheduleResultReport(result);
+    EXPECT_EQ(report.error, L"");
+    ASSERT_FALSE(report.out.empty());
+    EXPECT_EQ(report.out[0], L"Checks: " + ChecksStateText(c.afterPdfCraft, c.atSignIn));
+  }
+  EXPECT_FALSE(StateRecorded());  // --checks records no check
+}
+
+// A machine-wide install's task runs the program in the machine-wide root, never the per-user
+// one or a build tree.
+TEST_F(CheckEngine, ChecksUseTheMachineWideProgramForAMachineWideInstall) {
+  const std::filesystem::path machine = MakeBuild(paths_.machineRoot, L"2.0.0.0-1a2b3c4d");
+  RegisterMachineClass(machine / kHandlerDll);
+  SetSlot(0, kOurs);
+  SetSlot(1, kOurs);
+  const std::filesystem::path exe = PlaceSettingsExe(paths_.machineRoot);
+  PlaceSettingsExe(paths_.userRoot);
+  const ScheduleResult result = Schedule(true, true);
+  EXPECT_EQ(result.code, ExitCode::kOk);
+  ASSERT_EQ(probes_.applied.size(), 1u);
+  EXPECT_TRUE(IEquals(probes_.applied[0].program.native(), exe.native()))
+      << probes_.applied[0].program;
+}
+
+TEST_F(CheckEngine, ChecksNeedTheInstalledSettingsExeToRegister) {
+  InstallPerUser();  // no settings executable in the root
+  ScheduleResult result = Schedule(true, true);
+  EXPECT_EQ(result.code, ExitCode::kNotInstalled);
+  EXPECT_EQ(result.refusal, ScheduleRefusal::kNoSettingsExe);
+  EXPECT_TRUE(probes_.applied.empty());
+
+  // A folder of that name is not the program either.
+  std::error_code error;
+  std::filesystem::create_directories(paths_.userRoot / kSettingsExe, error);
+  result = Schedule(false, true);
+  EXPECT_EQ(result.refusal, ScheduleRefusal::kNoSettingsExe);
+  EXPECT_TRUE(probes_.applied.empty());
+
+  // Turning the checks off needs no program: the task goes whatever is installed.
+  probes_.task.exists = true;
+  probes_.task.actionPath = (paths_.userRoot / L"gone.exe").native();
+  result = Schedule(false, false);
+  EXPECT_EQ(result.code, ExitCode::kOk);
+  EXPECT_TRUE(result.remove);
+  ASSERT_EQ(probes_.applied.size(), 1u);
+  EXPECT_TRUE(HasNoTriggers(probes_.applied[0].options));
+  EXPECT_TRUE(probes_.applied[0].program.empty());
+  EXPECT_FALSE(result.after.exists);
+  EXPECT_EQ(ScheduleResultReport(result).out[0], L"Checks: off (the check task was removed)");
+}
+
+// This PC's shape: a 1.x build installed machine-wide, which has no settings executable.
+TEST_F(CheckEngine, ChecksRefuseToRegisterForA1xBuild) {
+  const std::filesystem::path v1 = MakeBuild(paths_.machineRoot, L"1.1.0.0-67a1323e");
+  RegisterMachineClass(v1 / kHandlerDll);
+  SetSlot(0, kOurs);
+  SetSlot(1, kOurs);
+  probes_.legacyTask = true;
+  for (const bool signIn : {true, false}) {
+    const ScheduleResult result = Schedule(true, signIn);
+    EXPECT_EQ(result.code, ExitCode::kNotInstalled);
+    EXPECT_EQ(result.refusal, ScheduleRefusal::kNoSettingsExe);
+  }
+  EXPECT_TRUE(probes_.applied.empty());
+  const ScheduleResult off = Schedule(false, false);
+  EXPECT_EQ(off.code, ExitCode::kOk);
+  const ScheduleReport report = ScheduleResultReport(off);
+  ASSERT_EQ(report.out.size(), 2u);
+  EXPECT_EQ(report.out[0], L"Checks: off (there was no check task)");
+  EXPECT_NE(report.out[1].find(kLegacyTask), std::wstring::npos);
+}
+
+TEST_F(CheckEngine, ChecksNeedAnInstall) {
+  PlaceSettingsExe(paths_.userRoot);
+  for (const bool on : {true, false}) {
+    const ScheduleResult result = Schedule(on, on);
+    EXPECT_EQ(result.code, ExitCode::kNotInstalled);
+    EXPECT_EQ(result.refusal, ScheduleRefusal::kNotInstalled);
+  }
+  EXPECT_TRUE(probes_.applied.empty());
+  EXPECT_TRUE(KeyIsEmpty(sandbox_.user()));
+}
+
+TEST_F(CheckEngine, ChecksRefusedWhereTheyMayNotRun) {
+  InstallPerUser();
+  PlaceSettingsExe(paths_.userRoot);
+  for (const Virtualization virtualization : {Virtualization::kYes, Virtualization::kUnknown}) {
+    probes_.context.virtualization = virtualization;
+    const ScheduleResult result = Schedule(true, true);
+    EXPECT_EQ(result.code, ExitCode::kWrongContext);
+    EXPECT_EQ(result.refusal, ScheduleRefusal::kWrongContext);
+  }
+  probes_.context.virtualization = Virtualization::kNo;
+  probes_.context.probe = ContextProbe::kReadOnly;
+  probes_.context.views = RegistryViews::kAgree;
+  EXPECT_EQ(Schedule(true, true).refusal, ScheduleRefusal::kWrongContext);
+  probes_.context.probe = ContextProbe::kWrite;
+  probes_.context.elevated = true;
+  probes_.context.integrityRid = SECURITY_MANDATORY_HIGH_RID;
+  for (const bool on : {true, false}) {
+    const ScheduleResult result = Schedule(on, on);
+    EXPECT_EQ(result.code, ExitCode::kWrongContext);
+    EXPECT_EQ(result.refusal, ScheduleRefusal::kElevated);
+  }
+  EXPECT_TRUE(probes_.applied.empty());
+  EXPECT_EQ(probes_.queries.calls, 0);  // refused before anything was read
+}
+
+TEST_F(CheckEngine, ChecksWaitForTheLock) {
+  InstallPerUser();
+  PlaceSettingsExe(paths_.userRoot);
+  test::PipedChild child;
+  ASSERT_HRESULT_SUCCEEDED(
+      child.Start(test::SelfPath(), L"--pdft-child hold-lock " + test::NamedObjectSuffix()));
+  ASSERT_EQ(child.ReadLine(), "locked");
+  ScheduleOptions options;
+  options.context = probes_.context;
+  options.paths = paths_;
+  options.lockWaitMs = 500;
+  ScheduleResult result;
+  ASSERT_HRESULT_SUCCEEDED(ChangeCheckSchedule(options, roots_, probes_, &result));
+  EXPECT_EQ(result.code, ExitCode::kBusy);
+  EXPECT_TRUE(result.busy);
+  EXPECT_TRUE(probes_.applied.empty());
+  child.CloseInput();
+  EXPECT_EQ(child.Wait(30000), 0u);
+}
+
+TEST_F(CheckEngine, ChecksReportAFailedChange) {
+  InstallPerUser();
+  PlaceSettingsExe(paths_.userRoot);
+  probes_.applyError = kSomeTriggersFailed;
+  const ScheduleResult result = Schedule(true, true);
+  EXPECT_EQ(result.code, ExitCode::kFailed);
+  EXPECT_EQ(result.error, kSomeTriggersFailed);
+  EXPECT_EQ(probes_.applied.size(), 1u);
+  EXPECT_FALSE(ScheduleResultReport(result).error.empty());
+}
+
+// ---- The stale task -----------------------------------------------------------------------------
+
+// A task that runs another program is registered again for the installed one, with its triggers
+// and enabled state as they are: what someone turned off in Task Scheduler stays off.
+TEST_F(CheckEngine, StaleTaskIsRegisteredAgainWithItsTriggersAsTheyAre) {
+  InstallPerUser();
+  const std::filesystem::path exe = PlaceSettingsExe(paths_.userRoot);
+  probes_.task.exists = true;
+  probes_.task.enabled = false;
+  probes_.task.atSignIn = true;
+  probes_.task.actionPath = (std::filesystem::path(temp_.path()) / L"old" / kSettingsExe).native();
+  probes_.task.actionArgs = kCheckTaskArguments;
+  probes_.task.options = {TriggerSetting::kDisabled, TriggerSetting::kEnabled, false};
+
+  const CheckResult result = Run();
+  EXPECT_TRUE(HasFinding(result.before, FindingId::kTaskStaleAction));
+  EXPECT_FALSE(HasFinding(result.findings, FindingId::kTaskStaleAction));
+  EXPECT_TRUE(HasFinding(result.findings, FindingId::kTaskDisabled));  // still as it was
+  ASSERT_EQ(result.repairs.size(), 1u);
+  EXPECT_EQ(result.repairs[0].step.kind, RepairStep::Kind::kReRegisterTask);
+  EXPECT_EQ(result.repairs[0].result, RepairResult::kDone);
+  ASSERT_EQ(probes_.applied.size(), 1u);
+  const FakeProbes::Applied& applied = probes_.applied[0];
+  EXPECT_EQ(applied.location.name, Location().name);
+  EXPECT_EQ(applied.options.afterPdfCraft, TriggerSetting::kDisabled);
+  EXPECT_EQ(applied.options.atSignIn, TriggerSetting::kEnabled);
+  EXPECT_FALSE(applied.options.enabled);
+  EXPECT_TRUE(IEquals(applied.program.native(), exe.native())) << applied.program;
+  EXPECT_EQ(result.code, ExitCode::kOk);
+  EXPECT_EQ(probes_.liveRuns, 1);  // no slot or class changed: the test is not run again
+
+  // Sound now: the next check does nothing.
+  EXPECT_TRUE(Run().repairs.empty());
+  EXPECT_EQ(probes_.applied.size(), 1u);
+}
+
+TEST_F(CheckEngine, StaleTaskStaysWithoutTheInstalledProgram) {
+  InstallPerUser();  // no settings executable
+  probes_.task.exists = true;
+  probes_.task.enabled = true;
+  probes_.task.actionPath = L"C:\\Elsewhere\\" + std::wstring(kSettingsExe);
+  probes_.task.actionArgs = kCheckTaskArguments;
+  probes_.task.options = OptionsFromCheckboxes(true, true);
+  const CheckResult result = Run();
+  EXPECT_EQ(result.code, ExitCode::kOk);  // reported, not a problem for thumbnails
+  EXPECT_TRUE(result.repairs.empty());
+  EXPECT_TRUE(probes_.applied.empty());
+  bool reported = false;
+  for (const Finding& finding : result.findings) {
+    if (finding.id != FindingId::kTaskStaleAction) continue;
+    reported = true;
+    EXPECT_EQ(finding.fix, FixKind::kUserAction);
+  }
+  EXPECT_TRUE(reported);
+}
+
+// Each step looks at the task and the program again just before it changes anything.
+TEST_F(CheckEngine, StaleTaskRepairChecksAgainFirst) {
+  InstallPerUser();
+  const std::filesystem::path exe = PlaceSettingsExe(paths_.userRoot);
+  probes_.task.exists = true;
+  probes_.task.enabled = true;
+  probes_.task.actionPath = L"C:\\Elsewhere\\" + std::wstring(kSettingsExe);
+  probes_.task.actionArgs = kCheckTaskArguments;
+  probes_.task.options = OptionsFromCheckboxes(true, false);
+  const TaskState stale = probes_.task;
+  Snapshot s = Gather();
+  const RepairPlan plan = PlanRepairs(s, Evaluate(s), RepairMode::kSafe);
+  ASSERT_EQ(plan.user.size(), 1u);
+  ASSERT_EQ(plan.user[0].kind, RepairStep::Kind::kReRegisterTask);
+  EXPECT_TRUE(IEquals(plan.user[0].path.native(), exe.native()));
+  std::vector<RepairOutcome> outcomes;
+  const auto applyOnce = [&]() -> RepairOutcome {
+    EXPECT_HRESULT_SUCCEEDED(ApplyUserRepairs(roots_, probes_, s, plan, &outcomes));
+    EXPECT_EQ(outcomes.size(), 1u);
+    return outcomes.empty() ? RepairOutcome{} : outcomes[0];
+  };
+
+  // Elevated: never.
+  s.context.elevated = true;
+  RepairOutcome outcome = applyOnce();
+  EXPECT_EQ(outcome.result, RepairResult::kNotApplied);
+  EXPECT_EQ(outcome.notApplied, NotApplied::kElevated);
+  s.context.elevated = false;
+
+  // The program went away meanwhile.
+  ASSERT_TRUE(DeleteFileW(exe.c_str()));
+  outcome = applyOnce();
+  EXPECT_EQ(outcome.result, RepairResult::kNotApplied);
+  EXPECT_EQ(outcome.notApplied, NotApplied::kNoProgram);
+  PlaceSettingsExe(paths_.userRoot);
+
+  // The task has neither trigger now: registering it "with the same triggers" would delete it.
+  probes_.task.options = {TriggerSetting::kAbsent, TriggerSetting::kAbsent, true};
+  outcome = applyOnce();
+  EXPECT_EQ(outcome.result, RepairResult::kNotApplied);
+  EXPECT_EQ(outcome.notApplied, NotApplied::kNoTrigger);
+
+  // Deleted meanwhile, or already registered again: nothing to do.
+  probes_.task = {};
+  EXPECT_EQ(applyOnce().result, RepairResult::kUnchanged);
+  probes_.task = stale;
+  probes_.task.actionPath = L"\"" + exe.native() + L"\"";
+  EXPECT_EQ(applyOnce().result, RepairResult::kUnchanged);
+  EXPECT_TRUE(probes_.applied.empty());
+
+  // Task Scheduler refuses: a failed step.
+  probes_.task = stale;
+  probes_.applyError = E_ACCESSDENIED;
+  outcome = applyOnce();
+  EXPECT_EQ(outcome.result, RepairResult::kFailed);
+  EXPECT_EQ(outcome.hr, E_ACCESSDENIED);
+  EXPECT_EQ(probes_.applied.size(), 1u);
 }
 
 }  // namespace

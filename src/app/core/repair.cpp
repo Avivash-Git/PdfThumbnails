@@ -122,6 +122,20 @@ HRESULT CheckUserBuildDll(const std::filesystem::path& userRoot,
 }
 CATCH_RETURN();
 
+const wchar_t* NotAppliedName(NotApplied reason) noexcept {
+  switch (reason) {
+    case NotApplied::kNone:
+      return L"";
+    case NotApplied::kElevated:
+      return L"elevated";
+    case NotApplied::kNoProgram:
+      return L"no-program";
+    case NotApplied::kNoTrigger:
+      return L"no-trigger";
+  }
+  return L"";
+}
+
 const wchar_t* ResultName(RepairResult result) noexcept {
   switch (result) {
     case RepairResult::kDone:
@@ -155,6 +169,10 @@ void LogOutcome(const RepairOutcome& outcome) noexcept try {
   }
   message += L" result=";
   message += ResultName(outcome.result);
+  if (outcome.notApplied != NotApplied::kNone) {
+    message += L" why=";
+    message += NotAppliedName(outcome.notApplied);
+  }
   if (FAILED(outcome.hr)) message += L" hr=" + HResultText(outcome.hr);
   Log(outcome.result == RepairResult::kFailed ? LogLevel::kWarning : LogLevel::kInfo, kLogComponent,
       message);
@@ -177,7 +195,46 @@ HRESULT WriteSlot(const RegistryRoots& roots, int slot, SlotWrite mode, bool* wr
 }
 CATCH_RETURN();
 
-RepairOutcome Apply(const RegistryRoots& roots, const Snapshot& snapshot, const RepairStep& step) {
+// The file |path| is there (not a folder).
+bool FileExists(const std::filesystem::path& path) noexcept {
+  const DWORD attributes = GetFileAttributesW(path.c_str());
+  return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// Registers the check task again for the installed settings executable |step.path|, with the
+// triggers and the enabled state the task has now.
+void ReRegisterTask(const SystemProbes& probes, const Snapshot& snapshot, const RepairStep& step,
+                    RepairOutcome* outcome) {
+  const auto notApplied = [&](NotApplied reason) {
+    outcome->result = RepairResult::kNotApplied;
+    outcome->hr = S_OK;
+    outcome->notApplied = reason;
+  };
+  // The task is the signed-in user's and runs with their rights; an elevated process may not
+  // even be that user.
+  if (snapshot.context.elevated) return notApplied(NotApplied::kElevated);
+  const std::optional<std::filesystem::path> program = InstalledSettingsExe(snapshot);
+  if (!program || !IEquals(program->native(), step.path.native()) || !FileExists(*program)) {
+    return notApplied(NotApplied::kNoProgram);
+  }
+  TaskState now;
+  HRESULT hr = probes.ReadTask(snapshot.taskLocation, &now);
+  if (SUCCEEDED(hr) && (!now.exists || TaskRunsProgram(now, *program))) {
+    // Deleted or registered again meanwhile: nothing left to do.
+    outcome->result = RepairResult::kUnchanged;
+    outcome->hr = S_OK;
+    return;
+  }
+  if (SUCCEEDED(hr) && HasNoTriggers(now.options)) return notApplied(NotApplied::kNoTrigger);
+  if (SUCCEEDED(hr)) {
+    hr = probes.ApplyTaskOptions(snapshot.taskLocation, now.options, *program, snapshot.context);
+  }
+  outcome->hr = hr;
+  outcome->result = FAILED(hr) ? RepairResult::kFailed : RepairResult::kDone;
+}
+
+RepairOutcome Apply(const RegistryRoots& roots, const SystemProbes& probes,
+                    const Snapshot& snapshot, const RepairStep& step) {
   RepairOutcome outcome;
   outcome.step = step;
   const auto finish = [&](HRESULT hr, bool changed) {
@@ -226,9 +283,7 @@ RepairOutcome Apply(const RegistryRoots& roots, const Snapshot& snapshot, const 
       finish(SaveZoom(roots, step.zoom), true);
       break;
     case RepairStep::Kind::kReRegisterTask:
-      // Writing tasks comes with the task settings; until then the step is only reported.
-      outcome.result = RepairResult::kNotApplied;
-      outcome.hr = S_OK;
+      ReRegisterTask(probes, snapshot, step, &outcome);
       break;
     case RepairStep::Kind::kRemoveUserBuild: {
       if (snapshot.context.elevated) {
@@ -237,6 +292,7 @@ RepairOutcome Apply(const RegistryRoots& roots, const Snapshot& snapshot, const 
         // unelevated check (RunCheck refuses elevated processes anyway).
         outcome.result = RepairResult::kNotApplied;
         outcome.hr = S_OK;
+        outcome.notApplied = NotApplied::kElevated;
         break;
       }
       bool kept = false;
@@ -341,12 +397,12 @@ RepairPlan PlanRepairs(const Snapshot& snapshot, std::span<const Finding> findin
   return plan;
 }
 
-HRESULT ApplyUserRepairs(const RegistryRoots& roots, const Snapshot& snapshot,
-                         const RepairPlan& plan, std::vector<RepairOutcome>* outcomes) noexcept
-    try {
+HRESULT ApplyUserRepairs(const RegistryRoots& roots, const SystemProbes& probes,
+                         const Snapshot& snapshot, const RepairPlan& plan,
+                         std::vector<RepairOutcome>* outcomes) noexcept try {
   outcomes->clear();
   for (const RepairStep& step : plan.user) {
-    RepairOutcome outcome = Apply(roots, snapshot, step);
+    RepairOutcome outcome = Apply(roots, probes, snapshot, step);
     LogOutcome(outcome);
     outcomes->push_back(std::move(outcome));
   }

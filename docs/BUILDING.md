@@ -152,7 +152,7 @@ that preset's own name filter.
 | `gate` | Static checks of the staged files: exports, imports (static C runtime, Windows DLLs only; the app's executables import only KnownDLLs and delay-load the rest), hardening flags, no build paths inside the binaries, no WIL failure cache in the app's executables, version resources, the app's manifests, the 18 PDFium functions the handler binds, the PDFium hash, license files and notices, and the build id. Native builds also run `gate.planting`: copies of the app's executables, next to a canary DLL planted under the names of DLLs they might load, run `--version` and `--help` (elevated, as on CI, also `--status --no-live-test`, which must exit 0, 1 or 6) and must not load any of them | every preset, both architectures (`gate.planting`: native builds only, not cross-compiled ones) |
 | `unit` | The crop math, zoom clamping and generated GUIDs, the test-PDF generator (byte-identical to the 1.x generator), Medium-integrity helpers, temporary folders, the HKCU redirection, and the committed preview samples (`src\app\res`). For the settings app: the command line, text conversions, paths, the log (format, rotation, two writers), output encoding, exit codes, the registry-virtualization verdicts, named-object descriptors, start-up hardening, the COM security descriptor and the executables' string tables; what the checks read, decoded from made-up data (registry values, DLL headers and version resources, build ids, the slots and the zoom, 1.x leftovers, Smart App Control's verdict, the check task's triggers, the Explorer test's probe PDF and `--test-file` paths, Explorer settings, the Windows build); the check's findings, repair plans and exit codes on made-up snapshots; and the reports: the `--status` text line by line (this PC's shape, a per-user install, nothing installed, every problem line with its hint), the `--status --json` output (escaping, every field of schema 1, read back by a strict JSON reader) and the masking in `--diagnostics` (no SID, user, computer or profile path survives). For `pdft-run-outside`: its command line, its request file, the command line it builds and how it turns a run's outcome into an exit code | x64 presets; CI's ARM64 runner |
 | `handler` | `PdfThumbnails.dll` loaded in-process at Medium integrity, with HKCU redirected to an empty private key: the crop table, pixels, the COM surface, error codes, where the zoom comes from (preview override, HKCU, `settings.ini`), an 8-thread stress test. Elevated, the program relaunches itself at Medium; `handler.refuses_elevated` checks that the DLL refuses to render when elevated and is skipped when not | x64 presets; CI's ARM64 runner |
-| `integration` | The settings app's core against the real system: COM calls under the app's COM security (Task Scheduler and WMI read-only, Explorer's window list), the operation lock and other named objects across processes, the process tree and the registry-virtualization check; read-only: Smart App Control and the Code Integrity log, PdfCraft, the check task and 1.x's task, Explorer settings, the Windows build, DLL headers and build ids of the built DLLs; the registration, settings, 1.x leftovers and the whole check (gathering, repairs, the record, the operation lock) against private registry keys, folders under `%TEMP%` and fakes for everything Windows-wide; the diagnostics' log reader; and both executables run with their output captured: `--version`, `--help`, `--status` and `--status --json` without the Explorer test (exit 0, 1 or 6, whatever this PC has), `--diagnostics` (nothing of the current user unmasked). Safe on a developer PC: no test starts a thumbnail extraction or runs `--check` or `--fix` against the real registry; it writes nothing to the user's profile except the check's volatile probe key and private test keys, which it deletes again, probe PDFs in `%TEMP%`, which it deletes too, and the start and end lines that `--status` and `--diagnostics` add to the app's log (not when elevated). The executables' `--status` runs also delete their own stale probe PDFs (older than an hour) from `%TEMP%`. A writing command of the executables (`--zoom 120`, `--check`, `--fix`, `--fix --take-back`) runs only where the check shows that its writes would be swallowed (a terminal inside a packaged app), where it must be refused (exit 8, or 2 for `--fix --take-back` without `--yes`), and is skipped everywhere else, and the named objects carry a suffix of the run's own, so a running settings app does not disturb the tests | x64 presets; CI's ARM64 runner |
+| `integration` | The settings app's core against the real system: COM calls under the app's COM security (WMI read-only, Explorer's window list), the operation lock and other named objects across processes, the process tree and the registry-virtualization check; read-only: Smart App Control and the Code Integrity log, PdfCraft, the check task and 1.x's task, Explorer settings, the Windows build, DLL headers and build ids of the built DLLs; the registration, settings, 1.x leftovers and the whole check (gathering, repairs, the record, the operation lock) against private registry keys, folders under `%TEMP%` and fakes for everything Windows-wide; the diagnostics' log reader; the check task written in a Task Scheduler folder and under root-folder names of its own (each checkbox combination, the folder or the root-folder name, one copy per user, the check's repair of a task that runs another program, one run of `pdft-run-medium.exe --exit 0` through Task Scheduler; elevated also the protected task folder, a standard user's task in it and the removal of every user's task); `--checks` against private registry keys and a fake Task Scheduler (each value, the program it registers, its refusals); and both executables run with their output captured: `--version`, `--help`, `--status` and `--status --json` without the Explorer test (exit 0, 1 or 6, whatever this PC has), `--diagnostics` (nothing of the current user unmasked). Safe on a developer PC: no test starts a thumbnail extraction or runs `--check` or `--fix` against the real registry; it writes nothing to the user's profile except the check's volatile probe key and private test keys, which it deletes again, probe PDFs in `%TEMP%`, which it deletes too, and the start and end lines that `--status` and `--diagnostics` add to the app's log (not when elevated); in Task Scheduler it writes only its own test tasks and folder, which it deletes, and it never touches the real check task, its folder or 1.x's task. The executables' `--status` runs also delete their own stale probe PDFs (older than an hour) from `%TEMP%`. A writing command of the executables (`--zoom 120`, `--check`, `--fix`, `--fix --take-back`, `--checks` with each value) runs only where the check shows that its writes would be swallowed (a terminal inside a packaged app), where it must be refused (exit 8, or 2 for `--fix --take-back` without `--yes`), and is skipped everywhere else; `--checks` also runs elevated on a PC whose registry is the real one, where it must refuse (exit 8: CI only), and on a PC whose registry is the real one and where nothing is installed, where it must answer "not installed" (exit 6; elevated, as on CI, it runs at Medium integrity with a standard user's token), and a bad `--checks` value is a usage error (exit 2) everywhere, and the named objects carry a suffix of the run's own, so a running settings app does not disturb the tests | x64 presets; CI's ARM64 runner |
 | `system`, `e2e` | Added with the settings app. They change real machine state and never run in a developer build. | — |
 
 Useful environment variables for the handler tests:
@@ -162,6 +162,49 @@ Useful environment variables for the handler tests:
   `GTEST_FILTER=-ZoomPrecedence.*:PreviewOptions.*`.
 - `PDFT_KEEP_TEMP=1` keeps the temporary folders under `%TEMP%\pdft-tests`.
 - `PDFT_STRESS_FULL=1` also runs the stress test over all 18 test PDFs, including the two slow ones.
+
+Where the task tests run:
+- Unelevated (a developer PC): the check task is written under root-folder names of the test's own
+  (`\<product>-Test check <pid>-<GUID> <SID>`) and, for some tests, in a folder of its own
+  (`\<product>-Test-<pid>-<GUID>`); every test removes what it made, and the first test removes
+  what an earlier run that crashed left behind (only names of that shape whose test process is
+  gone and that this user owns). The tests of the shared, protected task folder
+  (`TaskFolderElevated.*`) need an administrator and are skipped with that reason.
+- Elevated (CI): the same, except the two tests that check what an unelevated process may not do
+  (`SharedFolderStepsRefuseUnelevated`, `UnelevatedCannotMakeAFolderOwnedByAdministrators`), plus
+  the `TaskFolderElevated` tests, which create the protected folder, take over one a standard user
+  made, register a task in it with a standard user's token, skip a task there that runs as another
+  account, and remove every user's task from it. CI fails the run when one of them did not print
+  its own line in the test log (a skipped test counts as passed otherwise).
+- One test lets Task Scheduler start `pdft-run-medium.exe --exit 0` in the signed-in user's
+  session (a console window may flash). It is skipped when Application Control blocks that
+  program, and when Task Scheduler has no session of the test's account to start a task with an
+  interactive token in (an elevated runner, or a prompt started with `runas`).
+
+#### Manual check: a standard account
+
+The protected task folder is made only by an administrator. That a standard user cannot make it
+that way, and that the folder such a user can make instead is never used (their task goes under
+the root-folder name), is checked once by hand from a real standard (not administrator) account,
+because CI and developer accounts are administrators. The maintainer creates that account; no
+test or script does.
+1. Build `x64-release`, then make the test bundle:
+   `cmake --install out\build\x64-release --prefix C:\pdft-bundle --component tests`. Use a
+   folder the standard account can read, outside any user profile.
+2. Sign in to Windows as the standard account (switching users is fine; a prompt started with
+   `runas /user:<name> cmd` is not enough, because Task Scheduler then has no session of that
+   account to run a task in, and `TaskSchedulerRunsTheTask` skips) and run
+   `ctest --test-dir C:\pdft-bundle -L integration --output-on-failure`, or only the task tests:
+   `C:\pdft-bundle\pdft_integration_tests.exe --gtest_filter=TaskWriting.*:TaskFolderElevated.*`.
+3. Expect: every `TaskWriting` test passes; the `TaskFolderElevated` tests are skipped
+   ("needs elevation"); `SharedFolderStepsRefuseUnelevated` shows that the app refuses to make or
+   empty the shared folder, `UnelevatedCannotMakeAFolderOwnedByAdministrators` that Task
+   Scheduler itself refuses a standard user a folder owned by Administrators, and
+   `UntrustedFolderMeansTheFallbackNameAndOneCopy` that a folder a standard user made instead is
+   not used: the task goes under the root-folder name.
+4. Afterwards, as that account, `schtasks /query /fo list | findstr /i "Test"` lists nothing of
+   the tests. Record the date, the Windows build and the result in the pull request, then remove
+   the account if it was made only for this.
 
 On a PC with Smart App Control on, Windows sometimes blocks a freshly linked test program the
 first time it starts (CTest reports "Not Run"). Run the tests again. Tests that start other

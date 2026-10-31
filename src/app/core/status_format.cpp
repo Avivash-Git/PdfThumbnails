@@ -232,6 +232,16 @@ std::wstring InstallCommandHint() {
                      : L"the installer, choosing all users";
 }
 
+// How "--checks <value>" does |what|, where it can: only with the installed settings executable
+// there for the task to run (a 1.x build has none, and --checks then refuses), and from a normal
+// prompt (it refuses an elevated one). Empty where --checks cannot help.
+std::wstring ChecksCommandHint(const Snapshot& s, std::wstring_view value, std::wstring_view what) {
+  if (!InstalledSettingsExe(s)) return L"";
+  std::wstring hint = L"--checks " + std::wstring(value) + L" " + std::wstring(what);
+  if (s.context.elevated) hint += L" (from a normal, not administrator, prompt)";
+  return hint;
+}
+
 // What a damaged machine-wide part needs while this build cannot run the administrator step.
 std::wstring ReinstallForAllUsersHint() {
   return L"Reinstall " + std::wstring(kProductName) +
@@ -498,11 +508,27 @@ std::wstring HintFor(const Snapshot& s, std::span<const Finding> findings, const
       return L"Ask whoever manages this PC, or turn the policy off in the Local Group Policy "
              L"Editor";
     case FindingId::kChecksOff:
-    case FindingId::kTaskDisabled:
-      return L"Turning the checks on (--checks default) comes with a later build";
+      // Nothing to say where --checks cannot turn them on (a 1.x build is installed): the
+      // Checks line shows them off, and installing this version brings them.
+      return ChecksCommandHint(s, L"default", L"turns them on");
+    case FindingId::kTaskDisabled: {
+      // The checkboxes as they show now; none at all asks for both.
+      const bool any = s.task.afterPdfCraft || s.task.atSignIn;
+      std::wstring hint = ChecksCommandHint(
+          s, any ? ChecksValue(s.task.afterPdfCraft, s.task.atSignIn) : L"default",
+          L"turns it on again");
+      return hint.empty() ? L"Turn it on again in Task Scheduler" : hint;
+    }
     case FindingId::kTaskStaleAction:
-      return L"--check registers it again once this build can change tasks (for now it only "
-             L"reports this)";
+      if (f.fix == FixKind::kAuto) return L"--check registers it again with the same triggers";
+      // The program is there, but the task has neither of the check's triggers to keep.
+      if (std::wstring hint =
+              ChecksCommandHint(s, L"default", L"registers it again with both triggers");
+          !hint.empty()) {
+        return hint;
+      }
+      // The program it should run is not there: registering it again would point at nothing.
+      return L"Reinstall " + product + L"; until then --checks none removes the task";
     case FindingId::kCleanupPending:
       return L"--check deletes the pending clean-up";
     case FindingId::kV1Leftovers:
@@ -597,14 +623,106 @@ std::wstring RepairOutcomeText(const RepairOutcome& outcome) {
     case RepairResult::kKept:
       return L"Left for the next check (still in use): " + what;
     case RepairResult::kNotApplied:
-      if (step.kind == RepairStep::Kind::kRemoveUserBuild) {
-        return L"Not done, running as administrator (a normal check removes it): " + what;
+      switch (outcome.notApplied) {
+        case NotApplied::kElevated:
+          return step.kind == RepairStep::Kind::kRemoveUserBuild
+                     ? L"Not done, running as administrator (a normal check removes it): " + what
+                     : L"Not done, running as administrator (a normal check does it): " + what;
+        case NotApplied::kNoProgram:
+          return L"Not done, the installed program is not there: " + what;
+        case NotApplied::kNoTrigger:
+          return L"Not done, the task has neither of the check's triggers (choose them with "
+                 L"--checks): " +
+                 what;
+        case NotApplied::kNone:
+          break;
       }
-      return L"Not done, this build cannot change tasks yet: " + what;
+      return L"Not done: " + what;
     case RepairResult::kFailed:
       return L"Failed (" + Hex(outcome.hr) + L"): " + what;
   }
   return what;
+}
+
+std::wstring ChecksStateText(bool afterPdfCraft, bool atSignIn) {
+  const auto onOff = [](bool on) { return on ? L"on" : L"off"; };
+  return L"after " + std::wstring(kPdfCraftProductName) + L" updates: " + onOff(afterPdfCraft) +
+         kDot + L"at sign-in: " + onOff(atSignIn);
+}
+
+const wchar_t* ChecksValue(bool afterPdfCraft, bool atSignIn) noexcept {
+  if (afterPdfCraft && atSignIn) return L"default";
+  if (afterPdfCraft) return L"pdfcraft";
+  if (atSignIn) return L"signin";
+  return L"none";
+}
+
+ScheduleReport ScheduleResultReport(const ScheduleResult& result) {
+  ScheduleReport report;
+  const Snapshot& s = result.before;
+  const std::wstring product = kProductName;
+  switch (result.refusal) {
+    case ScheduleRefusal::kNotInstalled:
+      report.error = product +
+                     L" is not installed, so there is nothing for scheduled checks to "
+                     L"check. Install it first.";
+      return report;
+    case ScheduleRefusal::kNoSettingsExe: {
+      if (s.installRoot.empty()) {
+        // Only a per-user build that is not registered yet: the check registers it.
+        report.error = L"No install with " + std::wstring(kSettingsExe) +
+                       L" for the scheduled checks to run was found. Run --check first, then "
+                       L"try again.";
+      } else if (ActiveHandlerIs1x(s)) {
+        report.error = L"The installed " + product + L" is a 1.x build, which has no " +
+                       (s.installRoot / kSettingsExe).native() +
+                       L" for the scheduled checks to run. Install this version first.";
+      } else {
+        report.error = (s.installRoot / kSettingsExe).native() +
+                       L" is not there, so a scheduled check would have nothing to run. "
+                       L"Reinstall " +
+                       product + L".";
+      }
+      return report;
+    }
+    case ScheduleRefusal::kWrongContext:
+    case ScheduleRefusal::kElevated:
+    case ScheduleRefusal::kNone:
+      break;
+  }
+  if (FAILED(result.error)) {
+    report.error =
+        result.error == kSomeTriggersFailed
+            ? L"Task Scheduler registered the check task but could not set up all of its "
+              L"triggers (" +
+                  Hex(result.error) + L"); run --status to see what it has."
+            : L"Could not change the check task: " + Hex(result.error);
+    return report;
+  }
+
+  if (result.remove) {
+    report.out.push_back(s.task.exists ? L"Checks: off (the check task was removed)"
+                                       : L"Checks: off (there was no check task)");
+  } else if (FAILED(result.readError) || !result.after.exists) {
+    // Registered, but it cannot be shown as it is now: what was asked for.
+    report.out.push_back(L"Checks: " +
+                         ChecksStateText(result.askedAfterPdfCraft, result.askedAtSignIn));
+  } else {
+    report.out.push_back(L"Checks: " +
+                         ChecksStateText(result.after.afterPdfCraft, result.after.atSignIn));
+  }
+  if (FAILED(result.readError)) {
+    report.out.push_back(L"The check task was changed but could not be read back: " +
+                         Hex(result.readError));
+  } else if (result.after.exists) {
+    report.out.push_back(L"Check task: " + result.after.path + L", runs " +
+                         result.after.actionPath + L" " + result.after.actionArgs);
+  }
+  if (s.legacy.legacyTask) {
+    report.out.push_back(L"The 1.x task " + std::wstring(kLegacyTask) +
+                         L" is still there; it was left as it is.");
+  }
+  return report;
 }
 
 std::wstring ElevatedVerbText(ElevatedVerb verb) {
@@ -835,7 +953,6 @@ std::vector<StatusLine> FormatStatus(const Snapshot& s, std::span<const Finding>
   }
 
   {
-    const auto onOff = [](bool on) { return on ? L"on" : L"off"; };
     std::wstring last;
     if (s.last) {
       const std::wstring when = LocalTimeText(s.last->time);
@@ -845,9 +962,7 @@ std::vector<StatusLine> FormatStatus(const Snapshot& s, std::span<const Finding>
       last = L"last run " + TaskTimeText(*s.task.lastRun);
     }
     if (s.task.exists) {
-      std::wstring text = L"after " + std::wstring(kPdfCraftProductName) + L" updates: " +
-                          onOff(s.task.afterPdfCraft) + kDot + L"at sign-in: " +
-                          onOff(s.task.atSignIn);
+      std::wstring text = ChecksStateText(s.task.afterPdfCraft, s.task.atSignIn);
       if (!last.empty()) text += kDot + last;
       std::vector<std::wstring> problems;
       std::vector<std::wstring> hints;
@@ -868,7 +983,8 @@ std::vector<StatusLine> FormatStatus(const Snapshot& s, std::span<const Finding>
         text += L" (the 1.x task " + std::wstring(kLegacyTask) + L" is still there)";
       }
       if (!last.empty()) text += kDot + last;
-      line(' ', kLabelChecks, std::move(text));
+      const Finding* off = has(FindingId::kChecksOff);
+      line(' ', kLabelChecks, std::move(text), off ? hint(*off) : std::wstring());
     }
   }
 

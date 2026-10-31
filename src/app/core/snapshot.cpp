@@ -146,6 +146,18 @@ bool DllIsInFolder(const std::filesystem::path& dll, const std::filesystem::path
   return IEquals(parent.native(), NormalFolder(folder).native());
 }
 
+std::optional<std::filesystem::path> InstalledSettingsExe(const Snapshot& snapshot) {
+  if (!snapshot.settingsExeFound || snapshot.installRoot.empty()) return std::nullopt;
+  const std::filesystem::path& root = snapshot.scope == Scope::kMachine ? snapshot.paths.machineRoot
+                                      : snapshot.scope == Scope::kUser  ? snapshot.paths.userRoot
+                                                                        : std::filesystem::path();
+  if (root.empty() || !root.is_absolute() ||
+      !IEquals(NormalFolder(root).native(), NormalFolder(snapshot.installRoot).native())) {
+    return std::nullopt;
+  }
+  return NormalFolder(root) / kSettingsExe;
+}
+
 std::optional<std::filesystem::path> ChooseUserBuildDll(const Snapshot& snapshot) {
   const BuildInfo* best = nullptr;
   std::wstring bestId;
@@ -198,6 +210,11 @@ HRESULT GatherSnapshot(const RegistryRoots& roots, const GatherOptions& options,
   s.scope = DecideScope(s.machineClass, s.userClass);
   if (s.scope == Scope::kMachine) s.installRoot = s.paths.machineRoot;
   if (s.scope == Scope::kUser) s.installRoot = s.paths.userRoot;
+  if (!s.installRoot.empty()) {
+    const DWORD attributes = GetFileAttributesW((s.installRoot / kSettingsExe).c_str());
+    s.settingsExeFound =
+        attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+  }
 
   // What Windows itself resolves, unless this process may see another registry than Explorer.
   s.windowsChecksSkip = DecideWindowsChecksSkip(s.context);

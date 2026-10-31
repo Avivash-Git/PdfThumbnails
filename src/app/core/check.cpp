@@ -165,7 +165,7 @@ HRESULT RunCheck(const CheckOptions& options, const RegistryRoots& roots,
   }
 
   result->plan = PlanRepairs(before, result->before, options.repair);
-  RETURN_IF_FAILED(ApplyUserRepairs(roots, before, result->plan, &result->repairs));
+  RETURN_IF_FAILED(ApplyUserRepairs(roots, probes, before, result->plan, &result->repairs));
   const int fixed = CountDone(result->repairs);
   const bool slotOrClassChanged = ChangedSlotOrClass(result->repairs);
   if (fixed > 0) {
