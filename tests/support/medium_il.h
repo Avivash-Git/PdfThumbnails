@@ -27,7 +27,8 @@ inline constexpr DWORD kUnknownIntegrity = MAXDWORD;
 DWORD TokenIntegrityRid(HANDLE token);
 // The integrity RID of this process.
 DWORD CurrentIntegrityRid();
-// True when |token| has the Administrators group enabled (not deny-only).
+// True when |token| (opened with TOKEN_QUERY | TOKEN_DUPLICATE) has the Administrators group
+// enabled (not deny-only). False when it cannot tell.
 bool TokenHasEnabledAdministrators(HANDLE token);
 // Prints this process's integrity level, whether Administrators is enabled, the elevation type,
 // and the token's owner and default DACL as SDDL; returns 0 when it runs at Medium without

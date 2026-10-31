@@ -1,6 +1,7 @@
 # gate.hardening.<bin> (PROFILE=own) and gate.pdfium.pe (PROFILE=pdfium): PE hardening bits.
 #   cmake -DDUMPBIN=<dumpbin> -DFILE=<image> -DPROFILE=own|pdfium -DARCH=x64|arm64
-#         -DMACHINE=<8664|AA64> [-DFORBIDDEN=<path|path|...>] -P CheckHardening.cmake
+#         -DMACHINE=<8664|AA64> [-DFORBIDDEN=<path|path|...>] [-DUSES_WIL=ON]
+#         -P CheckHardening.cmake
 #
 # Both profiles: machine type; DLL characteristics GUARD_CF 0x4000, NX_COMPAT 0x0100,
 # DYNAMIC_BASE 0x0040, HIGH_ENTROPY_VA 0x0020; load config "CF instrumented" (0x100); on x64
@@ -9,6 +10,10 @@
 # (System32 only); on x64 an EH continuation table (Guard Flags 0x400000); a PDB recorded by
 # file name only; and none of the FORBIDDEN paths (the source and build folders, any
 # \Users\ folder) anywhere in the file, as ASCII or UTF-16 text, in any letter case.
+# USES_WIL (the app's executables): no "SM0:" in UTF-16 anywhere in the file. That is the name
+# pattern of WIL's process-wide failure cache, which a process in the same session could
+# create first; it is compiled in only without RESULT_SUPPRESS_STATIC_INITIALIZERS
+# (cmake/Dependencies.cmake) or through wil::WilInitialize_Result.
 # PDFium is built by a third party: it has CFG and CET but no dependent load flag and no EH
 # continuation table, so it gets the shorter profile.
 
@@ -98,6 +103,17 @@ if(PROFILE STREQUAL "own")
       list(APPEND problems "contains the build-machine path '${path}' (for example: ${example})")
     endif()
   endforeach()
+
+  if(USES_WIL)
+    file(STRINGS "${FILE}" wil_cache ENCODING UTF-16LE REGEX "SM0:")
+    if(wil_cache)
+      list(GET wil_cache 0 example)
+      string(CONCAT problem "contains the names of WIL's process-wide failure cache ('${example}'): "
+                            "compile WIL with RESULT_SUPPRESS_STATIC_INITIALIZERS and never call "
+                            "wil::WilInitialize_Result")
+      list(APPEND problems "${problem}")
+    endif()
+  endif()
 endif()
 
 if(problems)

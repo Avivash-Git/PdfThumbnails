@@ -15,6 +15,9 @@ inline constexpr unsigned short kVersion4[4] = {@PROJECT_VERSION_MAJOR@, @PROJEC
 inline constexpr wchar_t kFileVersion[] = L"@PROJECT_VERSION@";
 inline constexpr wchar_t kProductVersion[] = L"@PDFT_C_PRODUCT_VERSION@";
 inline constexpr wchar_t kArch[] = L"@PDFT_ARCH@";
+// The settings app's developer install verbs (CMake option PDFT_DEV_INSTALL; off in release
+// builds, which an installer puts in place).
+inline constexpr bool kDevInstall = @PDFT_C_DEV_INSTALL@;
 
 // ---- COM and file names -------------------------------------------------------------------
 inline constexpr wchar_t kHandlerClsidString[] = L"@PDFT_C_HANDLER_CLSID@";
@@ -36,6 +39,10 @@ inline constexpr wchar_t kTaskPrefix[] = L"@PDFT_C_TASK_PREFIX@";
 inline constexpr wchar_t kObjectPrefix[] = L"@PDFT_C_OBJECT_PREFIX@";
 inline constexpr wchar_t kInnoAppId[] = L"@PDFT_C_INNO_APPID@";
 inline constexpr wchar_t kAumid[] = L"@PDFT_C_AUMID@";
+// Developer tools only (pdft-run-outside): its task folder, and the name prefix of its per-run
+// folders under %TEMP% (followed by the run's GUID).
+inline constexpr wchar_t kDevTaskFolder[] = L"@PDFT_C_DEV_TASK_FOLDER@";
+inline constexpr wchar_t kDevRunPrefix[] = L"@PDFT_C_DEV_RUN_PREFIX@";
 
 // ---- 1.x names (fixed forever) ------------------------------------------------------------
 inline constexpr wchar_t kLegacyRootName[] = L"@PDFT_C_LEGACY_ROOT_NAME@";

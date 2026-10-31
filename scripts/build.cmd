@@ -1,6 +1,7 @@
 @echo off
 rem Configures, builds and tests one CMake preset with MSVC (CI runs the same script):
-rem   scripts\build.cmd <preset>      x64-release | x64-debug | arm64-release | ci-x64 | ci-arm64
+rem   scripts\build.cmd <preset>      x64-release | x64-debug | arm64-release | arm64-debug |
+rem                                   x64-asan | ci-x64 | ci-arm64
 rem Finds Visual Studio with vswhere, sets up the compiler environment with vcvarsall, then runs
 rem "cmake --workflow --preset <preset>" in the repository root. Needs Visual Studio 2026 18.11 or
 rem later (MSVC v145) and CMake 4.3 or later: vcvarsall appends Visual Studio's CMake to PATH, so
@@ -83,7 +84,7 @@ exit /b %RESULT%
 
 :usage
 echo usage: scripts\build.cmd ^<preset^>
-echo   presets: x64-release, x64-debug, arm64-release, ci-x64, ci-arm64
+echo   presets: x64-release, x64-debug, arm64-release, arm64-debug, x64-asan, ci-x64, ci-arm64
 exit /b 2
 
 :novs

@@ -54,8 +54,20 @@ To use a particular Visual Studio when several are installed, set `PDFT_VS_VERSI
 `vswhere` version range first, for example `set PDFT_VS_VERSION=[18.11,19.0)` to stay on
 Visual Studio 2026 once a newer one is installed too.
 
-Output: `out\build\<preset>\bin\` holds the handler (`PdfThumbnails.dll`), its PDFium copy
-(`PdfThumbnails-pdfium.dll`), the PDBs, the tools and the test programs.
+Output: `out\build\<preset>\bin\` holds the settings app (`PdfThumbnailsSettings.exe` for the
+window, `PdfThumbnailsCli.exe` for terminals and scripts), the handler (`PdfThumbnails.dll`),
+its PDFium copy (`PdfThumbnails-pdfium.dll`), the PDBs, the [tools](#tools) and the test programs.
+
+The two executables are one code base (`src\app`): the settings executable is a Windows program
+that shows no console, the command-line one is a console program that a shell waits for. Both
+are hardened like the handler, import only KnownDLLs statically (anything else is delay-loaded,
+see `cmake\Hardening.cmake`), and embed a manifest and a version resource; the gates check all of
+that. So far only `--version` and `--help` do their real work; the other commands are
+recognized and report that they are not available in this build yet (exit code 5). A command
+that would change settings first checks where it runs: started from a terminal whose registry is
+virtualized (one that runs inside an app package), it refuses with exit code 8, because its
+changes would not reach Windows. `pdft-run-outside` (below) runs a program outside such a
+terminal.
 
 ### Presets
 
@@ -64,12 +76,21 @@ Output: `out\build\<preset>\bin\` holds the handler (`PdfThumbnails.dll`), its P
 | `x64-release` | x64 Release | everything except the `system` and `e2e` labels |
 | `x64-debug` | x64 Debug | the same as `x64-release` |
 | `arm64-release` | ARM64 Release, cross-compiled | `gate` only (ARM64 programs cannot run on an x64 host) |
+| `arm64-debug` | ARM64 Debug, cross-compiled | `gate` only |
+| `x64-asan` | x64 Debug with AddressSanitizer (`/fsanitize=address`) in every target, for local test runs; not built by CI | like `x64-debug`, without the import, hardening and planting gates (see below) |
 | `ci-x64` | x64 Release as CI builds it: Spectre mitigations required, deterministic output (`/Brepro`) | the same as `x64-release` |
 | `ci-arm64` | ARM64 Release as CI builds it | `gate` only |
 
 All presets use Ninja, `cl.exe` and the static C runtime, and treat compiler and linker warnings
 as errors in the project's own code. Each preset has its own folder, `out\build\<preset>`. Don't
 run two builds of the same preset at the same time.
+
+`x64-asan` instruments everything, GoogleTest included (the C++ library refuses to link
+instrumented and plain code together). AddressSanitizer rules out the `/RTC` checks and
+`/DEPENDENTLOADFLAG:0x800`: every program then imports the AddressSanitizer runtime DLL, which is
+never in System32. The build copies that DLL from the compiler's folder next to the programs. For
+the same reason the `gate.imports.*`, `gate.hardening.*` and `gate.planting` checks don't apply
+there, and its test preset leaves them out.
 
 ### Working in a developer prompt
 
@@ -79,7 +100,7 @@ be used step by step:
 ```bat
 cmake --preset x64-release
 cmake --build --preset x64-release
-ctest --preset x64-release -L "unit|handler"
+ctest --preset x64-release -L "unit|handler|integration"
 ```
 
 ### Build options
@@ -94,8 +115,11 @@ by Git):
 | `PDFT_WARNINGS_AS_ERRORS` | `ON` | `/WX` for the compiler and the linker, on the project's own targets only. |
 | `PDFT_VERSION_SUFFIX` | empty | Appended to the ProductVersion string only (CI uses `-ci+g<commit>`). The file version stays `2.0.0.0`. The presets take it from the `PDFT_VERSION_SUFFIX` environment variable. |
 | `PDFT_DOWNLOAD_DIR` | `.cache\downloads` | Where verified downloads are kept. |
-| `PDFT_PDFIUM_ARCHIVE`, `PDFT_GTEST_ARCHIVE` | empty | Offline builds: a local copy of the archive. It must match the pinned SHA-256. |
-| `PDFT_BUILD_TOOLS` | `ON` | Builds `thumbtest`. |
+| `PDFT_PDFIUM_ARCHIVE`, `PDFT_GTEST_ARCHIVE`, `PDFT_WIL_ARCHIVE` | empty | Offline builds: a local copy of the archive. It must match the pinned SHA-256. |
+| `PDFT_BUILD_APP` | `ON` | Builds the settings app (`PdfThumbnailsSettings.exe`, `PdfThumbnailsCli.exe`). WIL is downloaded only for it. |
+| `PDFT_DEV_INSTALL` | `ON` | The app's developer install commands (install from the build's own folder). Release builds, which an installer puts in place, turn it off. |
+| `PDFT_ASAN` | `OFF` (`ON` in `x64-asan`) | AddressSanitizer for every target; for local test runs only. |
+| `PDFT_BUILD_TOOLS` | `ON` | Builds the developer tools, `thumbtest` and `pdft-run-outside` (see [Tools](#tools)). `thumbtest` is also in the test bundle; `pdft-run-outside` is in no install component. |
 | `BUILD_TESTING` | `ON` | Builds the tests and registers the gates. |
 
 ### Downloads
@@ -111,15 +135,19 @@ stops the build. Nothing is fetched without a pin, and no binaries are committed
 
 ```bat
 ctest --preset x64-release -L gate
-ctest --preset x64-release -L "unit|handler"
+ctest --preset x64-release -L "unit|handler|integration"
 ```
+
+`gate.planting` is the one gate that starts programs (it also has the label `planting`);
+`ctest --preset x64-release -L gate -LE planting` runs only the static checks.
 
 | Label | What | Where it runs |
 |---|---|---|
-| `gate` | Static checks of the staged files: exports, imports (static C runtime, Windows DLLs only), hardening flags, no build paths inside the binaries, version resources, the 18 PDFium functions the handler binds, the PDFium hash, license files and notices, and the build id | every preset, both architectures |
-| `unit` | The crop math, zoom clamping and generated GUIDs, the test-PDF generator (byte-identical to the 1.x generator), Medium-integrity helpers, temporary folders, the HKCU redirection, and the committed preview samples (`src\app\res`) | x64 presets; CI's ARM64 runner |
+| `gate` | Static checks of the staged files: exports, imports (static C runtime, Windows DLLs only; the app's executables import only KnownDLLs and delay-load the rest), hardening flags, no build paths inside the binaries, no WIL failure cache in the app's executables, version resources, the app's manifests, the 18 PDFium functions the handler binds, the PDFium hash, license files and notices, and the build id. Native builds also run `gate.planting`: copies of the app's executables, next to a canary DLL planted under the names of DLLs they might load, run `--version` and `--help` (elevated, as on CI, also `--status --no-live-test`) and must not load any of them | every preset, both architectures (`gate.planting`: native builds only, not cross-compiled ones) |
+| `unit` | The crop math, zoom clamping and generated GUIDs, the test-PDF generator (byte-identical to the 1.x generator), Medium-integrity helpers, temporary folders, the HKCU redirection, and the committed preview samples (`src\app\res`). For the settings app: the command line, text conversions, paths, the log (format, rotation, two writers), output encoding, exit codes, the registry-virtualization verdicts, named-object descriptors, start-up hardening, the COM security descriptor and the executables' string tables. For `pdft-run-outside`: its command line, its request file, the command line it builds and how it turns a run's outcome into an exit code | x64 presets; CI's ARM64 runner |
 | `handler` | `PdfThumbnails.dll` loaded in-process at Medium integrity, with HKCU redirected to an empty private key: the crop table, pixels, the COM surface, error codes, where the zoom comes from (preview override, HKCU, `settings.ini`), an 8-thread stress test. Elevated, the program relaunches itself at Medium; `handler.refuses_elevated` checks that the DLL refuses to render when elevated and is skipped when not | x64 presets; CI's ARM64 runner |
-| `integration`, `system`, `e2e` | Added with the settings app. `system` and `e2e` change real machine state and never run in a developer build. | — |
+| `integration` | The settings app's core against the real system: COM calls under the app's COM security (Task Scheduler and WMI read-only, Explorer's window list), the operation lock and other named objects across processes, the process tree and the registry-virtualization check, and both executables run with their output captured. Safe on a developer PC: it writes nothing to the user's profile except the check's volatile probe key, which it deletes again. A writing command of the executables runs only where the check shows that its writes would be swallowed (a terminal inside a packaged app) and is skipped everywhere else, and the named objects carry a suffix of the run's own, so a running settings app does not disturb the tests | x64 presets; CI's ARM64 runner |
+| `system`, `e2e` | Added with the settings app. They change real machine state and never run in a developer build. | — |
 
 Useful environment variables for the handler tests:
 - `PDFT_TEST_HANDLER_DLL=<path>` tests another build of the handler (for example an older one).
@@ -130,7 +158,11 @@ Useful environment variables for the handler tests:
 - `PDFT_STRESS_FULL=1` also runs the stress test over all 18 test PDFs, including the two slow ones.
 
 On a PC with Smart App Control on, Windows sometimes blocks a freshly linked test program the
-first time it starts (CTest reports "Not Run"). Run the tests again.
+first time it starts (CTest reports "Not Run"). Run the tests again. Tests that start other
+programs themselves (the `pdft-run-medium` tests, `gate.planting`, the integration tests of the
+two executables) report "skipped" when Windows blocks one of those, never "passed".
+`pdft-run-medium` and `pdft-run-outside` return exit code 126 when Windows blocks the program
+they start.
 
 ### Tools
 
@@ -143,6 +175,48 @@ In `out\build\<preset>\bin\`:
   `compare <a> <b>` compares PNG files or folders pixel by pixel.
 - `pdft-run-medium [--] <program> [arguments]` runs a program at Medium integrity with a standard
   user's rights; `pdft-run-medium --check-token` prints the current token.
+- `pdft-run-outside [--timeout <seconds>] -- <program.exe> [arguments]` runs a program in the
+  signed-in user's normal desktop context; see below.
+
+#### pdft-run-outside
+
+Some terminals run inside an app container or a sandbox, for example a terminal that is part of
+a packaged app. Programs started from such a terminal can get a private copy of the user's
+registry (HKCU) and of AppData: a check run there does not see what Explorer sees, and the
+settings app's commands that change something refuse to run there (exit code 8).
+`pdft-run-outside` runs a program as the signed-in user in that user's normal context instead,
+prints its output and returns its exit code:
+
+```bat
+out\build\x64-release\bin\pdft-run-outside.exe -- "%CD%\out\build\x64-release\bin\PdfThumbnailsCli.exe" --version
+```
+
+- It registers a temporary scheduled task, `\PdfThumbnails-Dev\run-<GUID>`, for the current user
+  (the user's interactive token without elevation, normal priority, a time limit 30 s over
+  `--timeout` in case `pdft-run-outside` is gone by then), starts it and waits. Task Scheduler
+  starts its tasks outside any such container.
+- The task's only action is a second copy of `pdft-run-outside.exe`. It reads the request (the
+  program, its arguments and the terminal's current folder) from a folder
+  `%TEMP%\PdfThumbnails-Dev-run-<GUID>` that only the user and SYSTEM can open, after checking that
+  the folder and the file are the ones the first copy made (owner, no links, location). It
+  starts the program directly with `CreateProcessW`: no shell is involved, so the arguments reach
+  the program exactly as given. For the same reason only `.exe` programs can be run.
+- The program gets the user's own environment (as Task Scheduler builds it, not the terminal's),
+  the terminal's current folder, no standard input and no console window. It is not looked up on
+  `PATH`. Its standard output and error are printed when it ends.
+- `--timeout <seconds>` (1 to 86400, default 120) stops it after that long (exit code 124). A
+  task that Task Scheduler never started is reported as such (125), not as timed out.
+- Afterwards the task, the task folder (unless another run is using it) and the private folder
+  are deleted, also after Ctrl+C. If `pdft-run-outside` itself is killed, its task can stay
+  behind; delete it in Task Scheduler.
+- Exit codes: the program's own, or 124 (stopped at the time limit), 125 (`pdft-run-outside`
+  failed, and says why), 126 (Application Control, such as Smart App Control, blocked the program),
+  127 (the program could not be started for another reason), 130 (interrupted).
+- On Windows 11 24H2 and later the second copy runs without a console window (its manifest asks
+  for no console); earlier versions show one while the program runs.
+
+The program runs with the user's rights against the real profile, so use it only for what you
+would also run from a normal terminal.
 
 ## Staging (install components)
 
@@ -152,14 +226,14 @@ cmake --install out\build\x64-release --prefix <folder> --component runtime
 
 | Component | Contents |
 |---|---|
-| `runtime` | What gets installed: the two DLLs, `LICENSE.txt`, `THIRD-PARTY-NOTICES.md` and `licenses\` |
+| `runtime` | What gets installed: the two executables, the two DLLs, `LICENSE.txt`, `THIRD-PARTY-NOTICES.md` and `licenses\` |
 | `symbols` | The PDBs of the `runtime` binaries |
-| `tests` | A self-contained test bundle: the test programs and tools with their PDBs, the runtime, the notices, the preview samples and a `CTestTestfile.cmake` with relative paths |
+| `tests` | A self-contained test bundle: the test programs, `thumbtest` and `pdft-run-medium` with their PDBs, the runtime, the notices, the preview samples and a `CTestTestfile.cmake` with relative paths |
 
 The test bundle runs anywhere CMake is installed:
 
 ```bat
-ctest --test-dir <folder> -L "unit|handler" --output-on-failure
+ctest --test-dir <folder> -L "unit|handler|integration" --output-on-failure
 ```
 
 ## Formatting
@@ -184,7 +258,7 @@ don't keep the token.
 
 | Job | Runner | When | What |
 |---|---|---|---|
-| `build (ci-x64)` | x64 | always | `scripts\build.cmd ci-x64`: gates, unit and handler tests; artifacts |
+| `build (ci-x64)` | x64 | always | `scripts\build.cmd ci-x64`: gates, unit, handler and integration tests; artifacts |
 | `build (ci-arm64)` | x64 | always | `scripts\build.cmd ci-arm64` (cross-compiled): gates; artifacts |
 | `build (x64-debug)` | x64 | not on pull requests, unless called | `scripts\build.cmd x64-debug` |
 | `test-arm64` | ARM64 | not on pull requests, unless called | the ARM64 test bundle, run natively with `ctest --test-dir` |

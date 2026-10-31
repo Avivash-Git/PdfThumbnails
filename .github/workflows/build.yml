@@ -1,10 +1,10 @@
 # Builds, tests and stages PdfThumbnails with MSVC through scripts\build.cmd, the same entry
 # point as a local build (docs/BUILDING.md).
 #
-#   build (ci-x64)    x64 Release: gates, unit and handler tests; artifacts
+#   build (ci-x64)    x64 Release: gates, unit, handler and integration tests; artifacts
 #   build (ci-arm64)  ARM64 Release, cross-compiled on the x64 runner: gates; artifacts
-#   build (x64-debug) x64 Debug: gates, unit and handler tests (not on pull requests, unless
-#                     called by another workflow)
+#   build (x64-debug) x64 Debug: gates, unit, handler and integration tests (not on pull
+#                     requests, unless called by another workflow)
 #   test-arm64        the ARM64 test bundle, run natively on an ARM64 runner (not on pull
 #                     requests, unless called; also when another build leg failed)
 #
@@ -201,7 +201,7 @@ jobs:
           whoami /groups | findstr /i /c:"Mandatory Label" /c:"S-1-5-32-544"
           exit /b 0
 
-      - name: Unit and handler tests (native ARM64)
+      - name: Unit, handler and integration tests (native ARM64)
         run: ctest --test-dir t -L "unit|handler|integration" --output-on-failure --no-tests=error --timeout 900
 
       - name: Check the elevated test paths

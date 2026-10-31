@@ -36,8 +36,12 @@ class HandlerEnvironment : public ::testing::Environment {
   // The private key that HKEY_CURRENT_USER stands for during the run. Write the handler's
   // registry values through Registry().key(), never through HKEY_CURRENT_USER.
   static const ScopedHkcuRedirect& Registry();
+  // True when Smart App Control (or another Application Control policy) refused to load the
+  // handler: no test ran, and main() exits 77 so that CTest reports a skip, not a pass.
+  static bool ApplicationControlBlocked();
 
  private:
+  static bool blocked_;
   static std::unique_ptr<TempDir> dir_;
   static std::unique_ptr<ScopedHkcuRedirect> registry_;
   static std::unique_ptr<HandlerHost> host_;

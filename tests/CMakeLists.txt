@@ -1,11 +1,21 @@
 # Test programs (GoogleTest) and their CTest registrations. One CTest test per program, so
 # nothing runs at build time and cross-compiled ARM64 builds work; run them with
-#   ctest --preset x64-release -L "unit|handler"
+#   ctest --preset x64-release -L "unit|handler|integration"
 #
 #   unit.tests                pdft_unit_tests: crop math, zoom clamping, the generated GUIDs,
 #                             test-PDF generator (byte-identical to the 1.x generator),
-#                             Medium-integrity support, temp folders, HKCU redirection
+#                             Medium-integrity support, temp folders, HKCU redirection; the app's
+#                             pure parts: command line, strings, paths, log, output, exit codes,
+#                             virtualization verdicts, named-object descriptors, start-up
+#                             hardening, the COM descriptor, the executables' string tables;
+#                             pdft-run-outside's pure parts (its request file, command lines,
+#                             exit codes)
 #   unit.samples              src/app/res/sample-*.pdf == `thumbtest makesamples` output
+#   integration.tests         pdft_integration_tests: the app's core against the real system
+#                             (COM under the app's security, WMI, Task Scheduler read-only, named
+#                             objects across processes, the process tree, the registry canary)
+#                             and both executables run with captured output; writes nothing to
+#                             the real profile but the canary's volatile probe key
 #   handler.tests             pdft_handler_tests: PdfThumbnails.dll in-process at Medium
 #                             integrity (relaunches itself when elevated) with HKCU redirected to
 #                             a private key: crop table, pixels, COM surface, error HRESULTs,
@@ -13,11 +23,12 @@
 #                             8-thread stress
 #   handler.refuses_elevated  pdft_refuses_elevated: elevated, the DLL must refuse to render;
 #                             skipped (exit 77) when not elevated
+# Also built here: pdft-planting-check and its canary DLL, for the gate gate.planting.
 # Test support (tests/support) is added by the top-level CMakeLists.txt: thumbtest uses it too.
 #
 # The same tests also run from the installed test bundle, a flat folder made with
 #   cmake --install <build> --prefix <folder> --component tests
-#   ctest --test-dir <folder> -L "unit|handler"
+#   ctest --test-dir <folder> -L "unit|handler|integration"
 # CI builds ARM64 on an x64 host and runs the ARM64 bundle on an ARM64 runner. The bundle's
 # CTestTestfile.cmake is generated at the end of this file from the registrations below, with
 # paths relative to the bundle: register program tests with pdft_add_program_test() so both
@@ -75,6 +86,28 @@ add_executable(pdft_unit_tests
   unit/medium_il_test.cpp
   unit/temp_dir_test.cpp
   unit/registry_sandbox_test.cpp)
+if(TARGET pdft_appcore)
+  target_sources(pdft_unit_tests PRIVATE
+    unit/cli_args_test.cpp
+    unit/context_decision_test.cpp
+    unit/log_test.cpp
+    unit/output_test.cpp
+    unit/paths_test.cpp
+    unit/resources_test.cpp
+    unit/startup_test.cpp
+    unit/strings_test.cpp)
+  target_link_libraries(pdft_unit_tests PRIVATE pdft_appcore)
+  # main.cpp's start-up hardening child needs the app's start-up code (startup.h).
+  target_compile_definitions(pdft_unit_tests PRIVATE PDFT_UNIT_TESTS_WITH_APP=1)
+  # The string-table test reads the executables next to the test program, and the hardening
+  # child checks that PDFium next to it no longer loads by bare name (the test bundle ships it
+  # there too).
+  add_dependencies(pdft_unit_tests PdfThumbnailsCli PdfThumbnailsSettings pdft_pdfium_runtime)
+endif()
+if(TARGET pdft_run_outside_core)   # tools/run-outside (with PDFT_BUILD_TOOLS)
+  target_sources(pdft_unit_tests PRIVATE unit/run_outside_test.cpp)
+  target_link_libraries(pdft_unit_tests PRIVATE pdft_run_outside_core)
+endif()
 pdft_harden(pdft_unit_tests TEST)
 target_link_libraries(pdft_unit_tests PRIVATE pdft_testsupport pdft_common pdft_config GTest::gtest
                                               bcrypt shell32 ole32 uuid)
@@ -118,7 +151,9 @@ pdft_harden(pdft_handler_tests TEST)
 target_link_libraries(pdft_handler_tests PRIVATE pdft_handler_host GTest::gtest)
 add_dependencies(pdft_handler_tests pdft_handler)   # PdfThumbnails.dll (+ PDFium) next to it
 # Serial: the stress test wants the machine to itself, and its timing budgets are 1.1's.
-pdft_add_program_test(handler.tests pdft_handler_tests LABELS handler RUN_SERIAL TRUE)
+# Exit 77: an Application Control policy blocked PdfThumbnails.dll, so no test ran.
+pdft_add_program_test(handler.tests pdft_handler_tests LABELS handler RUN_SERIAL TRUE
+                      SKIP_RETURN_CODE 77)
 
 add_executable(pdft_refuses_elevated handler/refuses_elevated.cpp)
 pdft_harden(pdft_refuses_elevated TEST)
@@ -127,10 +162,48 @@ add_dependencies(pdft_refuses_elevated pdft_handler)
 pdft_add_program_test(handler.refuses_elevated pdft_refuses_elevated
                       LABELS handler SKIP_RETURN_CODE 77)
 
+# ---- integration ---------------------------------------------------------------------------
+# Writes nothing to the real profile except the registry canary's volatile probe key, which it
+# deletes; starts itself (child modes in integration/main.cpp) and the two executables, a
+# writing command of theirs only where its writes are swallowed anyway. Its named objects carry
+# a suffix of the run's own, so it never takes or waits for a running app's.
+if(TARGET pdft_appcore)
+  add_executable(pdft_integration_tests
+    integration/main.cpp
+    integration/child_process.cpp integration/child_process.h
+    integration/com_security_test.cpp
+    integration/context_test.cpp
+    integration/exes_test.cpp
+    integration/instance_test.cpp)
+  pdft_harden(pdft_integration_tests TEST)
+  target_link_libraries(pdft_integration_tests PRIVATE pdft_appcore pdft_testsupport GTest::gtest
+                                                       ole32 oleaut32 advapi32 user32)
+  add_dependencies(pdft_integration_tests PdfThumbnailsCli PdfThumbnailsSettings)
+  pdft_add_program_test(integration.tests pdft_integration_tests LABELS integration)
+endif()
+
+# ---- DLL planting (gate.planting, registered in cmake/Gates.cmake) --------------------------
+# The canary DLL and the program that plants it next to copies of the app's executables. Built
+# for both architectures; the gate runs only where the executables can (native builds).
+if(TARGET PdfThumbnailsSettings AND TARGET PdfThumbnailsCli)
+  # A module: no exports and no import library.
+  add_library(pdft_planting_canary MODULE planting/canary.cpp)
+  set_target_properties(pdft_planting_canary PROPERTIES OUTPUT_NAME pdft-planting-canary PREFIX "")
+  pdft_harden(pdft_planting_canary DLL)
+
+  add_executable(pdft_planting_check planting/planting_check.cpp)
+  set_target_properties(pdft_planting_check PROPERTIES OUTPUT_NAME pdft-planting-check)
+  pdft_add_version_resource(pdft_planting_check FILETYPE VFT_APP
+    DESCRIPTION "${PDFT_PRODUCT_NAME} DLL planting check (tests)")
+  pdft_harden(pdft_planting_check EXE)
+  target_link_libraries(pdft_planting_check PRIVATE pdft_testsupport pdft_config)
+  add_dependencies(pdft_planting_check pdft_planting_canary)
+endif()
+
 # ---- installed test bundle -----------------------------------------------------------------
 get_property(_pdft_bundle_tests GLOBAL PROPERTY PDFT_BUNDLE_TESTS)
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/bundle/CTestTestfile.cmake"
-     CONTENT "# Generated by tests/CMakeLists.txt: the tests of the installed test bundle.\n# Run: ctest --test-dir <this folder> -L \"unit|handler\"\n${_pdft_bundle_tests}")
+     CONTENT "# Generated by tests/CMakeLists.txt: the tests of the installed test bundle.\n# Run: ctest --test-dir <this folder> -L \"unit|handler|integration\"\n${_pdft_bundle_tests}")
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/bundle/CTestTestfile.cmake"
         DESTINATION . COMPONENT tests)
 unset(_pdft_bundle_tests)

@@ -39,7 +39,15 @@
     { "name": "release", "hidden": true, "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } },
     { "name": "x64-debug", "displayName": "x64 Debug", "inherits": [ "base", "x64", "debug" ] },
     { "name": "x64-release", "displayName": "x64 Release", "inherits": [ "base", "x64", "release" ] },
+    { "name": "arm64-debug", "displayName": "ARM64 Debug", "inherits": [ "base", "arm64", "debug" ] },
     { "name": "arm64-release", "displayName": "ARM64 Release", "inherits": [ "base", "arm64", "release" ] },
+    {
+      "name": "x64-asan",
+      "displayName": "x64 Debug with AddressSanitizer",
+      "description": "Local test runs only: /fsanitize=address everywhere, without the hardening that conflicts with it.",
+      "inherits": [ "base", "x64", "debug" ],
+      "cacheVariables": { "PDFT_ASAN": "ON" }
+    },
     {
       "name": "ci-x64",
       "displayName": "CI x64 Release",
@@ -58,7 +66,9 @@
   "buildPresets": [
     { "name": "x64-debug", "configurePreset": "x64-debug" },
     { "name": "x64-release", "configurePreset": "x64-release" },
+    { "name": "arm64-debug", "configurePreset": "arm64-debug" },
     { "name": "arm64-release", "configurePreset": "arm64-release" },
+    { "name": "x64-asan", "configurePreset": "x64-asan" },
     { "name": "ci-x64", "configurePreset": "ci-x64" },
     { "name": "ci-arm64", "configurePreset": "ci-arm64" }
   ],
@@ -84,7 +94,17 @@
     },
     { "name": "x64-debug", "configurePreset": "x64-debug", "inherits": [ "x64-native" ] },
     { "name": "x64-release", "configurePreset": "x64-release", "inherits": [ "x64-native" ] },
+    { "name": "arm64-debug", "configurePreset": "arm64-debug", "inherits": [ "arm64-cross" ] },
     { "name": "arm64-release", "configurePreset": "arm64-release", "inherits": [ "arm64-cross" ] },
+    {
+      "name": "x64-asan",
+      "configurePreset": "x64-asan",
+      "description": "Every program imports the AddressSanitizer runtime from outside System32, so the import, hardening and planting gates do not apply.",
+      "inherits": [ "test-base" ],
+      "filter": {
+        "exclude": { "label": "system|e2e", "name": "^gate\\.((imports|hardening)\\.(handler|settings|cli)|planting)$" }
+      }
+    },
     { "name": "ci-x64", "configurePreset": "ci-x64", "inherits": [ "x64-native" ] },
     { "name": "ci-arm64", "configurePreset": "ci-arm64", "inherits": [ "arm64-cross" ] }
   ],
@@ -111,6 +131,22 @@
         { "type": "configure", "name": "arm64-release" },
         { "type": "build", "name": "arm64-release" },
         { "type": "test", "name": "arm64-release" }
+      ]
+    },
+    {
+      "name": "arm64-debug",
+      "steps": [
+        { "type": "configure", "name": "arm64-debug" },
+        { "type": "build", "name": "arm64-debug" },
+        { "type": "test", "name": "arm64-debug" }
+      ]
+    },
+    {
+      "name": "x64-asan",
+      "steps": [
+        { "type": "configure", "name": "x64-asan" },
+        { "type": "build", "name": "x64-asan" },
+        { "type": "test", "name": "x64-asan" }
       ]
     },
     {

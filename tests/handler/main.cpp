@@ -16,6 +16,7 @@
 
 namespace pdft::test {
 
+bool HandlerEnvironment::blocked_ = false;
 std::unique_ptr<TempDir> HandlerEnvironment::dir_;
 std::unique_ptr<ScopedHkcuRedirect> HandlerEnvironment::registry_;
 std::unique_ptr<HandlerHost> HandlerEnvironment::host_;
@@ -38,6 +39,12 @@ void HandlerEnvironment::SetUp() {
 
   host_ = std::make_unique<HandlerHost>();
   const HRESULT hr = host_->Load();
+  if (IsApplicationControlBlock(hr)) {
+    // Freshly built, unsigned DLLs are sometimes refused on PCs with Smart App Control on.
+    blocked_ = true;
+    GTEST_SKIP() << "an Application Control policy blocked " << Printable(host_->path()) << ": "
+                 << HresultText(hr);
+  }
   ASSERT_EQ(hr, S_OK) << "cannot load " << Printable(host_->path()) << ": " << HresultText(hr);
   std::printf("[ info     ] handler %s, integrity 0x%04lX\n", Printable(host_->path()).c_str(),
               CurrentIntegrityRid());
@@ -53,6 +60,8 @@ void HandlerEnvironment::TearDown() {
 const HandlerHost& HandlerEnvironment::Host() { return *host_; }
 
 const ScopedHkcuRedirect& HandlerEnvironment::Registry() { return *registry_; }
+
+bool HandlerEnvironment::ApplicationControlBlocked() { return blocked_; }
 
 const std::wstring& HandlerEnvironment::Folder() { return dir_->path(); }
 
@@ -88,5 +97,7 @@ int main(int argc, char** argv) {
   ::testing::AddGlobalTestEnvironment(new pdft::test::HandlerEnvironment);
   const int result = RUN_ALL_TESTS();
   CoUninitialize();
+  // CTest's SKIP_RETURN_CODE: a blocked handler is neither a pass nor a failure.
+  if (pdft::test::HandlerEnvironment::ApplicationControlBlocked()) return 77;
   return result;
 }

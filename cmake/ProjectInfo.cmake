@@ -1,7 +1,7 @@
 # Every product name, ID and version lives here, and only here. The build generates
-# project_config.h, the version resources and the handler's .def file from these values
-# (see the "Generated files" section below), so a rename before publishing is a change to
-# this file alone.
+# project_config.h, the version resources, the handler's .def file and the app's manifests from
+# these values (see the "Generated files" section below), so a rename before publishing is a
+# change to this file alone.
 #
 # Included before project(): values only, plus the functions that use them.
 
@@ -14,7 +14,7 @@ set(PDFT_VERSION_SUFFIX        "" CACHE STRING
     "Appended to the ProductVersion string only (e.g. -dev+g1a2b3c4); FileVersion never changes")
 set(PDFT_DESCRIPTION           "PDF thumbnails for Windows Explorer (PDFium)")
 set(PDFT_COPYRIGHT             "Copyright (c) 2026 ${PDFT_PRODUCT_NAME} contributors")
-# PDFT_HOMEPAGE is added when the GitHub repository exists (WP4).
+# PDFT_HOMEPAGE is added once the project's public repository exists.
 
 # ---- COM and file names -----------------------------------------------------------------
 set(PDFT_HANDLER_CLSID         "{0C3534C4-5B7A-48AB-828D-1CD660DC447F}")   # NEVER changes
@@ -33,6 +33,10 @@ set(PDFT_TASK_PREFIX           "Check ")
 set(PDFT_OBJECT_PREFIX         "${PDFT_PRODUCT_NAME}")    # mutexes, window class, messages
 set(PDFT_INNO_APPID            "{B4584E00-A586-4C24-996D-6032BFDEDE2F}")   # reserved for M3
 set(PDFT_AUMID                 "${PDFT_PRODUCT_NAME}.Settings")            # reserved (toasts)
+# Developer tools only (pdft-run-outside): the task folder of its temporary tasks, and the start
+# of the name of each run's private folder under %TEMP%. Never used by what ships.
+set(PDFT_DEV_TASK_FOLDER       "\\${PDFT_PRODUCT_NAME}-Dev")
+set(PDFT_DEV_RUN_PREFIX        "${PDFT_PRODUCT_NAME}-Dev-run-")
 
 # ---- 1.x names: fixed forever (migration and clean-up find 1.x through them) ------------
 set(PDFT_LEGACY_ROOT_NAME      "PdfThumbnails")   # %LOCALAPPDATA%\Programs\..., Program Files\...
@@ -99,13 +103,19 @@ endfunction()
 function(pdft_generate_project_config)
   foreach(name IN ITEMS PRODUCT_NAME DESCRIPTION COPYRIGHT HANDLER_CLSID HANDLER_CLASS_NAME
                         PREVIEW_IID HANDLER_DLL PDFIUM_DLL SETTINGS_EXE CLI_EXE REG_KEY TASK_FOLDER
-                        TASK_PREFIX OBJECT_PREFIX INNO_APPID AUMID LEGACY_ROOT_NAME LEGACY_TASK
+                        TASK_PREFIX OBJECT_PREFIX INNO_APPID AUMID DEV_TASK_FOLDER DEV_RUN_PREFIX
+                        LEGACY_ROOT_NAME LEGACY_TASK
                         LEGACY_RUNONCE LEGACY_SETTINGS_ENV LEGACY_SETTINGS_INI
                         PDFCRAFT_PRODUCT_NAME PDFCRAFT_UPGRADE_CODE PDFCRAFT_SUBSCRIPTION
                         THUMB_SLOT_IID SURROGATE_APPID)
     pdft_c_string(PDFT_C_${name} "${PDFT_${name}}")
   endforeach()
   pdft_c_string(PDFT_C_PRODUCT_VERSION "${PROJECT_VERSION}${PDFT_VERSION_SUFFIX}")
+  if(PDFT_DEV_INSTALL)
+    set(PDFT_C_DEV_INSTALL "true")
+  else()
+    set(PDFT_C_DEV_INSTALL "false")
+  endif()
   foreach(name IN ITEMS HANDLER_CLSID PREVIEW_IID THUMB_SLOT_IID SURROGATE_APPID
                         PDFCRAFT_UPGRADE_CODE IID_INITIALIZE_WITH_STREAM FOLDERID_LOCAL_APPDATA)
     pdft_guid_initializer(PDFT_GUID_${name} "${PDFT_${name}}")
@@ -144,6 +154,39 @@ function(pdft_add_version_resource target)
   set(rc "${CMAKE_CURRENT_BINARY_DIR}/${target}.version.rc")
   configure_file("${PDFT_TEMPLATE_DIR}/version.rc.in" "${rc}" @ONLY)
   target_sources(${target} PRIVATE "${rc}")
+endfunction()
+
+# pdft_add_manifest(<target> TEMPLATE <settings|cli|run-outside>)
+# Generates the application manifest of one of the app's executables (settings, cli) or of the
+# pdft-run-outside developer tool (run-outside) from templates/<template>.manifest.in and adds it
+# as a source. CMake's link step merges it with the linker's own manifest into one embedded
+# manifest, resource #1 (gate.manifest.* checks that for the app). /MANIFESTUAC:NO keeps the
+# linker from adding an execution-level entry of its own, so the template is the only place that
+# sets it. Set the target's OUTPUT_NAME first: the manifest's assembly name is the file name
+# without .exe.
+function(pdft_add_manifest target)
+  cmake_parse_arguments(PARSE_ARGV 1 arg "" "TEMPLATE" "")
+  if(NOT arg_TEMPLATE MATCHES "^(settings|cli|run-outside)$")
+    message(FATAL_ERROR "pdft_add_manifest(${target}): TEMPLATE settings|cli|run-outside is required")
+  endif()
+  get_target_property(name ${target} OUTPUT_NAME)
+  if(NOT name)
+    set(name "${target}")
+  endif()
+  # Assembly names allow letters, digits, dots, dashes and underscores (no XML escaping needed).
+  if(NOT name MATCHES "^[A-Za-z0-9._-]+$")
+    message(FATAL_ERROR "pdft_add_manifest(${target}): '${name}' cannot be a manifest assembly name")
+  endif()
+  set(PDFT_MANIFEST_NAME "${name}")
+  if(PDFT_ARCH STREQUAL "x64")
+    set(PDFT_MANIFEST_ARCH "amd64")
+  else()
+    set(PDFT_MANIFEST_ARCH "${PDFT_ARCH}")   # arm64
+  endif()
+  set(manifest "${CMAKE_CURRENT_BINARY_DIR}/${target}.manifest")
+  configure_file("${PDFT_TEMPLATE_DIR}/${arg_TEMPLATE}.manifest.in" "${manifest}" @ONLY)
+  target_sources(${target} PRIVATE "${manifest}")
+  target_link_options(${target} PRIVATE /MANIFESTUAC:NO)
 endfunction()
 
 # pdft_add_handler_def(<target>): generates handler.def (LIBRARY = PDFT_HANDLER_DLL) and adds

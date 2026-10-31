@@ -1,15 +1,24 @@
-# Gates: static checks of what we ship, as CTest tests with the label "gate" (run with
-# `ctest --preset <preset> -L gate`). They never execute the built binaries, so cross-compiled
-# ARM64 builds run them on the x64 host too. Every gate inspects a fresh
-# `cmake --install --component runtime` (fixture gate.stage, in <build>/gate-stage) with
-# dumpbin and `cmake -P` scripts from cmake/gates.
+# Gates: checks of what we ship, as CTest tests with the label "gate" (run with
+# `ctest --preset <preset> -L gate`). They are static checks of the staged files and never run
+# the built binaries, so cross-compiled ARM64 builds run them on the x64 host too; the one
+# exception is gate.planting, which starts copies of the two executables and is registered for
+# native builds only. It also has the label "planting", so `ctest -L gate -LE planting` runs the
+# static checks alone. Every gate inspects a fresh `cmake --install --component runtime`
+# (fixture gate.stage, in <build>/gate-stage) with dumpbin and `cmake -P` scripts from
+# cmake/gates.
 #
 #   gate.stage                 fixture: stages the runtime component
 #   gate.<bin>.exports         exact export list (handler: DllCanUnloadNow, DllGetClassObject)
 #   gate.imports.<bin>         imports on an allow list; no CRT DLLs; delay-loads only if listed
 #   gate.hardening.<bin>       CFG, CET (x64), EH continuation (x64), NX, ASLR, dependent load
-#                              flag 0x800, PDB name only, no build-machine paths
+#                              flag 0x800, PDB name only, no build-machine paths; the app's
+#                              executables also without WIL's process-wide failure cache
 #   gate.version.<bin>         FileVersion = project version, OriginalFilename = file name
+#   gate.manifest.<bin>        the app's executables: one embedded manifest, as the template says
+#   gate.planting              the app's executables, copied to a fresh folder next to DLLs named
+#                              like the ones they (or Windows on their behalf) might load, load
+#                              none of them (native builds only: it runs the executables; also
+#                              labelled "planting")
 #   gate.pdfium.pe             PDFium's own (shorter) hardening profile
 #   gate.pdfium.binds          src/handler/pdfium_functions.inc has 18 entries, all exported
 #   gate.pdfium.hash           the staged PDFium DLL is the pinned one
@@ -18,8 +27,7 @@
 #                              carries GoogleTest's license (fixture gate.stage.tests)
 #   gate.buildid               cmake/BuildId.cmake: fixed vector + the staged DLLs
 #
-# Our own binaries register through pdft_add_binary_gates(); the settings exes (WP6) add theirs
-# the same way.
+# Our own binaries register through pdft_add_binary_gates().
 
 include_guard(GLOBAL)
 
@@ -55,11 +63,13 @@ function(pdft_add_gate name script)
 endfunction()
 
 # pdft_add_binary_gates(<short name> <target> IMPORTS <dll>... [DELAY_IMPORTS <dll>...]
-#                       [EXPORTS <name>...])
+#                       [EXPORTS <name>...] [MANIFEST settings|cli] [USES_WIL])
 # The gates for one of our own staged binaries. Import names compare case-insensitively; a
-# trailing * matches any rest. Without EXPORTS the export list is not checked.
+# trailing * matches any rest. Without EXPORTS the export list is not checked; MANIFEST names the
+# executable's manifest template (gate.manifest.<short name>). USES_WIL: the binary compiles WIL,
+# and gate.hardening.<short name> also checks that WIL's process-wide failure cache is left out.
 function(pdft_add_binary_gates short target)
-  cmake_parse_arguments(PARSE_ARGV 2 arg "" "" "IMPORTS;DELAY_IMPORTS;EXPORTS")
+  cmake_parse_arguments(PARSE_ARGV 2 arg "USES_WIL" "MANIFEST" "IMPORTS;DELAY_IMPORTS;EXPORTS")
   if(NOT arg_IMPORTS)
     message(FATAL_ERROR "pdft_add_binary_gates(${short}): IMPORTS is required")
   endif()
@@ -68,14 +78,22 @@ function(pdft_add_binary_gates short target)
   list(JOIN arg_DELAY_IMPORTS "," delay_allow)
   pdft_add_gate(gate.imports.${short} CheckImports.cmake
     "-DFILE=${file}" "-DALLOW=${allow}" "-DDELAY_ALLOW=${delay_allow}")
+  set(uses_wil "")
+  if(arg_USES_WIL)
+    set(uses_wil -DUSES_WIL=ON)
+  endif()
   pdft_add_gate(gate.hardening.${short} CheckHardening.cmake
     "-DFILE=${file}" -DPROFILE=own "-DARCH=${PDFT_ARCH}" "-DMACHINE=${PDFT_PE_MACHINE}"
-    "-DFORBIDDEN=${PDFT_GATE_FORBIDDEN_PATHS}")
+    "-DFORBIDDEN=${PDFT_GATE_FORBIDDEN_PATHS}" ${uses_wil})
   pdft_add_gate(gate.version.${short} CheckVersion.cmake
     "-DFILE=${file}" "-DVERSION=${PROJECT_VERSION}")
   if(arg_EXPORTS)
     list(JOIN arg_EXPORTS "," exports)
     pdft_add_gate(gate.${short}.exports CheckExports.cmake "-DFILE=${file}" "-DEXPECTED=${exports}")
+  endif()
+  if(arg_MANIFEST)
+    pdft_add_gate(gate.manifest.${short} CheckManifest.cmake
+      "-DFILE=${file}" "-DKIND=${arg_MANIFEST}" "-DARCH=${PDFT_ARCH}")
   endif()
 endfunction()
 
@@ -83,6 +101,56 @@ endfunction()
 pdft_add_binary_gates(handler pdft_handler
   EXPORTS DllCanUnloadNow DllGetClassObject
   IMPORTS KERNEL32.dll ADVAPI32.dll OLE32.dll SHELL32.dll GDI32.dll)
+
+# ---- the app's executables ------------------------------------------------------------------
+# Static imports: KnownDLLs only, plus COMCTL32 for the settings executable, which its manifest
+# binds to Common Controls v6 in WinSxS. Everything else must be delay-loaded from the list in
+# cmake/Hardening.cmake (see there for why).
+if(TARGET PdfThumbnailsSettings)
+  pdft_add_binary_gates(settings PdfThumbnailsSettings
+    IMPORTS ${PDFT_EXE_STATIC_IMPORTS} COMCTL32.dll
+    DELAY_IMPORTS ${PDFT_EXE_DELAY_LOADS}
+    MANIFEST settings
+    USES_WIL)
+endif()
+if(TARGET PdfThumbnailsCli)
+  pdft_add_binary_gates(cli PdfThumbnailsCli
+    IMPORTS ${PDFT_EXE_STATIC_IMPORTS}
+    DELAY_IMPORTS ${PDFT_EXE_DELAY_LOADS}
+    MANIFEST cli
+    USES_WIL)
+endif()
+
+# gate.planting (tests/planting): copies the staged executables into a fresh folder under
+# %TEMP%, plants a canary DLL there under every name below, runs each executable with --version
+# and --help (and, when run elevated as on CI, --status --no-live-test), and fails if any canary
+# was loaded. The names: every DLL the executables may delay-load, Common Controls (bound
+# through the manifest), and DLLs that Windows' own DLLs load by name on a program's behalf, the
+# usual targets of DLL planting. Skipped (exit 77) only when Smart App Control or another
+# Application Control policy blocks the canary or an executable, because a canary that cannot
+# load would make the check pass for the wrong reason; any other failure of the canary fails.
+# It starts programs, so it is registered for native builds only.
+set(PDFT_PLANTING_NAMES ${PDFT_EXE_DELAY_LOADS}
+  comctl32.dll cryptbase.dll cryptsp.dll dbghelp.dll profapi.dll sspicli.dll winmm.dll
+  wtsapi32.dll)
+list(REMOVE_DUPLICATES PDFT_PLANTING_NAMES)
+if(TARGET pdft_planting_check AND NOT CMAKE_CROSSCOMPILING)
+  set(_pdft_args --canary "$<TARGET_FILE:pdft_planting_canary>")
+  foreach(_pdft_target IN ITEMS PdfThumbnailsSettings PdfThumbnailsCli)
+    list(APPEND _pdft_args --exe "${PDFT_GATE_STAGE}/$<TARGET_FILE_NAME:${_pdft_target}>")
+  endforeach()
+  foreach(_pdft_name IN LISTS PDFT_PLANTING_NAMES)
+    list(APPEND _pdft_args --plant "${_pdft_name}")
+  endforeach()
+  add_test(NAME gate.planting COMMAND pdft_planting_check ${_pdft_args})
+  set_tests_properties(gate.planting PROPERTIES
+    LABELS "gate;planting"
+    FIXTURES_REQUIRED gate.stage
+    SKIP_RETURN_CODE 77)
+  unset(_pdft_args)
+  unset(_pdft_target)
+  unset(_pdft_name)
+endif()
 
 # ---- PDFium (third-party binary, shipped under our private name) ----------------------------
 set(_pdft_pdfium "${PDFT_GATE_STAGE}/${PDFT_PDFIUM_DLL}")

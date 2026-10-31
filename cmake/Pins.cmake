@@ -24,11 +24,11 @@ set(PDFT_PDFIUM_ATTESTATION_WORKFLOW "bblanchon/pdfium-binaries/.github/workflow
 
 unset(_pdft_pdfium_release)
 
-# ---- GoogleTest v1.18.0 (tests only; used from WP3) ---------------------------------------
+# ---- GoogleTest v1.18.0 (test programs only) ----------------------------------------------
 set(PDFT_GTEST_URL    "https://github.com/google/googletest/releases/download/v1.18.0/googletest-1.18.0.tar.gz")
 set(PDFT_GTEST_SHA256 "6e3191c1455468b3fc35a417fb565c1c5071aee1b7e7f85e30cf48a98d37d8b5")
 
-# ---- WIL v1.0.260126.7 = commit cbf677fb (header-only, settings app; used from WP6) --------
+# ---- WIL v1.0.260126.7 = commit cbf677fb (header-only; compiled into the settings app) ----
 # A GitHub-generated source archive: if its checksum ever drifts, switch to a git-commit pin.
 set(PDFT_WIL_URL    "https://github.com/microsoft/wil/archive/cbf677fb0a942557d08fd129f4c106a76247b2ec.tar.gz")
 set(PDFT_WIL_SHA256 "d7b3c903b501f6ea73a733ee4cd4215119dc10eee969bda2aa134732b8e8fe6f")

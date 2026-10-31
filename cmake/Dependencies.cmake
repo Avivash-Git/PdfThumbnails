@@ -1,5 +1,5 @@
-# Third-party code, all of it downloaded against the pins in Pins.cmake (GoogleTest: see the
-# end of this file).
+# Third-party code, all of it downloaded against the pins in Pins.cmake (WIL and GoogleTest:
+# see below).
 #
 # PDFium (per architecture):
 #   pdft_pdfium_headers  INTERFACE, SYSTEM include path for the headers only. Never link
@@ -51,6 +51,52 @@ add_custom_command(
   VERBATIM)
 add_custom_target(pdft_pdfium_runtime ALL DEPENDS "${PDFT_PDFIUM_RUNTIME}")
 unset(_pdft_pdfium_dll)
+
+# WIL, the Windows Implementation Libraries (header-only; compiled into the settings app only,
+# so it is fetched only when the app is built):
+#   pdft_wil      INTERFACE, SYSTEM include path, plus two definitions for every target that
+#                 uses it (all of them get the same, so the linker never sees a mix):
+#                 RESULT_DIAGNOSTICS_LEVEL=2: WIL's error macros record line numbers only. From
+#                 level 3 on (WIL's default) every RETURN_IF_* site embeds __FILE__, the absolute
+#                 source path, in the binary; gate.hardening.* would catch that.
+#                 RESULT_SUPPRESS_STATIC_INITIALIZERS: otherwise wil/result.h sets up, before
+#                 main, a process-wide failure cache that every reported failure then looks up
+#                 through named objects (Local\SM0:<pid>:...). Any process in the session can
+#                 create those names first and so choose a pointer that the app then writes
+#                 through, also in an elevated settings window. The app never calls
+#                 wil::WilInitialize_Result, which would set the same cache up again;
+#                 gate.hardening.settings and .cli fail if the names are in the executables.
+#   PDFT_WIL_DIR  the extracted sources (include/, LICENSE). Install.cmake stages its LICENSE
+#                 and gate.licenses requires it whenever this is defined.
+# Not WIL's own CMakeLists.txt: it would pull in its NuGet and test logic.
+set(PDFT_WIL_ARCHIVE "" CACHE FILEPATH
+    "Offline builds: a local WIL source archive to use instead of downloading (checked against the pin)")
+
+if(PDFT_BUILD_APP)
+  pdft_download_verified(_pdft_wil_archive
+    URL "${PDFT_WIL_URL}"
+    SHA256 "${PDFT_WIL_SHA256}"
+    LOCAL_FILE "${PDFT_WIL_ARCHIVE}")
+  set(_pdft_wil_root "${CMAKE_BINARY_DIR}/_deps/wil")
+  pdft_extract_once("${_pdft_wil_archive}" "${PDFT_WIL_SHA256}" "${_pdft_wil_root}")
+  # A GitHub source archive holds one folder, wil-<commit>.
+  file(GLOB _pdft_wil_dirs LIST_DIRECTORIES true "${_pdft_wil_root}/*")
+  list(LENGTH _pdft_wil_dirs _pdft_count)
+  if(NOT _pdft_count EQUAL 1 OR NOT EXISTS "${_pdft_wil_dirs}/include/wil/result_macros.h"
+     OR NOT EXISTS "${_pdft_wil_dirs}/LICENSE")
+    message(FATAL_ERROR "${_pdft_wil_root} does not hold one WIL source tree: the archive layout changed")
+  endif()
+  set(PDFT_WIL_DIR "${_pdft_wil_dirs}")
+
+  add_library(pdft_wil INTERFACE)
+  target_include_directories(pdft_wil SYSTEM INTERFACE "${PDFT_WIL_DIR}/include")
+  target_compile_definitions(pdft_wil INTERFACE RESULT_DIAGNOSTICS_LEVEL=2
+                                                RESULT_SUPPRESS_STATIC_INITIALIZERS)
+  unset(_pdft_wil_archive)
+  unset(_pdft_wil_root)
+  unset(_pdft_wil_dirs)
+  unset(_pdft_count)
+endif()
 
 # GoogleTest (test programs only; never shipped). pdft_add_googletest() defines GTest::gtest
 # and GTest::gtest_main from the pinned release archive and sets PDFT_GTEST_DIR (the extracted
