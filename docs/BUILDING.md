@@ -139,7 +139,11 @@ ctest --preset x64-release -L "unit|handler|integration"
 ```
 
 `gate.planting` is the one gate that starts programs (it also has the label `planting`);
-`ctest --preset x64-release -L gate -LE planting` runs only the static checks.
+`ctest --preset x64-release -L gate -E planting` runs only the static checks. `-LE planting`
+does not work with the presets: CTest adds it to the preset's own label exclusion
+(`system|e2e`) and leaves out only the tests that match every `-LE` expression. `x64-asan`
+leaves `gate.planting` out by itself; don't add `-E` there, because a command-line `-E` replaces
+that preset's own name filter.
 
 | Label | What | Where it runs |
 |---|---|---|
@@ -273,8 +277,14 @@ or `build (x64-debug)` fails; it fails if `build (ci-arm64)` made no artifact.
 Details:
 - **Runners.** GitHub-hosted runners run elevated (High integrity). The handler tests relaunch
   themselves at Medium integrity, and a check step fails the job unless the test log shows that
-  relaunch and an elevated run of `handler.refuses_elevated`. The job log also shows the runner
-  image, the UAC settings and `whoami /groups`.
+  relaunch, an elevated run of `handler.refuses_elevated` and `gate.planting`'s elevated
+  `--status --no-live-test` runs. The job log also shows the runner image, the UAC settings and
+  `whoami /groups`.
+- **Skipped tests.** CTest reports a test program as passed when GoogleTest skipped some of its
+  cases. After the tests, a step lists every skipped test with its reason: CTest's own skips
+  from the JUnit file (`Testing\Temporary\junit.xml`, which every test preset writes) and
+  GoogleTest's skipped cases from the full test log. The list is in the step's log and in one
+  notice on the run's summary page. Skips never fail the job; a missing log or JUnit file does.
 - **Download cache.** `.cache\downloads` is cached per architecture, keyed on
   `cmake/Pins.cmake`. When the cache misses (a new pin), the job first runs
   `cmake -DARCH=<arch> -DVERIFY_ATTESTATION=ON -P cmake/FetchPdfium.cmake`, which downloads the

@@ -2,8 +2,10 @@
 # `ctest --preset <preset> -L gate`). They are static checks of the staged files and never run
 # the built binaries, so cross-compiled ARM64 builds run them on the x64 host too; the one
 # exception is gate.planting, which starts copies of the two executables and is registered for
-# native builds only. It also has the label "planting", so `ctest -L gate -LE planting` runs the
-# static checks alone. Every gate inspects a fresh `cmake --install --component runtime`
+# native builds only. It also has the label "planting", so `ctest -L gate -LE planting` in the
+# build folder runs the static checks alone. With `--preset`, use `-E planting`: CTest adds a
+# command-line `-LE` to the preset's own exclude-label filter and leaves out only the tests that
+# match both. Every gate inspects a fresh `cmake --install --component runtime`
 # (fixture gate.stage, in <build>/gate-stage) with dumpbin and `cmake -P` scripts from
 # cmake/gates.
 #

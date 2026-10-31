@@ -76,7 +76,7 @@
     {
       "name": "test-base",
       "hidden": true,
-      "output": { "outputOnFailure": true },
+      "output": { "outputOnFailure": true, "outputJUnitFile": "Testing/Temporary/junit.xml" },
       "execution": { "noTestsAction": "error", "timeout": 300 }
     },
     {
