@@ -389,7 +389,9 @@ jobs:
       # accepts only its own child: this shows whether UAC makes the asking process the parent.
       # The user's commands run as a local administrator account the tests make for the run,
       # with the limited token of its interactive logon, so each administrator step must go
-      # through UAC into its linked token; when it does not, the tests say so and stop.
+      # through UAC into its linked token; when it does not, the tests say so and stop. Its
+      # programs run in the runner's session, whose named objects the tests let it use; when
+      # that cannot be granted, they say so and stop too.
       - name: Check that the system tests ran
         if: ${{ !cancelled() }}
         run: |
@@ -397,6 +399,8 @@ jobs:
           findstr /l /c:"[ system ]" "%LOG%"
           findstr /l /c:"[ system ] UAC did not elevate" "%LOG%" >nul && (echo ::error::UAC did not elevate the test account's administrator step on this runner; the [ system ] lines show the step's token& exit /b 1)
           findstr /l /c:"[ system ] test account's token: elevated no, elevation type 3 (limited)" "%LOG%" >nul || (echo ::error::The tests did not get a test account with a limited token: see the [ system ] lines& exit /b 1)
+          findstr /l /c:"[ system ] the tests stop: the test account may not use this session's named objects" "%LOG%" >nul && (echo ::error::The test account could not be let into this session's named objects, so the app's commands could not make their lock as it; the [ system ] lines show the directory's permissions and which step was refused& exit /b 1)
+          findstr /l /c:"[ system ] this session's named objects: permissions put back no" "%LOG%" >nul && echo ::warning::The test account's entry could not be taken out of this session's named objects' permissions again; the [ system ] lines show why
           findstr /l /c:"[ system ] nothing left" "%LOG%" >nul || (echo ::error::The system tests did not run to the end& exit /b 1)
           findstr /l /c:"[ system ] machine-install reported through the asking process's pipe: yes" "%LOG%" >nul || (echo ::error::The elevated step's report did not come back through the asking process's pipe& exit /b 1)
           findstr /l /c:"[ system ] machine-install got administrator rights through UAC: yes" "%LOG%" >nul || (echo ::error::The step for all users did not get administrator rights through UAC& exit /b 1)

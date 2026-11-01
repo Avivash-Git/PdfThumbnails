@@ -1,6 +1,6 @@
 // The pure decisions behind the process context and the commands (context.h, commands.h,
 // instance.h): registry virtualization verdicts, the refusal message, named-object descriptors
-// and names.
+// and names, and what a refused creation of a named mutex means.
 
 #include <windows.h>
 
@@ -266,6 +266,70 @@ TEST(NamedObjects, Names) {
   EXPECT_EQ(LogMutexName(L"S-1-2"), L"Local\\" + prefix + L".Log.S-1-2");
   EXPECT_EQ(AppMutexName(false), prefix + L"AppMutex");
   EXPECT_EQ(AppMutexName(true), L"Global\\" + prefix + L"AppMutex");
+}
+
+// CreateMutexW refuses with ERROR_ACCESS_DENIED both a mutex that another instance made with a
+// descriptor that keeps this process out and every name in a namespace that this process may not
+// create objects in; what opening the name and a probe in its namespace say tells them apart.
+TEST(NamedObjects, RefusedCreation) {
+  using enum RefusedMutex;
+  // It opened to be waited on: it exists, whatever a probe would say.
+  EXPECT_EQ(ClassifyRefusedMutex(ERROR_SUCCESS, std::nullopt), kExists);
+  EXPECT_EQ(ClassifyRefusedMutex(ERROR_SUCCESS, E_ACCESSDENIED), kExists);
+  // Not there, or not even to be waited on: the probe decides.
+  EXPECT_EQ(ClassifyRefusedMutex(ERROR_FILE_NOT_FOUND, std::nullopt), kProbe);
+  EXPECT_EQ(ClassifyRefusedMutex(ERROR_ACCESS_DENIED, std::nullopt), kProbe);
+  // The probe was refused too: this process may make nothing in that namespace. Not busy.
+  EXPECT_EQ(ClassifyRefusedMutex(ERROR_FILE_NOT_FOUND, E_ACCESSDENIED), kNamespaceClosed);
+  EXPECT_EQ(ClassifyRefusedMutex(ERROR_ACCESS_DENIED, E_ACCESSDENIED), kNamespaceClosed);
+  // The probe was made: the mutex refuses this process even waiting on it (another instance has
+  // it), or it went away between the two calls (create it again).
+  EXPECT_EQ(ClassifyRefusedMutex(ERROR_ACCESS_DENIED, S_OK), kExists);
+  EXPECT_EQ(ClassifyRefusedMutex(ERROR_FILE_NOT_FOUND, S_OK), kRetry);
+  // Anything else is a failure of its own, never taken for either answer.
+  EXPECT_EQ(ClassifyRefusedMutex(ERROR_INVALID_HANDLE, std::nullopt), kFailed);
+  EXPECT_EQ(ClassifyRefusedMutex(ERROR_PATH_NOT_FOUND, std::nullopt), kFailed);
+  EXPECT_EQ(ClassifyRefusedMutex(ERROR_INVALID_HANDLE, E_ACCESSDENIED), kFailed);
+  EXPECT_EQ(ClassifyRefusedMutex(ERROR_FILE_NOT_FOUND, E_OUTOFMEMORY), kFailed);
+  EXPECT_EQ(ClassifyRefusedMutex(ERROR_ACCESS_DENIED, HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)),
+            kFailed);
+}
+
+// The answer for a namespace closed to this process is a code of the app's own, so no Windows
+// call on the way can return it, and it is neither of the lock's busy answers.
+TEST(NamedObjects, RefusedIsACodeOfItsOwn) {
+  EXPECT_TRUE(FAILED(kNamedObjectsRefusedHr));
+  EXPECT_EQ(HRESULT_FACILITY(kNamedObjectsRefusedHr), FACILITY_ITF);
+  for (const HRESULT other : {E_ACCESSDENIED, OperationLock::kBusy,
+                              OperationLock::kTakenByLowerIntegrity, kNoAdministratorRightsHr}) {
+    EXPECT_NE(kNamedObjectsRefusedHr, other);
+  }
+}
+
+// What the commands say then: not that another check or change runs, nor to try again later.
+TEST(Commands, NamedObjectsRefusedIsNotBusy) {
+  const std::wstring message = NamedObjectsRefusedMessage();
+  EXPECT_EQ(message.rfind(L"Windows does not let this program create named objects", 0), 0u)
+      << message;
+  EXPECT_NE(message.find(L"changed nothing"), std::wstring::npos) << message;
+  EXPECT_EQ(message.find(L"Another check"), std::wstring::npos) << message;
+  EXPECT_EQ(message.find(L"try again"), std::wstring::npos) << message;
+  EXPECT_EQ(message.find(L"Cannot run here"), std::wstring::npos) << "that prefix is exit 8's";
+  // Another account in someone else's session is one cause among others (a low-integrity or
+  // sandboxed program meets it in its own session), so the message names it as an example.
+  EXPECT_NE(message.find(L"for example"), std::wstring::npos) << message;
+  EXPECT_NE(message.find(L"low integrity"), std::wstring::npos) << message;
+}
+
+// The settings executable says the same about its window, which it then does not open.
+TEST(Commands, WindowNamedObjectsRefusedSaysNoWindowOpens) {
+  const std::wstring message = WindowNamedObjectsRefusedMessage();
+  EXPECT_EQ(message.rfind(L"Windows does not let this program create named objects", 0), 0u)
+      << message;
+  EXPECT_NE(message.find(L"does not open it"), std::wstring::npos) << message;
+  EXPECT_EQ(message.find(L"Another"), std::wstring::npos) << message;
+  EXPECT_EQ(message.find(L"try again"), std::wstring::npos) << message;
+  EXPECT_NE(message.find(L"for example"), std::wstring::npos) << message;
 }
 
 }  // namespace

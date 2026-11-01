@@ -5,7 +5,8 @@
 //      Refuse an elevated process too (exit 8): the repairs are per-user, and an administrator
 //      process does not write into the user's profile (nor, elevated as another account, into
 //      the wrong one).
-//   2. Take the operation lock (at most 30 s; exit 4 when another check or change keeps it).
+//   2. Take the operation lock (at most 30 s; exit 4 when another check or change keeps it, 5
+//      when Windows does not let this process make it).
 //   3. Gather (snapshot.h), evaluate (evaluate.h); not installed: exit 6, nothing written.
 //   4. Plan and apply the per-user repairs (repair.h). The administrator step the plan names runs
 //      only for --fix (a launcher is given and the check is not quiet): through UAC, with the
@@ -69,8 +70,10 @@ struct CheckResult {
   bool refusedElevated = false;  // ... because this process is elevated, not because the
                                  // registry may be virtualized
   bool busy = false;             // exit 4: the lock stayed taken
-  bool lockAbandoned = false;    // the previous holder ended without releasing the lock
-  std::vector<Finding> before;   // what the first gathering found
+  // exit 5: Windows does not let this process make the lock (kNamedObjectsRefusedHr)
+  bool namedObjectsRefused = false;
+  bool lockAbandoned = false;   // the previous holder ended without releasing the lock
+  std::vector<Finding> before;  // what the first gathering found
   RepairPlan plan;
   std::vector<RepairOutcome> repairs;
   Snapshot after;                 // the state after the repairs (the first one if none ran)

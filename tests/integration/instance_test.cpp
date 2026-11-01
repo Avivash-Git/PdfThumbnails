@@ -30,14 +30,36 @@ std::wstring Sid() {
   return sid;
 }
 
-// A name of this test's own: Local\<prefix>.Test.<new GUID>.
-std::wstring TestMutexName() {
+// A new GUID as text ("{...}").
+std::wstring NewGuidText() {
   GUID guid = {};
   EXPECT_HRESULT_SUCCEEDED(CoCreateGuid(&guid));
   wchar_t text[40] = {};
   StringFromGUID2(guid, text, ARRAYSIZE(text));
-  return std::wstring(L"Local\\") + kObjectPrefix + L".Test." + text;
+  return text;
 }
+
+// A name of this test's own: Local\<prefix>.Test.<new GUID>.
+std::wstring TestMutexName() {
+  return std::wstring(L"Local\\") + kObjectPrefix + L".Test." + NewGuidText();
+}
+
+// Makes the mutex |name| with the descriptor |sddl|, as another instance would; *mutex keeps it
+// in existence. Use it with ASSERT_NO_FATAL_FAILURE.
+void MakeMutex(const std::wstring& name, const std::wstring& sddl, wil::unique_handle* mutex) {
+  PSECURITY_DESCRIPTOR raw = nullptr;
+  ASSERT_TRUE(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1,
+                                                                   &raw, nullptr))
+      << GetLastError();
+  wil::unique_hlocal freeDescriptor(raw);
+  SECURITY_ATTRIBUTES attributes = {sizeof(attributes), raw, FALSE};
+  mutex->reset(CreateMutexW(&attributes, FALSE, name.c_str()));
+  ASSERT_TRUE(*mutex) << GetLastError();
+}
+
+// Everything denied to the user |sid|, nothing allowed to anyone: not even Administrators may
+// open it, so this holds in an elevated test run too.
+std::wstring DenyingSddl(const std::wstring& sid) { return L"D:(D;;GA;;;" + sid + L")"; }
 
 // The child's arguments: |mode| and this run's suffix for the named objects.
 std::wstring ChildArguments(const wchar_t* mode) {
@@ -160,6 +182,21 @@ TEST(OperationLock, ProcessesBelowMediumCannotHoldIt) {
   EXPECT_EQ(child.Wait(30000), 0u);
 }
 
+// The lock's name made by someone else with a descriptor that refuses this user even waiting on
+// it: busy at once, as before, and never waited on.
+TEST(OperationLock, ANameThatRefusesThisUserIsBusyAtOnce) {
+  const std::wstring sid = Sid();
+  SuffixScope scope(test::NamedObjectSuffix() + L".denied");
+  wil::unique_handle other;
+  ASSERT_NO_FATAL_FAILURE(
+      MakeMutex(OperationLockName(sid), DenyingSddl(sid), std::addressof(other)));
+  std::optional<OperationLock> lock;
+  const ULONGLONG before = GetTickCount64();
+  EXPECT_EQ(OperationLock::Acquire(5000, &lock), OperationLock::kBusy);
+  EXPECT_LT(GetTickCount64() - before, 2000u);
+  EXPECT_FALSE(lock);
+}
+
 TEST(OperationLock, LivesInTheGlobalNamespace) {
   std::optional<OperationLock> lock;
   ASSERT_HRESULT_SUCCEEDED(OperationLock::Acquire(5000, &lock));
@@ -212,6 +249,71 @@ TEST(NamedObjects, AccessDeniedMeansHeldByAnother) {
   ASSERT_HRESULT_SUCCEEDED(CreateNamedMutex(name, sid, false, 0, std::addressof(none), &existed));
   EXPECT_TRUE(existed);
   EXPECT_FALSE(none);
+}
+
+// Another instance made the mutex with a descriptor that refuses this user even waiting on it:
+// opening it is refused too, but a probe in its namespace shows that this process may create
+// objects there, so the mutex exists and someone else has it, with a fallback access or without.
+TEST(NamedObjects, AMutexThatRefusesEvenWaitingIsHeldByAnother) {
+  const std::wstring sid = Sid();
+  const std::wstring name = TestMutexName();
+  wil::unique_handle other;
+  ASSERT_NO_FATAL_FAILURE(MakeMutex(name, DenyingSddl(sid), std::addressof(other)));
+  for (const DWORD fallback : {DWORD{SYNCHRONIZE}, DWORD{0}}) {
+    wil::unique_handle mutex;
+    bool existed = false;
+    EXPECT_HRESULT_SUCCEEDED(
+        CreateNamedMutex(name, sid, false, fallback, std::addressof(mutex), &existed))
+        << fallback;
+    EXPECT_TRUE(existed) << fallback;
+    EXPECT_FALSE(mutex) << fallback;
+  }
+}
+
+// A private namespace of this test's own that lets this user look names up in it but not create
+// anything there, which is what a session's named objects are to a program that another account
+// runs in that session: Windows refuses the creation and the name is not there, so nobody has
+// the mutex and nothing would ever let go of it. Not "another instance has it".
+//
+// This covers a refused creation, a name not found and a refused probe. When kernel32 cannot
+// open the session's directory at all, opening the name is refused too; no test here can make
+// that happen without changing the session's own permissions, so only the classification's
+// table (unit tests) and the system tests' runs cover it. The tests of a mutex whose descriptor
+// refuses this user (the two before this one) pass with the earlier "refused means busy" code
+// too: they guard that answer.
+TEST(NamedObjects, ANamespaceThatRefusesCreatingIsNotHeldByAnother) {
+  const std::wstring sid = Sid();
+  PSID user = nullptr;
+  ASSERT_TRUE(ConvertStringSidToSidW(sid.c_str(), &user)) << GetLastError();
+  wil::unique_hlocal freeUser(user);
+  // The boundary: a name of this run's own, with this user in it (its creator must be).
+  const std::wstring unique = L"pdft-test-" + NewGuidText();
+  HANDLE boundary = CreateBoundaryDescriptorW(unique.c_str(), 0);
+  ASSERT_NE(boundary, nullptr) << GetLastError();
+  const auto deleteBoundary = wil::scope_exit([&boundary] { DeleteBoundaryDescriptor(boundary); });
+  ASSERT_TRUE(AddSIDToBoundaryDescriptor(&boundary, user)) << GetLastError();
+  // DIRECTORY_QUERY | DIRECTORY_TRAVERSE for this user, nothing for anyone else.
+  PSECURITY_DESCRIPTOR raw = nullptr;
+  ASSERT_TRUE(ConvertStringSecurityDescriptorToSecurityDescriptorW(
+      (L"D:(A;;0x3;;;" + sid + L")").c_str(), SDDL_REVISION_1, &raw, nullptr))
+      << GetLastError();
+  wil::unique_hlocal freeDescriptor(raw);
+  SECURITY_ATTRIBUTES attributes = {sizeof(attributes), raw, FALSE};
+  HANDLE closed = CreatePrivateNamespaceW(&attributes, boundary, unique.c_str());
+  ASSERT_NE(closed, nullptr) << GetLastError();
+  const auto destroy =
+      wil::scope_exit([closed] { ClosePrivateNamespace(closed, PRIVATE_NAMESPACE_FLAG_DESTROY); });
+
+  const std::wstring name = unique + L"\\" + kObjectPrefix + L".Test";
+  for (const DWORD fallback : {DWORD{SYNCHRONIZE}, DWORD{0}}) {
+    wil::unique_handle mutex;
+    bool existed = true;
+    EXPECT_EQ(CreateNamedMutex(name, sid, false, fallback, std::addressof(mutex), &existed),
+              kNamedObjectsRefusedHr)
+        << fallback;
+    EXPECT_FALSE(existed) << fallback;
+    EXPECT_FALSE(mutex) << fallback;
+  }
 }
 
 TEST(NamedObjects, DescriptorGrantsTheUserAndCarriesAMediumLabel) {

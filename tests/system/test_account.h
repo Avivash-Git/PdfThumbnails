@@ -40,9 +40,10 @@ class TestAccount {
  public:
   TestAccount(const TestAccount&) = delete;
   TestAccount& operator=(const TestAccount&) = delete;
-  // Puts the window station's and desktop's permissions back, ends what still runs as the
-  // account, unloads its profile, logs it off (closes its tokens), deletes the account and its
-  // profile, and prints what it did (its name and SID, never the password).
+  // Ends what still runs as the account, takes its entries out of the permissions of the window
+  // station, the desktop and this session's named objects again, unloads its profile, logs it off
+  // (closes its tokens), deletes the account and its profile, and prints what it did (its name and
+  // SID, never the password).
   ~TestAccount();
 
   // Makes the account where WhyNoTestAccountHere allows it, after removing the test accounts
@@ -50,9 +51,9 @@ class TestAccount {
   // password, a
   // member of Administrators (the group named by its well-known SID), logged on interactively
   // (LogonUserW), its profile loaded (LoadUserProfileW) and its environment built
-  // (CreateEnvironmentBlock); lets it use this process's window station and desktop. nullptr
-  // with |error| set when a step failed (never with the password); what was made by then is
-  // removed again.
+  // (CreateEnvironmentBlock); lets it use this process's window station and desktop, and this
+  // session's named objects (namedObjects()). nullptr with |error| set when a step failed (never
+  // with the password); what was made by then is removed again.
   static std::unique_ptr<TestAccount> Create(std::string* error);
 
   const std::wstring& name() const { return name_; }
@@ -67,6 +68,14 @@ class TestAccount {
   const std::filesystem::path& profileDir() const { return profileDir_; }
   // <its %LOCALAPPDATA%>\Temp: where the tests put what the account must read.
   const std::filesystem::path& tempDir() const { return tempDir_; }
+  // Whether its programs may make named objects as Windows makes them for a program: S_OK, or why
+  // not. That needs this session's \Sessions\<id>\BaseNamedObjects (every "Local\" name is made
+  // there, and every name, "Global\" ones too, is looked up through it) and \BaseNamedObjects
+  // (where "Global\" names are made). The session's own sign-in has the first;
+  // CreateProcessWithTokenW grants nothing there, and without it none of the app's named objects
+  // can be made, the operation lock included. Create grants it when it is missing, except in
+  // session 0, whose directory is the whole machine's; it never changes \BaseNamedObjects.
+  HRESULT namedObjects() const { return namedObjects_; }
   // Its hive, SID and the product's per-user install and data folders in its profile.
   UserPlaces Places() const;
 
@@ -84,6 +93,8 @@ class TestAccount {
   HRESULT LogOnAndLoad(std::wstring* password, std::string* error);
   void AllowDesktop();
   void RestoreDesktop() noexcept;
+  void AllowNamedObjects();
+  void RestoreNamedObjects() noexcept;
   void EndItsProcesses() noexcept;
 
   std::wstring name_;
@@ -100,11 +111,17 @@ class TestAccount {
   std::filesystem::path userRoot_;
   std::filesystem::path dataDir_;
   std::filesystem::path tempDir_;
-  // This process's window station and desktop with the permissions they had, to put back.
+  // This process's window station and desktop, and whether the account's entry was added to
+  // their permissions (to take away again).
   wil::unique_hwinsta station_;
-  wil::unique_hlocal_security_descriptor stationWas_;
+  bool stationGranted_ = false;
   wil::unique_hdesk desktop_;
-  wil::unique_hlocal_security_descriptor desktopWas_;
+  bool desktopGranted_ = false;
+  // This session's named objects directory and the SID whose entry was added to its permissions
+  // (the account's or its logon's), to take away again; both empty when nothing was added there.
+  wil::unique_handle namedObjectsDirectory_;
+  std::vector<BYTE> namedObjectsGrantee_;
+  HRESULT namedObjects_ = E_FAIL;
 };
 
 // The test account of this run (main.cpp sets it for the time the tests run); nullptr when there

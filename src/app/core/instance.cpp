@@ -1,16 +1,21 @@
 #include "instance.h"
 
 #include <aclapi.h>
+#include <objbase.h>
 #include <sddl.h>
 #include <wil/result_macros.h>
 
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "project_config.h"
 
 namespace pdft {
 namespace {
+
+// How often CreateNamedMutex creates a name again that was gone after a refused creation.
+constexpr int kCreateAttempts = 3;
 
 // Appended to every object name (SetObjectNameSuffixForTesting); empty outside tests. Created
 // on first use, not before main.
@@ -18,6 +23,34 @@ std::wstring& NameSuffix() {
   static std::wstring suffix;
   return suffix;
 }
+
+// The namespace |name| is in, as its prefix up to and with its last backslash ("Global\",
+// "Local\"); empty for a name without one, which is in this session's own namespace.
+std::wstring_view NamespaceOf(std::wstring_view name) noexcept {
+  const size_t slash = name.rfind(L'\\');
+  return slash == std::wstring_view::npos ? std::wstring_view() : name.substr(0, slash + 1);
+}
+
+// Creates a mutex of a new name nobody can have guessed in the namespace |prefix| (NamespaceOf),
+// with the same |attributes| as the mutex whose creation was refused, so that it asks Windows the
+// same question but for the name, and closes it again: S_OK when it was made, E_ACCESSDENIED
+// when this process may not create such a mutex there.
+HRESULT ProbeNamespace(std::wstring_view prefix, SECURITY_ATTRIBUTES* attributes) noexcept try {
+  // A name that exists all the same proves nothing about creating: another one then.
+  for (int attempt = 0; attempt < kCreateAttempts; ++attempt) {
+    GUID guid = {};
+    RETURN_IF_FAILED(CoCreateGuid(&guid));
+    wchar_t text[40] = {};
+    RETURN_HR_IF(E_UNEXPECTED, StringFromGUID2(guid, text, ARRAYSIZE(text)) == 0);
+    const std::wstring name = std::wstring(prefix) + kObjectPrefix + L".Probe." + text;
+    const wil::unique_handle probe(CreateMutexExW(attributes, name.c_str(), 0, SYNCHRONIZE));
+    const DWORD error = GetLastError();
+    if (!probe) return HRESULT_FROM_WIN32(error);
+    if (error != ERROR_ALREADY_EXISTS) return S_OK;
+  }
+  RETURN_WIN32(ERROR_ALREADY_EXISTS);
+}
+CATCH_RETURN();
 
 // Whether the object's integrity label is below Medium. An object without a label counts as
 // Medium, as Windows treats it.
@@ -97,6 +130,19 @@ std::wstring AppMutexName(bool global) {
   return std::wstring(global ? L"Global\\" : L"") + kObjectPrefix + L"AppMutex" + NameSuffix();
 }
 
+RefusedMutex ClassifyRefusedMutex(DWORD openError, std::optional<HRESULT> probe) noexcept {
+  if (openError == ERROR_SUCCESS) return RefusedMutex::kExists;
+  if (openError != ERROR_FILE_NOT_FOUND && openError != ERROR_ACCESS_DENIED) {
+    return RefusedMutex::kFailed;
+  }
+  // Not there, or not even to be waited on: whether this process may create anything in that
+  // namespace decides.
+  if (!probe) return RefusedMutex::kProbe;
+  if (*probe == E_ACCESSDENIED) return RefusedMutex::kNamespaceClosed;
+  if (FAILED(*probe)) return RefusedMutex::kFailed;
+  return openError == ERROR_ACCESS_DENIED ? RefusedMutex::kExists : RefusedMutex::kRetry;
+}
+
 HRESULT CreateNamedMutex(std::wstring_view name, std::wstring_view userSid,
                          bool everyoneSynchronize, DWORD fallbackAccess, wil::unique_handle* mutex,
                          bool* existed) noexcept try {
@@ -108,19 +154,47 @@ HRESULT CreateNamedMutex(std::wstring_view name, std::wstring_view userSid,
       nullptr));
   SECURITY_ATTRIBUTES attributes = {sizeof(attributes), descriptor.get(), FALSE};
   const std::wstring nameText(name);
-  HANDLE handle = CreateMutexW(&attributes, FALSE, nameText.c_str());
-  const DWORD error = GetLastError();
-  if (handle) {
-    mutex->reset(handle);
-    *existed = error == ERROR_ALREADY_EXISTS;
-    return S_OK;
+  for (int attempt = 0; attempt < kCreateAttempts; ++attempt) {
+    HANDLE handle = CreateMutexW(&attributes, FALSE, nameText.c_str());
+    const DWORD error = GetLastError();
+    if (handle) {
+      mutex->reset(handle);
+      *existed = error == ERROR_ALREADY_EXISTS;
+      return S_OK;
+    }
+    RETURN_HR_IF(HRESULT_FROM_WIN32(error), error != ERROR_ACCESS_DENIED);
+    // Refused: the mutex exists, made by a process whose descriptor does not let this one open
+    // it with full access (another instance has it), or this process may not create named
+    // objects in this namespace at all. Opening it, and where that says nothing a probe, tells.
+    wil::unique_handle opened(
+        OpenMutexW(fallbackAccess ? fallbackAccess : SYNCHRONIZE, FALSE, nameText.c_str()));
+    const DWORD openError = opened ? ERROR_SUCCESS : GetLastError();
+    std::optional<HRESULT> probe;
+    RefusedMutex meaning = ClassifyRefusedMutex(openError, probe);
+    if (meaning == RefusedMutex::kProbe) {
+      probe = ProbeNamespace(NamespaceOf(name), &attributes);
+      meaning = ClassifyRefusedMutex(openError, probe);
+    }
+    switch (meaning) {
+      case RefusedMutex::kExists:
+        *existed = true;
+        if (fallbackAccess) *mutex = std::move(opened);
+        return S_OK;
+      case RefusedMutex::kNamespaceClosed:
+        // An answer, not a failure of this function: the callers say so, WIL does not log it.
+        return kNamedObjectsRefusedHr;
+      case RefusedMutex::kFailed:
+        RETURN_HR(probe && FAILED(*probe) ? *probe : HRESULT_FROM_WIN32(openError));
+      case RefusedMutex::kRetry:
+      case RefusedMutex::kProbe:
+        break;
+    }
   }
-  // Access denied: the mutex exists, created by a process whose descriptor does not let this
-  // one open it with full access. That is still "another instance has it".
-  RETURN_HR_IF(HRESULT_FROM_WIN32(error), error != ERROR_ACCESS_DENIED);
-  *existed = true;
-  if (fallbackAccess) mutex->reset(OpenMutexW(fallbackAccess, FALSE, nameText.c_str()));
-  return S_OK;
+  // Refused each time, though a probe could be made, and gone again at each open after it. Some
+  // other process may keep making and closing the name, or the name leads somewhere the probe's
+  // does not (an object manager link): either way nothing shows that another instance has the
+  // mutex, so this is a failure (logged), not "busy".
+  RETURN_WIN32(ERROR_ACCESS_DENIED);
 }
 CATCH_RETURN();
 
@@ -128,8 +202,10 @@ HRESULT TakeSingleInstance(std::wstring_view userSid, wil::unique_handle* mutex,
                            bool* first) noexcept try {
   *first = false;
   bool existed = false;
-  RETURN_IF_FAILED(CreateNamedMutex(SettingsInstanceMutexName(userSid), userSid, false, SYNCHRONIZE,
-                                    mutex, &existed));
+  const HRESULT made = CreateNamedMutex(SettingsInstanceMutexName(userSid), userSid, false,
+                                        SYNCHRONIZE, mutex, &existed);
+  if (made == kNamedObjectsRefusedHr) return made;  // the caller says so (not a WIL failure)
+  RETURN_IF_FAILED(made);
   *first = !existed;
   return S_OK;
 }
@@ -160,8 +236,12 @@ HRESULT OperationLock::Acquire(DWORD waitMs, std::optional<OperationLock>* lock)
   RETURN_IF_FAILED(GetCurrentUserSid(&sid));
   wil::unique_handle mutex;
   bool existed = false;
-  RETURN_IF_FAILED(
-      CreateNamedMutex(OperationLockName(sid), sid, false, 0, std::addressof(mutex), &existed));
+  const HRESULT made =
+      CreateNamedMutex(OperationLockName(sid), sid, false, 0, std::addressof(mutex), &existed);
+  // Not busy: there is no holder to wait for, and waiting would not let this process make the
+  // lock. The callers say so (not a WIL failure).
+  if (made == kNamedObjectsRefusedHr) return made;
+  RETURN_IF_FAILED(made);
   // It exists, but this process may not wait on it: whoever made it keeps everyone else out.
   if (!mutex) return kBusy;
   if (existed) {

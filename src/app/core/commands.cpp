@@ -40,6 +40,29 @@ namespace {
 
 constexpr int Code(ExitCode code) { return static_cast<int>(code); }
 
+constexpr wchar_t kBusyMessage[] =
+    L"Another check or change is running and did not finish within 30 seconds; try again later.";
+
+// What the messages for kNamedObjectsRefusedHr give as the likely causes.
+constexpr wchar_t kNamedObjectsRefusedCauses[] =
+    L"This happens, for example, to a program started as another account inside someone else's "
+    L"session (run it as the account signed in to that session), or to one running at low "
+    L"integrity, in a sandbox or with a restricted token.";
+
+// Says why a command did not get the operation lock, if it did not: another process kept it
+// (|busy|, exit 4), or Windows does not let this process make it (|namedObjectsRefused|, exit 5).
+// True when it said so.
+bool ReportLockNotTaken(bool busy, bool namedObjectsRefused, Output& out) {
+  if (busy) {
+    out.Error(kBusyMessage);
+  } else if (namedObjectsRefused) {
+    out.Error(NamedObjectsRefusedMessage());
+  } else {
+    return false;
+  }
+  return true;
+}
+
 // The log's word for a command: its name without the dashes ("zoom"); "window" without one.
 std::wstring Component(const CliArgs& args) {
   if (args.verb == Verb::kNone) return L"window";
@@ -97,10 +120,20 @@ HRESULT StartSettingsExecutable() noexcept try {
 CATCH_RETURN();
 
 // The settings executable without a command: one window per user.
-int OpenSettingsWindow(const ProcessContext& context, OpenWindowFn openWindow) {
+int OpenSettingsWindow(const ProcessContext& context, OpenWindowFn openWindow, Output& out) {
   wil::unique_handle instance;
   bool first = false;
-  if (FAILED(TakeSingleInstance(context.userSid, std::addressof(instance), &first))) {
+  if (const HRESULT hr = TakeSingleInstance(context.userSid, std::addressof(instance), &first);
+      FAILED(hr)) {
+    // WIL logs other failures.
+    if (hr == kNamedObjectsRefusedHr) {
+      Log(LogLevel::kWarning, L"window",
+          L"window result=failed named-objects-refused hr=" + HResultText(kNamedObjectsRefusedHr));
+      // Someone asked for the window: say on screen why none opens.
+      const std::wstring message = WindowNamedObjectsRefusedMessage();
+      out.Error(message);
+      MessageBoxW(nullptr, message.c_str(), kProductName, MB_OK | MB_ICONERROR);
+    }
     return Code(ExitCode::kFailed);
   }
   // Another window is open. Bringing it to the front comes with the window itself.
@@ -224,12 +257,7 @@ int ReportCheck(HRESULT hr, const CheckResult& result, const ProcessContext& con
     out.Error(result.refusedElevated ? ElevatedRefusalMessage() : CannotRunHereMessage(context));
     return Code(result.code);
   }
-  if (result.busy) {
-    out.Error(
-        L"Another check or change is running and did not finish within 30 seconds; try again "
-        L"later.");
-    return Code(result.code);
-  }
+  if (ReportLockNotTaken(result.busy, result.namedObjectsRefused, out)) return Code(result.code);
   if (quiet) return Code(result.code);
   for (const RepairOutcome& outcome : result.repairs) out.Line(RepairOutcomeText(outcome));
   if (result.elevated) PrintElevatedRun(*result.elevated, L"The administrator step", out);
@@ -328,12 +356,7 @@ int RunChecksCommand(const CliArgs& args, const ProcessContext& context, Output&
     out.Error(ChecksElevatedRefusalMessage());
     return Code(result.code);
   }
-  if (result.busy) {
-    out.Error(
-        L"Another check or change is running and did not finish within 30 seconds; try again "
-        L"later.");
-    return Code(result.code);
-  }
+  if (ReportLockNotTaken(result.busy, result.namedObjectsRefused, out)) return Code(result.code);
   const ScheduleReport report = ScheduleResultReport(result);
   for (const std::wstring& line : report.out) out.Line(line);
   if (!report.error.empty()) out.Error(report.error);
@@ -341,9 +364,6 @@ int RunChecksCommand(const CliArgs& args, const ProcessContext& context, Output&
 }
 
 // ---- The installer's steps and the 1.x clean-up --------------------------------------------
-
-constexpr wchar_t kBusyMessage[] =
-    L"Another check or change is running and did not finish within 30 seconds; try again later.";
 
 // What a refused per-user step says, and its exit code.
 int ReportSetupRefusal(SetupRefusal refusal, std::wstring_view command,
@@ -393,10 +413,7 @@ int RunSetupUserCommand(const CliArgs& args, const ProcessContext& context, Outp
   if (result.refusal != SetupRefusal::kNone) {
     return ReportSetupRefusal(result.refusal, Describe(args.verb).name, context, out);
   }
-  if (result.busy) {
-    out.Error(kBusyMessage);
-    return Code(result.code);
-  }
+  if (ReportLockNotTaken(result.busy, result.namedObjectsRefused, out)) return Code(result.code);
   // Quiet when everything went: it runs at sign-in.
   PrintFailures(result.failures, out);
   return Code(result.code);
@@ -412,10 +429,7 @@ int RunSetupMachineCommand(const CliArgs& args, const ProcessContext& context, O
   if (result.refusal != SetupRefusal::kNone) {
     return ReportSetupRefusal(result.refusal, Describe(args.verb).name, context, out);
   }
-  if (result.busy) {
-    out.Error(kBusyMessage);
-    return Code(result.code);
-  }
+  if (ReportLockNotTaken(result.busy, result.namedObjectsRefused, out)) return Code(result.code);
   PrintFailures(result.failures, out);
   if (result.v1.restartPending || result.old.restartPending) {
     out.Line(L"Some old files are in use; Windows deletes them at the next restart.");
@@ -489,10 +503,7 @@ int RunMigrateV1Command(const CliArgs& args, const ProcessContext& context, Outp
   if (result.refusal != SetupRefusal::kNone) {
     return ReportSetupRefusal(result.refusal, Describe(args.verb).name, context, out);
   }
-  if (result.busy) {
-    out.Error(kBusyMessage);
-    return Code(result.code);
-  }
+  if (ReportLockNotTaken(result.busy, result.namedObjectsRefused, out)) return Code(result.code);
   if (result.userPart) PrintUserMigration(result.user, out);
   if (result.machineNoInstall) {
     out.Line(L"1.x's files for all users stay until " + std::wstring(kProductName) +
@@ -554,10 +565,7 @@ int RunInstallCommand(const CliArgs& args, const ProcessContext& context, Output
     }
     return Code(result.code);
   }
-  if (result.busy) {
-    out.Error(kBusyMessage);
-    return Code(result.code);
-  }
+  if (ReportLockNotTaken(result.busy, result.namedObjectsRefused, out)) return Code(result.code);
   if (result.switchedToMachine) {
     out.Line(std::wstring(kProductName) +
              L" is installed for all users, so this updates the install for all users (one "
@@ -635,10 +643,7 @@ int RunUninstallCommand(const CliArgs& args, const ProcessContext& context, Outp
     case UninstallRefusal::kNone:
       break;
   }
-  if (result.busy) {
-    out.Error(kBusyMessage);
-    return Code(result.code);
-  }
+  if (ReportLockNotTaken(result.busy, result.namedObjectsRefused, out)) return Code(result.code);
   if (result.inno) {
     if (SUCCEEDED(result.innoRun)) {
       out.Line(std::wstring(kProductName) +
@@ -693,6 +698,12 @@ int RunZoomCommand(const CliArgs& args, const ProcessContext& context, Output& o
   if (locked == OperationLock::kBusy || locked == OperationLock::kTakenByLowerIntegrity) {
     out.Error(kBusyMessage);
     return Code(ExitCode::kBusy);
+  }
+  if (locked == kNamedObjectsRefusedHr) {
+    Log(LogLevel::kWarning, L"zoom",
+        L"zoom result=failed named-objects-refused hr=" + HResultText(kNamedObjectsRefusedHr));
+    out.Error(NamedObjectsRefusedMessage());
+    return Code(ExitCode::kFailed);
   }
   if (FAILED(locked)) {
     out.Error(L"Cannot save the zoom: " + HResultText(locked));
@@ -943,6 +954,21 @@ std::wstring NoAdministratorRightsMessage() {
          L"them), so it changed nothing.";
 }
 
+std::wstring NamedObjectsRefusedMessage() {
+  return std::wstring(
+             L"Windows does not let this program create named objects here, so it "
+             L"cannot take the lock that lets only one check or change run at a time; "
+             L"it changed nothing. ") +
+         kNamedObjectsRefusedCauses;
+}
+
+std::wstring WindowNamedObjectsRefusedMessage() {
+  return std::wstring(
+             L"Windows does not let this program create named objects here, so it "
+             L"cannot tell whether its window is open already and does not open it. ") +
+         kNamedObjectsRefusedCauses;
+}
+
 std::vector<std::wstring> UninstallReport(const UninstallResult& result) {
   std::vector<std::wstring> lines;
   const std::wstring product = kProductName;
@@ -1140,12 +1166,17 @@ int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWin
   // An elevated process logs nothing (ShouldLog); its Log() calls then write nothing.
   if (ShouldLog(context)) EnableLog();
   AppMutexes appMutexes;
-  (void)appMutexes.Hold(context.userSid);  // best effort; WIL logs a failure
+  // Best effort: WIL logs a failure, and the line below a namespace closed to this process.
+  const HRESULT held = appMutexes.Hold(context.userSid);
   Log(LogLevel::kInfo, component, StartMessage(mode, context));
+  if (held == kNamedObjectsRefusedHr) {
+    Log(LogLevel::kWarning, component,
+        L"installer mutexes not held: named-objects-refused hr=" + HResultText(held));
+  }
   int code = Code(ExitCode::kFailed);
   switch (args.verb) {
     case Verb::kNone:
-      code = OpenSettingsWindow(context, openWindow);
+      code = OpenSettingsWindow(context, openWindow, out);
       break;
     case Verb::kStatus:
       code = RunStatus(args, context, out);

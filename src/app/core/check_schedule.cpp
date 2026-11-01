@@ -67,6 +67,13 @@ HRESULT ChangeCheckSchedule(const ScheduleOptions& options, const RegistryRoots&
                                        : L"checks result=busy lock-taken-by-lower-integrity");
     return S_OK;
   }
+  if (locked == kNamedObjectsRefusedHr) {
+    result->namedObjectsRefused = true;
+    result->code = ExitCode::kFailed;
+    Log(LogLevel::kWarning, kLogComponent,
+        L"checks result=failed named-objects-refused hr=" + HResultText(kNamedObjectsRefusedHr));
+    return S_OK;
+  }
   RETURN_IF_FAILED(locked);
 
   GatherOptions gather;

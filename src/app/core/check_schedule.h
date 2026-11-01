@@ -5,7 +5,8 @@
 //      every command that writes, and in an elevated process (exit 8): the task belongs to the
 //      signed-in user and runs with their own rights, and an elevated process may not even be
 //      that user.
-//   2. Take the operation lock (at most 30 s; exit 4 when another check or change keeps it).
+//   2. Take the operation lock (at most 30 s; exit 4 when another check or change keeps it, 5
+//      when Windows does not let this process make it).
 //   3. Gather the state, without the Explorer test. Not installed: exit 6, nothing changed.
 //   4. Registering needs the installed settings executable (InstalledSettingsExe): an install
 //      without it, such as a 1.x build, exits 6 and the task is left as it is, so a task never
@@ -55,6 +56,8 @@ struct ScheduleResult {
   ExitCode code = ExitCode::kFailed;
   ScheduleRefusal refusal = ScheduleRefusal::kNone;
   bool busy = false;  // exit 4: the lock stayed taken
+  // exit 5: Windows does not let this process make the lock (kNamedObjectsRefusedHr)
+  bool namedObjectsRefused = false;
   ProcessContext context;
   Snapshot before;                  // the state gathered first (empty when refused or busy)
   bool askedAfterPdfCraft = false;  // the checkboxes asked for

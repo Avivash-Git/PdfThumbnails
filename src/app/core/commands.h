@@ -116,9 +116,18 @@ std::wstring UninstallElevatedRefusalMessage();
 // (pure). Not the line of a declined prompt (exit 3).
 std::wstring NoAdministratorRightsMessage();
 
-// What --uninstall prints after it ran (pure; not for a refusal, a busy lock or the installer's
-// uninstaller): the thumbnail rebuild it cannot do, the part for all users, files left for the
-// next sign-in, and the result. May throw std::bad_alloc.
+// What a command that takes the operation lock says when Windows does not let this process make
+// it (kNamedObjectsRefusedHr; exit 5), instead of the line for a lock another check or change
+// keeps (exit 4): nothing is running, and trying again later does not help (pure).
+std::wstring NamedObjectsRefusedMessage();
+
+// What the settings executable says, on screen too, when kNamedObjectsRefusedHr keeps it from
+// taking its single-instance mutex, so it opens no window (exit 5) (pure).
+std::wstring WindowNamedObjectsRefusedMessage();
+
+// What --uninstall prints after it ran (pure; not for a refusal, a lock it did not get or the
+// installer's uninstaller): the thumbnail rebuild it cannot do, the part for all users, files left
+// for the next sign-in, and the result. May throw std::bad_alloc.
 std::vector<std::wstring> UninstallReport(const UninstallResult& result);
 
 // "Zoom: 130 % (saved setting)", "(1.x's settings.ini)" or "(default)" (pure). May throw

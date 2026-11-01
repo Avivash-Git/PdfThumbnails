@@ -5,7 +5,8 @@
 //   refused where the registry may be virtualized (8) and in an elevated process (8: the
 //   per-user part must run as the signed-in user); while the installer (Inno Setup) has an
 //   install here, its own uninstaller runs instead (silently with --yes), so its records stay
-//   right; the operation lock (4); nothing of the product here: 6. Then
+//   right; the operation lock (4; 5 when Windows does not let this process make it); nothing of
+//   the product here: 6. Then
 //   1. the per-user part: the .pdf slots that name the handler (and the keys above them left
 //      empty), the per-user class, the check task and 1.x's, HKCU\<product key>; Explorer is told;
 //   2. the part for all users, when the class for all users or the install folder for all users
@@ -179,6 +180,8 @@ struct UninstallResult {
   ExitCode code = ExitCode::kFailed;
   UninstallRefusal refusal = UninstallRefusal::kNone;
   bool busy = false;
+  // exit 5: Windows does not let this process make the lock (kNamedObjectsRefusedHr)
+  bool namedObjectsRefused = false;
   std::optional<InnoInstall> inno;  // the installer's install: its uninstaller ran instead
   HRESULT innoRun = S_OK;
   DWORD innoExit = 0;

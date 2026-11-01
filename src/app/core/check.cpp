@@ -142,6 +142,13 @@ HRESULT RunCheck(const CheckOptions& options, const RegistryRoots& roots,
                                     : L"check result=busy lock-taken-by-lower-integrity");
     return S_OK;
   }
+  if (locked == kNamedObjectsRefusedHr) {
+    result->namedObjectsRefused = true;
+    result->code = ExitCode::kFailed;
+    LogLine(LogLevel::kWarning,
+            L"check result=failed named-objects-refused hr=" + HResultText(kNamedObjectsRefusedHr));
+    return S_OK;
+  }
   RETURN_IF_FAILED(locked);
   result->lockAbandoned = lock->abandoned();
 

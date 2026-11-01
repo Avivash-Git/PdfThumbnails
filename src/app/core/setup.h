@@ -4,8 +4,8 @@
 // --setup-user (the installer's per-user step, also the end of a developer install), quiet, fast
 // (no Explorer test) and safe to repeat:
 //   refused where the registry may be virtualized (8) and in an elevated process (8: everything
-//   here is the signed-in user's own); the operation lock (4); an installed program to set up
-//   for (6); then
+//   here is the signed-in user's own); the operation lock (4; 5 when Windows does not let this
+//   process make it); an installed program to set up for (6); then
 //   1. the sign-in clean-up values (RunOnce) go: 1.x's would delete the per-user folder;
 //   2. the zoom: --zoom if given; else the value there is kept; else 1.x's settings.ini value;
 //      else 100;
@@ -21,9 +21,9 @@
 //   Exit 0, or 5 when a step failed (the others still ran).
 //
 // --setup-machine (the installer's step for all users; run elevated): refused unless elevated
-// (7) and inside or below an app package (8); the operation lock (4); then the shared task folder
-// (EnsureTaskFolder), the machine part of the 1.x clean-up and the old 2.x builds. Exit 0, 1 when
-// files wait for a restart, 5 when a step failed.
+// (7) and inside or below an app package (8); the operation lock (4, or 5 as above); then the
+// shared task folder (EnsureTaskFolder), the machine part of the 1.x clean-up and the old 2.x
+// builds. Exit 0, 1 when files wait for a restart, 5 when a step failed.
 //
 // --migrate-v1 [--user-only | --machine-only]: refused like --setup-user; needs an installed
 // program (6), and leaves 1.x as it is without one. The user part runs here; the machine part, when
@@ -84,6 +84,8 @@ struct SetupUserResult {
   ExitCode code = ExitCode::kFailed;
   SetupRefusal refusal = SetupRefusal::kNone;
   bool busy = false;
+  // exit 5: Windows does not let this process make the lock (kNamedObjectsRefusedHr)
+  bool namedObjectsRefused = false;
   Snapshot before;
   size_t runOnceDeleted = 0;
   std::optional<int> zoomWritten;
@@ -127,6 +129,8 @@ struct SetupMachineResult {
   ExitCode code = ExitCode::kFailed;
   SetupRefusal refusal = SetupRefusal::kNone;
   bool busy = false;
+  // exit 5: Windows does not let this process make the lock (kNamedObjectsRefusedHr)
+  bool namedObjectsRefused = false;
   HRESULT taskFolder = S_OK;  // EnsureTaskFolder's answer
   MachineRemoval v1;          // 1.x's build folders
   MachineRemoval old;         // old 2.x builds
@@ -153,6 +157,8 @@ struct MigrateResult {
   ExitCode code = ExitCode::kFailed;
   SetupRefusal refusal = SetupRefusal::kNone;
   bool busy = false;
+  // exit 5: Windows does not let this process make the lock (kNamedObjectsRefusedHr)
+  bool namedObjectsRefused = false;
   Snapshot before;
   bool userPart = false;  // ran
   V1UserResult user;

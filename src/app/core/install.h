@@ -14,7 +14,7 @@
 //      for a folder that is not a build of this version for this Windows (8), and for a folder
 //      that other accounts could change (8: an administrator would copy and register what they
 //      put there; for --user, this user's thumbnail process and sign-in task would run it);
-//   2. the operation lock (4);
+//   2. the operation lock (4; 5 when Windows does not let this process make it);
 //   3. this session's thumbnail processes that hold an old build's DLLs are ended (only Windows'
 //      own dllhost.exe of this user), so the old builds can go and the new one loads;
 //   4. the administrator step machine-install through UAC (declined: 3; started without
@@ -220,6 +220,8 @@ struct InstallResult {
   ExitCode code = ExitCode::kFailed;
   InstallRefusal refusal = InstallRefusal::kNone;
   bool busy = false;
+  // exit 5: Windows does not let this process make the lock (kNamedObjectsRefusedHr)
+  bool namedObjectsRefused = false;
   std::optional<InnoInstall> inno;
   SourceCheck sourceCheck;
   std::optional<UnsafeAccess> unsafe;

@@ -6,7 +6,9 @@
 // hive, and nothing of 1.x or 2.x is on this PC, which the tests would change or remove.
 // Otherwise it changes nothing and exits 77 (CTest's "skipped"), or 3 where the product is
 // installed. Only then does it make the account (after removing any an earlier run that was
-// ended from outside left), and it removes the account again however the tests end.
+// ended from outside left), and it removes the account again however the tests end. They stop
+// before the first test when the account's programs could not make named objects in this session
+// (TestAccount::namedObjects).
 
 #include <windows.h>
 
@@ -97,6 +99,15 @@ int RunAsTheTestAccount() {
   std::printf("[ system ] its linked %s\n",
               Text(pdft::TokenFactsText(account->linkedFacts())).c_str());
   std::fflush(stdout);
+  if (const HRESULT named = account->namedObjects(); FAILED(named)) {
+    std::printf(
+        "[ system ] the tests stop: the test account may not use this session's named objects "
+        "or make \"Global\\\" names, and that could not be granted to it (%s); run as it, every "
+        "command of the app would fail to make its operation lock (the lines above show the "
+        "directory's permissions and which step was refused)\n",
+        Text(pdft::HResultText(named)).c_str());
+    return 1;
+  }
   if (!CheckTheAccountsToken(*account)) return 1;
   return RUN_ALL_TESTS();
 }

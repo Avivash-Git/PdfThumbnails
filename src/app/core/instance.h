@@ -9,6 +9,13 @@
 // it for missing. Every named object therefore gets an explicit descriptor (NamedObjectSddl),
 // and ERROR_ACCESS_DENIED on opening one still means "another instance has it".
 //
+// Windows gives the same ERROR_ACCESS_DENIED for every name in a namespace that this process may
+// not create objects in at all. A program started with another account's token inside someone
+// else's session meets it, because Windows keeps that session's named objects for the session's
+// own sign-in; so may a program at low integrity, in a sandbox or with a restricted token. No
+// other instance has anything then, and waiting changes nothing, so CreateNamedMutex tells the
+// two apart (ClassifyRefusedMutex) and returns kNamedObjectsRefusedHr for the second.
+//
 // Not here yet, because they need the settings window: bringing the running window to the
 // front when a second instance starts, and telling it that a check changed the state.
 
@@ -52,17 +59,54 @@ std::wstring AppMutexName(bool global);                     // <prefix>AppMutex,
 // itself never calls it.
 void SetObjectNameSuffixForTesting(std::wstring_view suffix) noexcept;
 
+// What CreateNamedMutex, TakeSingleInstance, AppMutexes::Hold and OperationLock::Acquire return
+// when Windows does not let this process create named objects in the namespace of the name: not
+// "another instance has it", and nothing that waiting would change. The commands that take the
+// operation lock say so and exit 5 (exit_code.h). A code of this app's own (FACILITY_ITF), not a
+// Windows error, so that no call on the way can return it.
+inline constexpr HRESULT kNamedObjectsRefusedHr = MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x2E5);
+
+// What a refused creation of a named mutex means. CreateMutexW fails with ERROR_ACCESS_DENIED
+// both when the mutex exists with a descriptor that keeps this process from opening it fully and
+// when this process may not create named objects in that namespace at all; what comes next tells
+// them apart.
+enum class RefusedMutex {
+  kExists,           // the mutex exists: another instance has it
+  kProbe,            // not decided yet: create a probe in the namespace, then ask again
+  kRetry,            // it existed and is gone now: create it again
+  kNamespaceClosed,  // this process may not create named objects there (kNamedObjectsRefusedHr)
+  kFailed,           // the open or the probe failed for another reason (its error)
+};
+
+// The meaning of a refused creation (pure), from |openError|, what opening the same name to wait
+// on it gave (ERROR_SUCCESS: it opened), and |probe|, what creating a mutex of a new name in the
+// same namespace gave (S_OK: it was made), std::nullopt while that was not tried:
+//   opened                                    kExists
+//   neither ERROR_FILE_NOT_FOUND nor denied   kFailed
+//   not there, or denied; no probe yet        kProbe
+//   probe E_ACCESSDENIED                      kNamespaceClosed
+//   probe failed otherwise                    kFailed
+//   probe made, the open denied               kExists (it refuses this process even waiting)
+//   probe made, the name not there            kRetry (it went away in between)
+RefusedMutex ClassifyRefusedMutex(DWORD openError, std::optional<HRESULT> probe) noexcept;
+
 // Creates the mutex |name| (not owned) with NamedObjectSddl(|userSid|, |everyoneSynchronize|),
 // or opens it if it exists; *existed says which. When it exists but this process may not open
 // it fully (another instance created it with a descriptor that does not include this process),
 // *existed is true and it is opened with |fallbackAccess| instead; with 0, or if that fails too,
-// *mutex stays empty.
+// *mutex stays empty. kNamedObjectsRefusedHr, with *existed false, when Windows does not let this
+// process create named objects in the namespace of |name| (ClassifyRefusedMutex tells that from
+// the case before; the probe is a mutex of a new, unguessable name with the same descriptor,
+// closed again at once). HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED), logged, when the creation was
+// refused each time though the probe was made and the name was not there: nothing then shows
+// that another instance has it.
 [[nodiscard]] HRESULT CreateNamedMutex(std::wstring_view name, std::wstring_view userSid,
                                        bool everyoneSynchronize, DWORD fallbackAccess,
                                        wil::unique_handle* mutex, bool* existed) noexcept;
 
 // The settings window's single-instance mutex. *first is false when another settings window
 // of this user already runs. Keep |mutex| open for as long as the window is.
+// kNamedObjectsRefusedHr: this process cannot tell whether another window runs.
 [[nodiscard]] HRESULT TakeSingleInstance(std::wstring_view userSid, wil::unique_handle* mutex,
                                          bool* first) noexcept;
 
@@ -72,7 +116,8 @@ void SetObjectNameSuffixForTesting(std::wstring_view suffix) noexcept;
 class AppMutexes {
  public:
   // Creates or opens both and keeps them open until this object goes away. Returns the first
-  // failure; a mutex that could not be opened is simply not held.
+  // failure (kNamedObjectsRefusedHr when this process may not create named objects in a
+  // mutex's namespace); a mutex that could not be opened is simply not held.
   [[nodiscard]] HRESULT Hold(std::wstring_view userSid) noexcept;
 
  private:
@@ -94,8 +139,9 @@ class OperationLock {
   static constexpr HRESULT kTakenByLowerIntegrity = __HRESULT_FROM_WIN32(ERROR_INVALID_LABEL);
 
   // Waits up to |waitMs| for the lock. S_OK: *lock holds it. kBusy: another process still has
-  // it. kTakenByLowerIntegrity: see above. A holder that ended without releasing it counts as
-  // released (abandoned() is then true).
+  // it. kTakenByLowerIntegrity: see above. kNamedObjectsRefusedHr: Windows does not let this
+  // process create the lock (nothing was waited for; no other process holds anything). A holder
+  // that ended without releasing it counts as released (abandoned() is then true).
   [[nodiscard]] static HRESULT Acquire(DWORD waitMs, std::optional<OperationLock>* lock) noexcept;
 
   OperationLock(OperationLock&&) noexcept = default;

@@ -63,12 +63,20 @@ bool IsRegularFile(const std::filesystem::path& path) noexcept {
          !(attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT));
 }
 
-// Takes the operation lock; *busy when another process keeps it.
-HRESULT TakeLock(DWORD waitMs, std::optional<OperationLock>* lock, bool* busy) noexcept {
+// Takes the operation lock. S_OK also when it did not: *busy when another process keeps it,
+// *refused when Windows does not let this process make it (logged). May throw std::bad_alloc.
+HRESULT TakeLock(DWORD waitMs, std::optional<OperationLock>* lock, bool* busy, bool* refused) {
   *busy = false;
+  *refused = false;
   const HRESULT hr = OperationLock::Acquire(EffectiveLockWaitMs(waitMs), lock);
   if (hr == OperationLock::kBusy || hr == OperationLock::kTakenByLowerIntegrity) {
     *busy = true;
+    return S_OK;
+  }
+  if (hr == kNamedObjectsRefusedHr) {
+    *refused = true;
+    Log(LogLevel::kWarning, kLogComponent,
+        L"uninstall result=failed named-objects-refused hr=" + HResultText(hr));
     return S_OK;
   }
   return hr;
@@ -449,9 +457,10 @@ HRESULT Uninstall(const UninstallOptions& options, const RegistryRoots& roots,
   if (dataDir.empty()) RETURN_IF_FAILED(GetDataDir(&dataDir));
 
   std::optional<OperationLock> lock;
-  RETURN_IF_FAILED(TakeLock(options.lockWaitMs, &lock, &result->busy));
-  if (result->busy) {
-    result->code = ExitCode::kBusy;
+  RETURN_IF_FAILED(
+      TakeLock(options.lockWaitMs, &lock, &result->busy, &result->namedObjectsRefused));
+  if (result->busy || result->namedObjectsRefused) {
+    result->code = result->busy ? ExitCode::kBusy : ExitCode::kFailed;
     return S_OK;
   }
   GatherOptions gather;
