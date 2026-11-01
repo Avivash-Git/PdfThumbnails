@@ -30,6 +30,7 @@
 #include "file_ops.h"
 #include "instance.h"
 #include "legacy.h"
+#include "paths.h"
 #include "project_config.h"
 #include "registration.h"
 #include "registry_sandbox.h"
@@ -453,7 +454,12 @@ TEST_F(Install, InstallForAllUsersEndToEnd) {
   EXPECT_EQ(result.code, ExitCode::kOk);
   EXPECT_EQ(result.refusal, InstallRefusal::kNone);
   ASSERT_EQ(requests_.size(), 1u);
-  EXPECT_TRUE(IEquals(requests_[0].exe.native(), (stage_ / kSettingsExe).native()));
+  // The install names the folder by its final path; %TEMP% may be written with 8.3 names or
+  // through a link.
+  path stage;
+  ASSERT_HRESULT_SUCCEEDED(Canonicalize(stage_, &stage));
+  EXPECT_TRUE(IEquals(requests_[0].exe.native(), (stage / kSettingsExe).native()))
+      << WideToUtf8Lossy(requests_[0].exe.native());
   EXPECT_EQ(requests_[0].parameters, L"--elevated machine-install");
   // The holder was ended before the step, so the old build could go.
   EXPECT_EQ(probes_.ended, std::vector<DWORD>{4242});
