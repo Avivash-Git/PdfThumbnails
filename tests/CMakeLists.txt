@@ -29,7 +29,9 @@
 #                             versions, the class path for all users, the user hives cleaned,
 #                             the per-user files removed, trash folder names, exit codes, the
 #                             texts of --install, --uninstall and --zoom); pdft-run-outside's
-#                             pure parts (its request file, command lines, exit codes)
+#                             pure parts (its request file, command lines, exit codes); the
+#                             system tests' account rules (when it may be made, its name, its
+#                             password from random bytes)
 #   unit.samples              src/app/res/sample-*.pdf == `thumbtest makesamples` output
 #   integration.tests         pdft_integration_tests: the app's core against the real system
 #                             (COM under the app's security, WMI, Task Scheduler, named objects
@@ -94,8 +96,12 @@
 #                             (for all users and per user) replaced by the install and by
 #                             --migrate-v1, the administrator steps through UAC and their report
 #                             through the asking process's pipe, and nothing left afterwards;
-#                             runs only with PDFT_SYSTEM_TESTS=1, elevated, where nothing of 1.x
-#                             or 2.x is installed (the CI job system-x64), else skipped (exit 77)
+#                             the user is a local administrator account the program makes for
+#                             the run (its limited token, so runas goes through UAC) and deletes
+#                             afterwards; runs only with PDFT_SYSTEM_TESTS=1 and GITHUB_ACTIONS=
+#                             true with RUNNER_ENVIRONMENT=github-hosted or
+#                             PDFT_SYSTEM_TESTS_THROWAWAY_VM=1, elevated, where nothing of 1.x or
+#                             2.x is installed (the CI job system-x64), else skipped (77)
 # Also built here: pdft-planting-check and its canary DLL, for the gate gate.planting.
 # Test support (tests/support) is added by the top-level CMakeLists.txt: thumbtest uses it too.
 #
@@ -189,7 +195,11 @@ if(TARGET pdft_appcore)
     unit/startup_test.cpp
     unit/status_format_test.cpp
     unit/strings_test.cpp
-    unit/tasks_test.cpp)
+    unit/system_account_test.cpp
+    unit/tasks_test.cpp
+    # The pure rules of the system tests' account (when it may be made, its name and password).
+    system/account_rules.cpp system/account_rules.h)
+  target_include_directories(pdft_unit_tests PRIVATE system)
   target_link_libraries(pdft_unit_tests PRIVATE pdft_appcore)
   # main.cpp's start-up hardening child needs the app's start-up code (startup.h).
   target_compile_definitions(pdft_unit_tests PRIVATE PDFT_UNIT_TESTS_WITH_APP=1)
@@ -306,20 +316,28 @@ endif()
 
 # ---- system --------------------------------------------------------------------------------
 # Installs, uses and uninstalls the app for real (HKLM, HKCU, Program Files, Task Scheduler, UAC)
-# from a staged runtime: only on a throw-away PC (the CI job system-x64). The program itself
-# refuses to run unless PDFT_SYSTEM_TESTS=1, it is elevated and nothing of 1.x or 2.x is
-# installed; the test presets leave the label out. 1.x's shipped files for its migration fixture
-# are copied next to it (system-fixture), in the build folder and in the test bundle.
+# from a staged runtime, as a local administrator account it makes for the run and deletes
+# afterwards: only on a throw-away PC (the CI job system-x64). The program itself refuses to run
+# unless PDFT_SYSTEM_TESTS=1 and GITHUB_ACTIONS=true with RUNNER_ENVIRONMENT=github-hosted or
+# PDFT_SYSTEM_TESTS_THROWAWAY_VM=1, it is elevated and nothing of 1.x or 2.x is installed; the
+# test presets leave the label out. 1.x's
+# shipped files for its migration fixture are copied next to it (system-fixture), in the build
+# folder and in the test bundle.
 if(TARGET pdft_appcore)
   add_executable(pdft_system_tests
     system/main.cpp
+    system/account_rules.cpp system/account_rules.h
     system/system_env.cpp system/system_env.h
     system/system_test.cpp
+    system/test_account.cpp system/test_account.h
     integration/child_process.cpp integration/child_process.h)
   target_include_directories(pdft_system_tests PRIVATE integration)
   pdft_harden(pdft_system_tests TEST)
   target_link_libraries(pdft_system_tests PRIVATE pdft_appcore pdft_testsupport GTest::gtest
-                                                  ole32 oleaut32 advapi32)
+                                                  ole32 oleaut32 advapi32 netapi32 userenv
+                                                  bcrypt shell32 wtsapi32)
+  # The test account's token is checked with pdft-run-medium --check-token.
+  add_dependencies(pdft_system_tests pdft_run_medium)
   set(_pdft_v1_fixture "${PROJECT_SOURCE_DIR}/PdfThumbnails.ps1"
                        "${PROJECT_SOURCE_DIR}/PdfThumbnails.cmd" "${PROJECT_SOURCE_DIR}/LICENSE")
   add_custom_command(TARGET pdft_system_tests POST_BUILD

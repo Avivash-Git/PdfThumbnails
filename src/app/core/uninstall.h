@@ -14,7 +14,8 @@
 //   3. the user's files: this version's files in the per-user folder, its app folder, and the
 //      app's data folder (the log). What is in use stays and is removed at the next sign-in
 //      (a RunOnce value per folder, file_ops.h).
-//   Exit 0; 1 when the part for all users is left; 5 when a step failed.
+//   Exit 0; 1 when the part for all users is left; 5 when a step failed; 7 when nothing else
+//   failed but the administrator step did not get administrator rights (the part stays).
 //   --rebuild-thumbnails belongs to the thumbnail refresh, which this build does not have: it is
 //   accepted and said so, and the uninstall goes on.
 //

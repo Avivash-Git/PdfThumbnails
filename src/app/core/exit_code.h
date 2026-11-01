@@ -14,7 +14,7 @@ enum class ExitCode : int {
   kBusy = 4,          // another operation held the lock for too long
   kFailed = 5,        // failed; the log has the HRESULT
   kNotInstalled = 6,  // the product is not installed
-  kNeedsAdmin = 7,    // needs administrator rights, and nobody can be asked
+  kNeedsAdmin = 7,    // needs administrator rights, and nobody can be asked (or UAC gave none)
   kWrongContext = 8,  // cannot run here (a virtualized container, or elevated where refused)
 };
 
@@ -34,7 +34,9 @@ inline constexpr ExitCodeInfo kExitCodes[] = {
     {ExitCode::kBusy, L"busy: another check or change did not finish within 30 seconds"},
     {ExitCode::kFailed, L"failed (the log has the error code)"},
     {ExitCode::kNotInstalled, L"not installed"},
-    {ExitCode::kNeedsAdmin, L"needs administrator rights, and nobody can be asked"},
+    {ExitCode::kNeedsAdmin,
+     L"needs administrator rights, and nobody can be asked (or the step for all users did not "
+     L"get them)"},
     {ExitCode::kWrongContext,
      L"cannot run here (an app container that virtualizes the registry, or elevated where that is "
      L"refused)"},

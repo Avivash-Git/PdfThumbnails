@@ -30,7 +30,8 @@
 // 1.x's build folders for all users are left, through the administrator step machine-migrate-v1
 // of the settings executable installed for all users (a prompt; declined: 3). Exit 0, 1 when
 // something waits (for a restart, for a process to let go, or for an install for all users), 5
-// when a step failed.
+// when a step failed, 7 when nothing else failed but the administrator step did not get
+// administrator rights.
 
 #pragma once
 

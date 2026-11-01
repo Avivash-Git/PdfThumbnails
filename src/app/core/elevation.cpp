@@ -69,11 +69,18 @@ std::wstring DecodeLossy(std::string_view bytes) {
   return text;
 }
 
+// The RID of the label a TokenIntegrityLevel query returned; 0 for a SID without one.
+DWORD LabelRid(const TOKEN_MANDATORY_LABEL& label) noexcept {
+  const PSID sid = label.Label.Sid;
+  const UCHAR count = *GetSidSubAuthorityCount(sid);
+  return count ? *GetSidSubAuthority(sid, count - 1u) : 0;
+}
+
 // The facts CheckElevatedEntry judges, read from this process.
 HRESULT GatherEntryFacts(ElevatedEntryFacts* facts) noexcept try {
   *facts = ElevatedEntryFacts{};
   facts->devInstall = kDevInstall;
-  RETURN_IF_FAILED(GetTokenElevation(&facts->tokenElevated));
+  RETURN_IF_FAILED(ReadEntryTokenFacts(nullptr, facts));
 
   // A walk that fails counts as packaged: the step is refused rather than run unchecked.
   std::optional<std::wstring> package;
@@ -162,9 +169,7 @@ HRESULT ReadTokenFacts(HANDLE token, TokenFacts* facts) noexcept try {
   alignas(TOKEN_MANDATORY_LABEL) BYTE label[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
   RETURN_IF_WIN32_BOOL_FALSE(
       GetTokenInformation(token, TokenIntegrityLevel, label, sizeof(label), &size));
-  const PSID labelSid = reinterpret_cast<TOKEN_MANDATORY_LABEL*>(label)->Label.Sid;
-  const UCHAR count = *GetSidSubAuthorityCount(labelSid);
-  facts->integrityRid = count ? *GetSidSubAuthority(labelSid, count - 1u) : 0;
+  facts->integrityRid = LabelRid(*reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(label));
 
   BYTE administrators[SECURITY_MAX_SID_SIZE];
   DWORD administratorsSize = sizeof(administrators);
@@ -213,6 +218,41 @@ std::wstring TokenFactsText(const TokenFacts& facts) {
          type + L"), integrity " + integrity + L", Administrators " + administrators;
 }
 
+HRESULT ReadEntryTokenFacts(HANDLE token, ElevatedEntryFacts* facts) noexcept {
+  facts->tokenElevated = false;
+  facts->administratorsEnabled = false;
+  facts->integrityRid = 0;
+  // Without a token: the pseudo handle of this thread's current token (its impersonation token,
+  // else the process's), the one CheckTokenMembership(nullptr) judges too.
+  const HANDLE source = token ? token : GetCurrentThreadEffectiveToken();
+  TOKEN_ELEVATION elevation = {};
+  DWORD size = 0;
+  RETURN_IF_WIN32_BOOL_FALSE(
+      GetTokenInformation(source, TokenElevation, &elevation, sizeof(elevation), &size));
+  alignas(TOKEN_MANDATORY_LABEL) BYTE label[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
+  RETURN_IF_WIN32_BOOL_FALSE(
+      GetTokenInformation(source, TokenIntegrityLevel, label, sizeof(label), &size));
+
+  // Enabled, not merely present: CheckTokenMembership ignores a deny-only or disabled group.
+  BYTE administrators[SECURITY_MAX_SID_SIZE];
+  DWORD administratorsSize = sizeof(administrators);
+  RETURN_IF_WIN32_BOOL_FALSE(CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr,
+                                                administrators, &administratorsSize));
+  BOOL member = FALSE;
+  if (token) {
+    // CheckTokenMembership takes an impersonation token only.
+    wil::unique_handle identification;
+    RETURN_IF_WIN32_BOOL_FALSE(DuplicateToken(token, SecurityIdentification, identification.put()));
+    RETURN_IF_WIN32_BOOL_FALSE(CheckTokenMembership(identification.get(), administrators, &member));
+  } else {
+    RETURN_IF_WIN32_BOOL_FALSE(CheckTokenMembership(nullptr, administrators, &member));
+  }
+  facts->tokenElevated = elevation.TokenIsElevated != 0;
+  facts->administratorsEnabled = member != FALSE;
+  facts->integrityRid = LabelRid(*reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(label));
+  return S_OK;
+}
+
 std::wstring_view ElevatedVerbName(ElevatedVerb verb) noexcept {
   for (const VerbName& entry : kVerbNames) {
     if (entry.verb == verb) return entry.name;
@@ -251,20 +291,72 @@ std::optional<ElevatedVerb> ParseElevatedArguments(std::span<const std::wstring_
   return ElevatedVerbFromName(args[1], devInstall);
 }
 
-HRESULT CheckElevatedEntry(const ElevatedEntryFacts& facts) noexcept {
-  if (!facts.tokenElevated) return HRESULT_FROM_WIN32(ERROR_ELEVATION_REQUIRED);
-  if (facts.packaged) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED_IN_APPCONTAINER);
-  if (!facts.verb) return E_INVALIDARG;
+ElevatedRefusal FindElevatedRefusal(const ElevatedEntryFacts& facts) noexcept {
+  // Administrator rights first: an elevated token alone does not prove them.
+  if (!facts.tokenElevated) return ElevatedRefusal::kNotElevated;
+  if (!facts.administratorsEnabled) return ElevatedRefusal::kAdministratorsNotEnabled;
+  if (facts.integrityRid < static_cast<DWORD>(SECURITY_MANDATORY_HIGH_RID)) {
+    return ElevatedRefusal::kIntegrityBelowHigh;
+  }
+  if (facts.packaged) return ElevatedRefusal::kPackaged;
+  if (!facts.verb) return ElevatedRefusal::kNotOneStep;
   const bool exempt = facts.devInstall && *facts.verb == ElevatedVerb::kMachineInstall;
-  if (!facts.runsFromMachineRoot && !exempt) return E_ACCESSDENIED;
-  if (FAILED(facts.reparsePoints)) return facts.reparsePoints;
-  return S_OK;
+  if (!facts.runsFromMachineRoot && !exempt) return ElevatedRefusal::kNotFromMachineRoot;
+  if (FAILED(facts.reparsePoints)) return ElevatedRefusal::kReparsePoint;
+  return ElevatedRefusal::kNone;
+}
+
+HRESULT CheckElevatedEntry(const ElevatedEntryFacts& facts) noexcept {
+  switch (FindElevatedRefusal(facts)) {
+    case ElevatedRefusal::kNone:
+      return S_OK;
+    case ElevatedRefusal::kNotElevated:
+    case ElevatedRefusal::kAdministratorsNotEnabled:
+    case ElevatedRefusal::kIntegrityBelowHigh:
+      return kNoAdministratorRightsHr;
+    case ElevatedRefusal::kPackaged:
+      return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED_IN_APPCONTAINER);
+    case ElevatedRefusal::kNotOneStep:
+      return E_INVALIDARG;
+    case ElevatedRefusal::kNotFromMachineRoot:
+      return E_ACCESSDENIED;
+    case ElevatedRefusal::kReparsePoint:
+      // A failure, so the step never starts on it (FindElevatedRefusal names it only then).
+      return facts.reparsePoints;
+  }
+  return E_UNEXPECTED;
+}
+
+std::wstring_view ElevatedRefusalText(ElevatedRefusal refusal) noexcept {
+  switch (refusal) {
+    case ElevatedRefusal::kNone:
+      break;
+    case ElevatedRefusal::kNotElevated:
+      return L"no administrator rights (not elevated)";
+    case ElevatedRefusal::kAdministratorsNotEnabled:
+      return L"no administrator rights (the Administrators group is not enabled)";
+    case ElevatedRefusal::kIntegrityBelowHigh:
+      return L"no administrator rights (an integrity level below High)";
+    case ElevatedRefusal::kPackaged:
+      return L"inside or below an app package";
+    case ElevatedRefusal::kNotOneStep:
+      return L"not exactly one known step";
+    case ElevatedRefusal::kNotFromMachineRoot:
+      return L"not the settings executable installed for all users";
+    case ElevatedRefusal::kReparsePoint:
+      return L"a link or junction on the way to the install folder";
+  }
+  return {};
 }
 
 int ElevatedMain() noexcept {
   ElevatedEntryFacts facts;
   HRESULT hr = GatherEntryFacts(&facts);
-  if (SUCCEEDED(hr)) hr = CheckElevatedEntry(facts);
+  ElevatedRefusal refusal = ElevatedRefusal::kNone;
+  if (SUCCEEDED(hr)) {
+    refusal = FindElevatedRefusal(facts);
+    hr = CheckElevatedEntry(facts);
+  }
   // The report goes only to this process's own parent, so even a refusal may say why.
   ElevatedReporter report = ElevatedReporter::Connect();
   const std::wstring_view name =
@@ -276,8 +368,11 @@ int ElevatedMain() noexcept {
     const std::wstring tokenText =
         SUCCEEDED(read) ? TokenFactsText(token) : L"token: unreadable, hr=" + HResultText(read);
     if (FAILED(hr)) {
-      report.Line(L"elevated " + std::wstring(name) + L" refused hr=" + HResultText(hr) + L" (" +
-                  tokenText + L")");
+      const std::wstring why = refusal == ElevatedRefusal::kNone
+                                   ? std::wstring(L"its own facts could not be read")
+                                   : std::wstring(ElevatedRefusalText(refusal));
+      report.Line(L"elevated " + std::wstring(name) + L" refused hr=" + HResultText(hr) + L": " +
+                  why + L" (" + tokenText + L")");
       return static_cast<int>(hr);
     }
     report.Line(L"elevated " + std::wstring(name) + L" start (" + tokenText + L")");
@@ -584,6 +679,11 @@ ElevatedOutcome ClassifyElevatedExit(HRESULT launched, DWORD exitCode, HRESULT* 
   return ElevatedOutcome::kFailed;
 }
 
+bool LackedAdministratorRights(const ElevatedRun& run) noexcept {
+  return run.outcome == ElevatedOutcome::kFailed && SUCCEEDED(run.launched) &&
+         run.failure == kNoAdministratorRightsHr;
+}
+
 HRESULT RunElevated(ElevatedVerb verb, const std::filesystem::path& exe, HWND owner,
                     const ElevationLauncher& launcher, ElevatedRun* run) noexcept try {
   *run = ElevatedRun{};
@@ -603,6 +703,7 @@ HRESULT RunElevated(ElevatedVerb verb, const std::filesystem::path& exe, HWND ow
   const HRESULT launched = launcher(request, &processId, &exitCode);
   if (server) run->report = server->Finish(processId, &run->reportChannel);
   run->exitCode = exitCode;
+  run->launched = launched;
   run->outcome = ClassifyElevatedExit(launched, exitCode, &run->failure);
 
   // The elevated process writes no log of its own: this process logs what it reported.

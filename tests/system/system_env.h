@@ -1,6 +1,7 @@
 // What the system tests stand on: when they may run at all, the real state of this PC that they
 // change (and what is left of it afterwards), and starting the app's executables the two ways a
-// person or an installer does: as the signed-in user, or as an administrator.
+// person or an installer does: as the signed-in user (the test account, test_account.h), or as an
+// administrator.
 
 #pragma once
 
@@ -15,11 +16,12 @@
 namespace pdft::systest {
 
 // The tests run only where this is "1" in the environment (the CI job sets it), so nobody runs
-// them on their own PC by accident.
+// them on their own PC by accident; a second opt-in says the PC is thrown away afterwards
+// (account_rules.h kGitHubActionsEnv with kRunnerEnvironmentEnv, or kThrowawayVmEnv).
 inline constexpr wchar_t kEnableEnv[] = L"PDFT_SYSTEM_TESTS";
 // The staged runtime they install from (cmake --install <build> --prefix <folder> --component
-// runtime): copied into a private folder first, which only this user, SYSTEM and Administrators
-// can change.
+// runtime): copied into a private folder first, which only the test account, this account,
+// SYSTEM and Administrators can change.
 inline constexpr wchar_t kRuntimeEnv[] = L"PDFT_SYSTEM_RUNTIME";
 // The folder with 1.x's shipped files the migration tests plant; empty: system-fixture next to
 // this program (the build copies them there, and the test bundle carries them).
@@ -36,16 +38,30 @@ inline constexpr DWORD kCommandTimeoutMs = 10 * 60 * 1000;
 // The value of the environment variable |name|; empty when it is not set.
 std::wstring EnvironmentValue(const wchar_t* name);
 
-// Why the tests must not run in this process: not asked for (kEnableEnv), not elevated, or a
-// registry that may be virtualized or a packaged parent (writes would not reach the real hive).
-// Call after COM is set up (the registry check reads through WMI).
+// Why the tests must not run in this process: not asked for (kEnableEnv and the second opt-in),
+// not elevated, or a registry that may be virtualized or a packaged parent (writes would not
+// reach the real hive). Call after COM is set up (the registry check reads through WMI).
 std::optional<std::string> WhyNotHere();
+
+// Where one user's own state lives: their HKEY_CURRENT_USER, their SID (their check task's name)
+// and the install and data folders in their profile.
+struct UserPlaces {
+  std::string who;  // "this account", "the test account": for the lines that name what was found
+  HKEY hive = HKEY_CURRENT_USER;
+  std::wstring sid;
+  std::filesystem::path userRoot;  // %LOCALAPPDATA%\Programs\<Product>
+  std::filesystem::path dataDir;   // %LOCALAPPDATA%\<Product>
+};
+
+// The users whose state the tests look at: this process's own account (nothing may ever turn up
+// there), and the test account once there is one.
+std::vector<UserPlaces> TestedUsers();
 
 // Everything of 1.x or 2.x found on this PC, one line each: the classes, .pdf slots that name the
 // handler, the product's settings key, RunOnce values of the clean-up family, the check task
-// folder and this user's check task, 1.x's task, the install folders, the data folder and an
-// installer's uninstall record. Trash folders next to the machine root are not listed: they wait
-// for the restart (TrashFolders).
+// folder and each tested user's check task, 1.x's task, the install folders, the data folders and
+// an installer's uninstall record. Trash folders next to the machine root are not listed: they
+// wait for the restart (TrashFolders).
 std::vector<std::string> Leftovers();
 
 // The trash folders next to the machine-wide install folder.
@@ -70,9 +86,9 @@ struct Outcome {
   std::string Output() const { return out + err; }
 };
 
-// Runs |exe| with |arguments| (already quoted) as the signed-in user would: this process's
-// account with a standard user's token (Administrators deny-only, no privileges) at Medium
-// integrity. From there, an administrator step goes through UAC like a person's would.
+// Runs |exe| with |arguments| (already quoted) as the signed-in user: the test account with the
+// limited token of its interactive logon. From there, an administrator step goes through UAC like
+// a person's would. E_UNEXPECTED when there is no test account.
 Outcome RunAsUser(const std::filesystem::path& exe, const std::wstring& arguments);
 
 // Runs |exe| with this process's token (elevated), as an installer does.

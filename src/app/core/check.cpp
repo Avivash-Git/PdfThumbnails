@@ -206,6 +206,8 @@ HRESULT RunCheck(const CheckOptions& options, const RegistryRoots& roots,
                                result->adminStepNeeded, options.quiet);
   if (result->elevated && result->elevated->outcome == ElevatedOutcome::kCancelled) {
     result->code = ExitCode::kCancelled;
+  } else if (result->elevated && LackedAdministratorRights(*result->elevated)) {
+    result->code = ExitCode::kNeedsAdmin;
   } else if (result->elevated && result->elevated->outcome == ElevatedOutcome::kFailed) {
     result->code = ExitCode::kFailed;
   }

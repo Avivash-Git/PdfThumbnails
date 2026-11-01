@@ -361,7 +361,10 @@ HRESULT MigrateV1(const MigrateOptions& options, const RegistryRoots& roots,
             FAILED(hr)) {
           Failed(&failures, L"machine", hr);
         } else {
-          if (run.outcome == ElevatedOutcome::kFailed) Failed(&failures, L"machine", run.failure);
+          // A step that did not get administrator rights has an exit code of its own.
+          if (run.outcome == ElevatedOutcome::kFailed && !LackedAdministratorRights(run)) {
+            Failed(&failures, L"machine", run.failure);
+          }
           result->run = std::move(run);
         }
       }
@@ -372,6 +375,8 @@ HRESULT MigrateV1(const MigrateOptions& options, const RegistryRoots& roots,
     result->code = ExitCode::kCancelled;
   } else if (!failures.empty()) {
     result->code = ExitCode::kFailed;
+  } else if (result->run && LackedAdministratorRights(*result->run)) {
+    result->code = ExitCode::kNeedsAdmin;
   } else if ((result->userPart && result->user.Incomplete()) || result->machineNoInstall ||
              (result->run && result->run->outcome == ElevatedOutcome::kRestartPending)) {
     result->code = ExitCode::kProblems;

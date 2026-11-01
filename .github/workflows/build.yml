@@ -364,6 +364,15 @@ jobs:
           reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v ConsentPromptBehaviorUser
           whoami /groups | findstr /i /c:"Mandatory Label" /c:"S-1-5-32-544"
           t\pdft-run-medium.exe -- t\pdft-run-medium.exe --check-token
+          rem The tests run the user's commands as an account of their own: CreateProcessWithTokenW
+          rem needs SeImpersonatePrivilege and the Secondary Logon service; the session decides
+          rem where UAC puts the elevated step.
+          whoami /priv | findstr /i /c:"SeImpersonatePrivilege" /c:"SeAssignPrimaryTokenPrivilege"
+          sc qc seclogon | findstr /i /c:"START_TYPE"
+          sc query seclogon | findstr /i /c:"STATE"
+          echo Session: %SESSIONNAME%
+          rem The tests' second opt-in: a runner GitHub hosts.
+          echo GITHUB_ACTIONS=%GITHUB_ACTIONS% RUNNER_ENVIRONMENT=%RUNNER_ENVIRONMENT%
           exit /b 0
 
       # Every command and its output is in the log, each line of the tests' own starting with
@@ -378,13 +387,19 @@ jobs:
       # A skipped program (exit 77) counts as passed in CTest: the tests must have reached their
       # end. The elevated steps report back through a pipe of the unelevated process, which
       # accepts only its own child: this shows whether UAC makes the asking process the parent.
+      # The user's commands run as a local administrator account the tests make for the run,
+      # with the limited token of its interactive logon, so each administrator step must go
+      # through UAC into its linked token; when it does not, the tests say so and stop.
       - name: Check that the system tests ran
         if: ${{ !cancelled() }}
         run: |
           set "LOG=t\Testing\Temporary\LastTest.log"
           findstr /l /c:"[ system ]" "%LOG%"
+          findstr /l /c:"[ system ] UAC did not elevate" "%LOG%" >nul && (echo ::error::UAC did not elevate the test account's administrator step on this runner; the [ system ] lines show the step's token& exit /b 1)
+          findstr /l /c:"[ system ] test account's token: elevated no, elevation type 3 (limited)" "%LOG%" >nul || (echo ::error::The tests did not get a test account with a limited token: see the [ system ] lines& exit /b 1)
           findstr /l /c:"[ system ] nothing left" "%LOG%" >nul || (echo ::error::The system tests did not run to the end& exit /b 1)
           findstr /l /c:"[ system ] machine-install reported through the asking process's pipe: yes" "%LOG%" >nul || (echo ::error::The elevated step's report did not come back through the asking process's pipe& exit /b 1)
+          findstr /l /c:"[ system ] machine-install got administrator rights through UAC: yes" "%LOG%" >nul || (echo ::error::The step for all users did not get administrator rights through UAC& exit /b 1)
 
       - name: Upload logs
         if: ${{ !cancelled() }}

@@ -494,7 +494,10 @@ HRESULT Uninstall(const UninstallOptions& options, const RegistryRoots& roots,
       ElevatedRun run;
       RETURN_IF_FAILED(
           RunElevated(ElevatedVerb::kMachineUninstall, exe, options.owner, options.launcher, &run));
-      if (run.outcome == ElevatedOutcome::kFailed) Failed(&failures, L"machine", run.failure);
+      // A step that did not get administrator rights has an exit code of its own.
+      if (run.outcome == ElevatedOutcome::kFailed && !LackedAdministratorRights(run)) {
+        Failed(&failures, L"machine", run.failure);
+      }
       result->run = std::move(run);
     }
     std::optional<ClassReg> machineClass;
@@ -517,6 +520,8 @@ HRESULT Uninstall(const UninstallOptions& options, const RegistryRoots& roots,
 
   if (!failures.empty()) {
     result->code = ExitCode::kFailed;
+  } else if (result->run && LackedAdministratorRights(*result->run)) {
+    result->code = ExitCode::kNeedsAdmin;
   } else if (result->machineLeft) {
     result->code = ExitCode::kProblems;
   } else {

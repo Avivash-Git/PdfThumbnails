@@ -9,7 +9,8 @@
 //   3. Gather (snapshot.h), evaluate (evaluate.h); not installed: exit 6, nothing written.
 //   4. Plan and apply the per-user repairs (repair.h). The administrator step the plan names runs
 //      only for --fix (a launcher is given and the check is not quiet): through UAC, with the
-//      settings executable installed for all users (elevation.h); declined: exit 3, failed: 5.
+//      settings executable installed for all users (elevation.h); declined: exit 3, started
+//      without administrator rights: 7, failed: 5.
 //   5. When something changed, gather and evaluate again.
 //   6. Record the check under HKCU State, tell Explorer when a slot or class changed (only for the
 //      real registry roots), and write one log line.

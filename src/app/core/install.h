@@ -17,11 +17,12 @@
 //   2. the operation lock (4);
 //   3. this session's thumbnail processes that hold an old build's DLLs are ended (only Windows'
 //      own dllhost.exe of this user), so the old builds can go and the new one loads;
-//   4. the administrator step machine-install through UAC (declined: 3): it checks the folder's
-//      permissions again, copies the build into <Program Files>\<Product>, writes the class for
-//      all users, makes the shared task folder, then removes 1.x's and the old 2.x build folders
-//      for all users, last, after a short retry for files still in use (those go to a trash
-//      folder and are deleted at the next restart);
+//   4. the administrator step machine-install through UAC (declined: 3; started without
+//      administrator rights, it refuses: 7): it checks the folder's permissions again, copies
+//      the build into <Program Files>\<Product>, writes the class for all users, makes the
+//      shared task folder, then removes 1.x's and the old 2.x build folders for all users, last,
+//      after a short retry for files still in use (those go to a trash folder and are deleted at
+//      the next restart);
 //   5. the installer's per-user step (setup.h SetupUser);
 //   6. the status, with the Explorer test. Exit 0 when healthy, 1 when installed but not healthy;
 //      files waiting for a restart are reported, not an exit code of their own.
@@ -240,7 +241,7 @@ struct InstallResult {
 
 // The exit code of the administrator step for --install (pure): std::nullopt when it is done (a
 // restart pending included), 3 when the prompt was declined, 8 when the step found the build's
-// folder unsafe, else 5.
+// folder unsafe, 7 when it did not get administrator rights (kNoAdministratorRightsHr), else 5.
 std::optional<ExitCode> InstallStepExitCode(ElevatedOutcome outcome, HRESULT failure) noexcept;
 
 // Runs --install. S_OK when it came to a verdict (*result's code); a failure when the state

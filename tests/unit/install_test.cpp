@@ -1,8 +1,8 @@
 // The install and uninstall side's pure parts: the files of a build, the versions it installs,
-// how the administrator step's outcome becomes --install's exit code, the class path the elevated
-// side may write for all users, the user hives it cleans, the per-user files the uninstall
-// removes, the trash folders the status reports, and the texts of --install, --uninstall and
-// --zoom.
+// how the administrator step's outcome becomes --install's exit code (a step without
+// administrator rights included), the class path the elevated side may write for all users, the
+// user hives it cleans, the per-user files the uninstall removes, the trash folders the status
+// reports, and the texts of --install, --uninstall and --zoom.
 
 #include <windows.h>
 
@@ -18,6 +18,7 @@
 #include "project_config.h"
 #include "registration.h"
 #include "snapshot_fixtures.h"
+#include "strings.h"
 #include "uninstall.h"
 
 namespace pdft {
@@ -59,6 +60,15 @@ TEST(Install, StepExitCodes) {
             ExitCode::kWrongContext);
   EXPECT_EQ(InstallStepExitCode(ElevatedOutcome::kFailed, E_ACCESSDENIED), ExitCode::kFailed);
   EXPECT_EQ(InstallStepExitCode(ElevatedOutcome::kFailed, E_UNEXPECTED), ExitCode::kFailed);
+  // Started without administrator rights: neither a declined prompt nor an unsafe folder.
+  EXPECT_EQ(InstallStepExitCode(ElevatedOutcome::kFailed, kNoAdministratorRightsHr),
+            ExitCode::kNeedsAdmin);
+}
+
+TEST(Install, NoAdministratorRightsMessage) {
+  const std::wstring text = NoAdministratorRightsMessage();
+  EXPECT_EQ(text.rfind(L"The step for all users did not get administrator rights", 0), 0u);
+  EXPECT_EQ(text.find(L"declined"), std::wstring::npos);
 }
 
 TEST(Install, MachineClassPath) {
@@ -234,6 +244,21 @@ TEST(UninstallTexts, Report) {
   ASSERT_EQ(lines.size(), 2u);
   EXPECT_EQ(lines[0], L"The part for all users failed: 0x80070005");
   EXPECT_EQ(lines[1], L"  failed folder: 0x80070005");
+
+  // Started without administrator rights: said so, with the step's own refusal line after it.
+  result = UninstallResult{};
+  result.run = ElevatedRun{};
+  result.run->outcome = ElevatedOutcome::kFailed;
+  result.run->failure = kNoAdministratorRightsHr;
+  result.run->report = {
+      L"elevated machine-uninstall refused hr=0x800402E4: no administrator rights"};
+  result.machineLeft = true;
+  lines = UninstallReport(result);
+  ASSERT_EQ(lines.size(), 3u);
+  EXPECT_EQ(lines[0].rfind(NoAdministratorRightsMessage(), 0), 0u) << WideToUtf8Lossy(lines[0]);
+  EXPECT_NE(lines[0].find(L"stays"), std::wstring::npos);
+  EXPECT_EQ(lines[1], L"  " + result.run->report[0]);
+  EXPECT_NE(lines[2].find(L"still installed"), std::wstring::npos);
 
   result = UninstallResult{};
   result.machineNoProgram = true;

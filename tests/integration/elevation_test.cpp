@@ -1,9 +1,11 @@
 // The elevation boundary (elevation.h) without any elevation: RunElevated with launchers that
 // never ask for administrator rights (one starts this test program's "report" child normally,
 // so the report pipe is tested end to end between real processes), the reporter's refusal to
-// write to a pipe its parent does not serve, the token facts the report starts with (this
-// process's, and a standard user's token made from it), and the installer's records (inno.h) in
-// private registry keys. Nothing here calls the real launcher: a UAC prompt never appears.
+// write to a pipe its parent does not serve, the token facts the report starts with and the ones
+// the elevated side's entry check reads (this process's, and a standard user's token made from
+// it, which the entry check must refuse even where it counts as elevated), and the installer's
+// records (inno.h) in private registry keys. Nothing here calls the real launcher: a UAC prompt
+// never appears.
 
 #include <windows.h>
 
@@ -168,11 +170,35 @@ TEST(TokenFactsTest, ThisProcessAndAStandardUsersToken) {
   ASSERT_TRUE(CheckTokenMembership(nullptr, administrators, &member));
   EXPECT_EQ(facts.administrators == TokenFacts::Group::kEnabled, member != FALSE);
 
-  // The token the system tests run the commands with: Administrators deny-only (or absent, for
-  // an account outside the group), Medium. Whether it counts as elevated depends on the token it
-  // is made from: made from a limited token (a split administrator's) it does not. Made from a
-  // token without a linked one (elevation type 1: the built-in Administrator, as on CI) it may:
-  // the line printed says which, and is not held to either answer.
+  // What the elevated side's entry check reads of the same token agrees, and it lets this
+  // process through only with administrator rights: elevated, Administrators enabled, High.
+  ElevatedEntryFacts entry;
+  ASSERT_HRESULT_SUCCEEDED(ReadEntryTokenFacts(nullptr, &entry));
+  EXPECT_EQ(entry.tokenElevated, elevated);
+  EXPECT_EQ(entry.administratorsEnabled, member != FALSE);
+  EXPECT_EQ(entry.integrityRid, facts.integrityRid);
+  wil::unique_handle processToken;
+  ASSERT_TRUE(
+      OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, processToken.put()));
+  ElevatedEntryFacts own;
+  ASSERT_HRESULT_SUCCEEDED(ReadEntryTokenFacts(processToken.get(), &own));
+  EXPECT_EQ(own.tokenElevated, entry.tokenElevated);
+  EXPECT_EQ(own.administratorsEnabled, entry.administratorsEnabled);
+  EXPECT_EQ(own.integrityRid, entry.integrityRid);
+  entry.verb = ElevatedVerb::kMachineRepairClass;
+  entry.runsFromMachineRoot = true;
+  const bool rights =
+      elevated && member && facts.integrityRid >= static_cast<DWORD>(SECURITY_MANDATORY_HIGH_RID);
+  EXPECT_EQ(CheckElevatedEntry(entry), rights ? S_OK : kNoAdministratorRightsHr);
+  std::printf("this process's entry check: %ls\n",
+              rights ? L"passes" : ElevatedRefusalText(FindElevatedRefusal(entry)).data());
+
+  // The token the system tests ran their commands with before they had an account of their own:
+  // Administrators deny-only (or absent, for an account outside the group), Medium. Whether it
+  // counts as elevated depends on the token it is made from: made from a limited token (a split
+  // administrator's) it does not. Made from a token without a linked one (elevation type 1: the
+  // built-in Administrator, as on CI) it does, and runas then starts the "elevated" step with it
+  // unchanged: the line printed says which, and the entry check refuses it either way.
   const TOKEN_ELEVATION_TYPE sourceType = facts.elevationType;
   wil::unique_handle standard;
   ASSERT_HRESULT_SUCCEEDED(
@@ -182,6 +208,19 @@ TEST(TokenFactsTest, ThisProcessAndAStandardUsersToken) {
   if (sourceType == TokenElevationTypeLimited) EXPECT_FALSE(facts.elevated);
   EXPECT_EQ(facts.integrityRid, static_cast<DWORD>(SECURITY_MANDATORY_MEDIUM_RID));
   EXPECT_NE(facts.administrators, TokenFacts::Group::kEnabled);
+
+  ElevatedEntryFacts filtered;
+  ASSERT_HRESULT_SUCCEEDED(ReadEntryTokenFacts(standard.get(), &filtered));
+  EXPECT_EQ(filtered.tokenElevated, facts.elevated);
+  EXPECT_FALSE(filtered.administratorsEnabled);
+  EXPECT_EQ(filtered.integrityRid, static_cast<DWORD>(SECURITY_MANDATORY_MEDIUM_RID));
+  filtered.verb = ElevatedVerb::kMachineRepairClass;
+  filtered.runsFromMachineRoot = true;
+  const ElevatedRefusal refusal = FindElevatedRefusal(filtered);
+  EXPECT_EQ(refusal, filtered.tokenElevated ? ElevatedRefusal::kAdministratorsNotEnabled
+                                            : ElevatedRefusal::kNotElevated);
+  EXPECT_EQ(CheckElevatedEntry(filtered), kNoAdministratorRightsHr);
+  std::printf("standard user's entry check: refused, %ls\n", ElevatedRefusalText(refusal).data());
 }
 
 // ---- the installer's records, in private keys ----

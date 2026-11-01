@@ -511,6 +511,13 @@ TEST_F(Setup, MigrateV1AsksForTheMachinePartOnlyWhenNeeded) {
   exitCode = static_cast<DWORD>(E_ACCESSDENIED);
   ASSERT_HRESULT_SUCCEEDED(MigrateV1(options, roots_, probes_, &result));
   EXPECT_EQ(result.code, ExitCode::kFailed);
+  // Started without administrator rights, the step refused: exit 7, not listed as a failure.
+  exitCode = static_cast<DWORD>(kNoAdministratorRightsHr);
+  ASSERT_HRESULT_SUCCEEDED(MigrateV1(options, roots_, probes_, &result));
+  EXPECT_EQ(result.code, ExitCode::kNeedsAdmin);
+  ASSERT_TRUE(result.run);
+  EXPECT_TRUE(LackedAdministratorRights(*result.run));
+  EXPECT_TRUE(result.failures.empty());
   // --user-only never asks.
   requests.clear();
   options.scope = MigrateScope::kUserOnly;

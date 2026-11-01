@@ -1,7 +1,8 @@
 // The pure parts of the elevation boundary (elevation.h): the step names and the one accepted
-// command line, the elevated side's entry checks in their order, how an elevated run's exit is
-// read, and how the report pipe's bytes become lines. Also the installer's records (inno.h) and
-// which holders of a DLL may be ended (processes.h).
+// command line, the elevated side's entry checks in their order (administrator rights in every
+// combination of the token's facts), how an elevated run's exit is read, and how the report
+// pipe's bytes become lines. Also the installer's records (inno.h) and which holders of a DLL may
+// be ended (processes.h).
 
 #include <windows.h>
 
@@ -9,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -16,6 +18,7 @@
 #include "inno.h"
 #include "processes.h"
 #include "project_config.h"
+#include "strings.h"
 
 namespace pdft {
 namespace {
@@ -66,25 +69,135 @@ TEST(ElevatedArguments, ExactlyTheStep) {
 ElevatedEntryFacts Passing(ElevatedVerb verb = ElevatedVerb::kMachineRepairClass) {
   ElevatedEntryFacts facts;
   facts.tokenElevated = true;
+  facts.administratorsEnabled = true;
+  facts.integrityRid = SECURITY_MANDATORY_HIGH_RID;
   facts.verb = verb;
   facts.runsFromMachineRoot = true;
   return facts;
 }
 
-TEST(ElevatedEntry, AllChecksPass) { EXPECT_EQ(CheckElevatedEntry(Passing()), S_OK); }
+TEST(ElevatedEntry, AllChecksPass) {
+  EXPECT_EQ(CheckElevatedEntry(Passing()), S_OK);
+  EXPECT_EQ(FindElevatedRefusal(Passing()), ElevatedRefusal::kNone);
+}
 
 TEST(ElevatedEntry, RefusalsInOrder) {
   ElevatedEntryFacts facts = Passing();
   facts.reparsePoints = HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK);
+  EXPECT_EQ(FindElevatedRefusal(facts), ElevatedRefusal::kReparsePoint);
   EXPECT_EQ(CheckElevatedEntry(facts), HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK));
   facts.runsFromMachineRoot = false;
+  EXPECT_EQ(FindElevatedRefusal(facts), ElevatedRefusal::kNotFromMachineRoot);
   EXPECT_EQ(CheckElevatedEntry(facts), E_ACCESSDENIED);
   facts.verb.reset();
+  EXPECT_EQ(FindElevatedRefusal(facts), ElevatedRefusal::kNotOneStep);
   EXPECT_EQ(CheckElevatedEntry(facts), E_INVALIDARG);
   facts.packaged = true;
+  EXPECT_EQ(FindElevatedRefusal(facts), ElevatedRefusal::kPackaged);
   EXPECT_EQ(CheckElevatedEntry(facts), HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED_IN_APPCONTAINER));
+  facts.integrityRid = SECURITY_MANDATORY_MEDIUM_RID;
+  EXPECT_EQ(FindElevatedRefusal(facts), ElevatedRefusal::kIntegrityBelowHigh);
+  EXPECT_EQ(CheckElevatedEntry(facts), kNoAdministratorRightsHr);
+  facts.administratorsEnabled = false;
+  EXPECT_EQ(FindElevatedRefusal(facts), ElevatedRefusal::kAdministratorsNotEnabled);
+  EXPECT_EQ(CheckElevatedEntry(facts), kNoAdministratorRightsHr);
   facts.tokenElevated = false;
-  EXPECT_EQ(CheckElevatedEntry(facts), HRESULT_FROM_WIN32(ERROR_ELEVATION_REQUIRED));
+  EXPECT_EQ(FindElevatedRefusal(facts), ElevatedRefusal::kNotElevated);
+  EXPECT_EQ(CheckElevatedEntry(facts), kNoAdministratorRightsHr);
+  // The app's own code: no Windows error, so no failed launch or call inside a step gives it.
+  EXPECT_TRUE(FAILED(kNoAdministratorRightsHr));
+  EXPECT_EQ(HRESULT_FACILITY(kNoAdministratorRightsHr), FACILITY_ITF);
+  EXPECT_NE(kNoAdministratorRightsHr, HRESULT_FROM_WIN32(ERROR_ELEVATION_REQUIRED));
+}
+
+// Every combination of the three token facts: only an elevated token with the Administrators
+// group enabled at High integrity or above may go on, whatever else holds. The token's refusal
+// comes before every other one.
+TEST(ElevatedEntry, AdministratorRightsInEveryCombination) {
+  const DWORD levels[] = {SECURITY_MANDATORY_UNTRUSTED_RID,
+                          SECURITY_MANDATORY_LOW_RID,
+                          SECURITY_MANDATORY_MEDIUM_RID,
+                          SECURITY_MANDATORY_MEDIUM_PLUS_RID,
+                          SECURITY_MANDATORY_HIGH_RID,
+                          SECURITY_MANDATORY_SYSTEM_RID,
+                          SECURITY_MANDATORY_PROTECTED_PROCESS_RID};
+  for (const bool elevated : {false, true}) {
+    for (const bool administrators : {false, true}) {
+      for (const DWORD level : levels) {
+        ElevatedEntryFacts facts = Passing();
+        facts.tokenElevated = elevated;
+        facts.administratorsEnabled = administrators;
+        facts.integrityRid = level;
+        ElevatedRefusal expected = ElevatedRefusal::kNone;
+        if (!elevated) {
+          expected = ElevatedRefusal::kNotElevated;
+        } else if (!administrators) {
+          expected = ElevatedRefusal::kAdministratorsNotEnabled;
+        } else if (level < static_cast<DWORD>(SECURITY_MANDATORY_HIGH_RID)) {
+          expected = ElevatedRefusal::kIntegrityBelowHigh;
+        }
+        const std::string label = "elevated " + std::to_string(elevated) + ", administrators " +
+                                  std::to_string(administrators) + ", level " +
+                                  std::to_string(level);
+        EXPECT_EQ(FindElevatedRefusal(facts), expected) << label;
+        EXPECT_EQ(CheckElevatedEntry(facts),
+                  expected == ElevatedRefusal::kNone ? S_OK : kNoAdministratorRightsHr)
+            << label;
+
+        // Everything else wrong too: the token still answers first.
+        facts.packaged = true;
+        facts.verb.reset();
+        facts.runsFromMachineRoot = false;
+        facts.reparsePoints = HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK);
+        EXPECT_EQ(FindElevatedRefusal(facts),
+                  expected == ElevatedRefusal::kNone ? ElevatedRefusal::kPackaged : expected)
+            << label;
+      }
+    }
+  }
+}
+
+// The exemption of machine-install in developer builds is from the place only: never from the
+// token checks.
+TEST(ElevatedEntry, TheDeveloperInstallNeedsAdministratorRightsToo) {
+  ElevatedEntryFacts facts = Passing(ElevatedVerb::kMachineInstall);
+  facts.runsFromMachineRoot = false;
+  facts.devInstall = true;
+  ASSERT_EQ(CheckElevatedEntry(facts), S_OK);
+  facts.administratorsEnabled = false;
+  EXPECT_EQ(CheckElevatedEntry(facts), kNoAdministratorRightsHr);
+  facts.administratorsEnabled = true;
+  facts.integrityRid = SECURITY_MANDATORY_MEDIUM_RID;
+  EXPECT_EQ(CheckElevatedEntry(facts), kNoAdministratorRightsHr);
+}
+
+// What the refusal line says: each refusal in words of its own, never a path; the three of the
+// token say that the step has no administrator rights.
+TEST(ElevatedEntry, RefusalTexts) {
+  EXPECT_TRUE(ElevatedRefusalText(ElevatedRefusal::kNone).empty());
+  const ElevatedRefusal refusals[] = {
+      ElevatedRefusal::kNotElevated,        ElevatedRefusal::kAdministratorsNotEnabled,
+      ElevatedRefusal::kIntegrityBelowHigh, ElevatedRefusal::kPackaged,
+      ElevatedRefusal::kNotOneStep,         ElevatedRefusal::kNotFromMachineRoot,
+      ElevatedRefusal::kReparsePoint};
+  std::vector<std::wstring> seen;
+  for (const ElevatedRefusal refusal : refusals) {
+    const std::wstring text(ElevatedRefusalText(refusal));
+    EXPECT_FALSE(text.empty()) << static_cast<int>(refusal);
+    EXPECT_EQ(text.find_first_of(L"\\/:"), std::wstring::npos) << WideToUtf8Lossy(text);
+    EXPECT_EQ(std::find(seen.begin(), seen.end(), text), seen.end()) << WideToUtf8Lossy(text);
+    seen.push_back(text);
+  }
+  for (const ElevatedRefusal refusal :
+       {ElevatedRefusal::kNotElevated, ElevatedRefusal::kAdministratorsNotEnabled,
+        ElevatedRefusal::kIntegrityBelowHigh}) {
+    EXPECT_EQ(ElevatedRefusalText(refusal).rfind(L"no administrator rights (", 0), 0u)
+        << static_cast<int>(refusal);
+  }
+  EXPECT_NE(ElevatedRefusalText(ElevatedRefusal::kAdministratorsNotEnabled).find(L"Administrators"),
+            std::wstring_view::npos);
+  EXPECT_NE(ElevatedRefusalText(ElevatedRefusal::kIntegrityBelowHigh).find(L"High"),
+            std::wstring_view::npos);
 }
 
 TEST(ElevatedEntry, OnlyMachineInstallInDeveloperBuildsMayRunElsewhere) {
@@ -126,6 +239,34 @@ TEST(ElevatedExit, HowARunEnded) {
   // Neither 0, 1 nor an HRESULT (a process ended from outside, say).
   EXPECT_EQ(ClassifyElevatedExit(S_OK, 2, &failure), ElevatedOutcome::kFailed);
   EXPECT_EQ(failure, E_UNEXPECTED);
+}
+
+// A step that refused for want of administrator rights, told apart from a declined prompt and
+// from every other failure.
+TEST(ElevatedExit, WithoutAdministratorRights) {
+  ElevatedRun run;
+  run.outcome =
+      ClassifyElevatedExit(S_OK, static_cast<DWORD>(kNoAdministratorRightsHr), &run.failure);
+  EXPECT_EQ(run.outcome, ElevatedOutcome::kFailed);
+  EXPECT_TRUE(LackedAdministratorRights(run));
+  run.failure = E_ACCESSDENIED;
+  EXPECT_FALSE(LackedAdministratorRights(run));
+  run.failure = kNoAdministratorRightsHr;
+  for (const ElevatedOutcome outcome :
+       {ElevatedOutcome::kDone, ElevatedOutcome::kRestartPending, ElevatedOutcome::kCancelled}) {
+    run.outcome = outcome;
+    EXPECT_FALSE(LackedAdministratorRights(run)) << static_cast<int>(outcome);
+  }
+  run = ElevatedRun{};
+  run.outcome = ClassifyElevatedExit(HRESULT_FROM_WIN32(ERROR_CANCELLED), 0, &run.failure);
+  EXPECT_FALSE(LackedAdministratorRights(run));
+  // Only the elevated process's own exit code says so, never a launch that failed.
+  run = ElevatedRun{};
+  run.launched = kNoAdministratorRightsHr;
+  run.outcome = ClassifyElevatedExit(run.launched, 0, &run.failure);
+  EXPECT_EQ(run.outcome, ElevatedOutcome::kFailed);
+  EXPECT_EQ(run.failure, kNoAdministratorRightsHr);
+  EXPECT_FALSE(LackedAdministratorRights(run));
 }
 
 TEST(ElevatedReport, PipeName) {

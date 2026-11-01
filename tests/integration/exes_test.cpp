@@ -368,9 +368,11 @@ TEST_P(Exes, ChecksValueIsChecked) {
 }
 
 // The elevated half of a change refuses to run from anywhere but the install folder: this build
-// folder is not under Program Files, so the step never starts. Unelevated (here) it stops even
-// earlier, at the elevation check. Only the settings executable knows --elevated at all. The
-// step is one that never installs anything; machine-install is never started by a test.
+// folder is not under Program Files, so the step never starts. Without administrator rights it
+// stops even earlier, at the token check; the child runs with this process's token, so what the
+// entry check makes of that token here says which refusal comes first. Only the settings
+// executable knows --elevated at all. The step is one that never installs anything;
+// machine-install is never started by a test.
 TEST_P(Exes, ElevatedStepRefusedOutsideTheInstallFolder) {
   test::CapturedRun run;
   RUN_OR_SKIP(L"--elevated machine-repair-class", run);
@@ -378,13 +380,19 @@ TEST_P(Exes, ElevatedStepRefusedOutsideTheInstallFolder) {
     EXPECT_EQ(run.exitCode, 2u) << run.err;
     return;
   }
-  bool elevated = false;
-  ASSERT_HRESULT_SUCCEEDED(GetTokenElevation(&elevated));
-  std::printf("%ls --elevated machine-repair-class (elevated=%d) -> exit 0x%08lX\n", GetParam(),
-              elevated ? 1 : 0, run.exitCode);
-  EXPECT_EQ(
-      run.exitCode,
-      static_cast<DWORD>(elevated ? E_ACCESSDENIED : HRESULT_FROM_WIN32(ERROR_ELEVATION_REQUIRED)));
+  ElevatedEntryFacts facts;
+  ASSERT_HRESULT_SUCCEEDED(ReadEntryTokenFacts(nullptr, &facts));
+  std::optional<std::wstring> package;
+  facts.packaged = FAILED(FindPackagedAncestor(&package)) || package.has_value();
+  facts.verb = ElevatedVerb::kMachineRepairClass;
+  facts.runsFromMachineRoot = false;
+  const ElevatedRefusal refusal = FindElevatedRefusal(facts);
+  std::printf("%ls --elevated machine-repair-class (refusal expected: %ls) -> exit 0x%08lX\n",
+              GetParam(),
+              refusal == ElevatedRefusal::kNone ? L"none" : ElevatedRefusalText(refusal).data(),
+              run.exitCode);
+  EXPECT_NE(refusal, ElevatedRefusal::kNone);
+  EXPECT_EQ(run.exitCode, static_cast<DWORD>(CheckElevatedEntry(facts)));
   EXPECT_EQ(run.out, "");
   EXPECT_EQ(run.err, "");
 }

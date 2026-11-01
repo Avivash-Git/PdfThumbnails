@@ -1,14 +1,19 @@
 // The system tests: the install, the uninstall and the 1.x clean-up for real, on a throw-away PC
-// (the CI job system-x64, or a virtual machine made for it). They write HKLM and HKCU, Program
-// Files, the user's install and data folders, the check task and 1.x's task, and have the
+// (the CI job system-x64, or a virtual machine made for it). They write HKLM and the user's HKCU,
+// Program Files, the user's install and data folders, the check task and 1.x's task, and have the
 // administrator steps done through UAC. main.cpp lets them run only where they are asked for,
 // elevated, and where nothing of 1.x or 2.x is installed.
 //
-// Each test starts the command-line executable the way a person would: as the signed-in user (a
-// standard user's token at Medium integrity, made from this elevated process's own account), so
-// every administrator step goes through runas; and the installer's administrator commands with
-// this process's token. Each test checks that nothing is left afterwards, and a failed one is
-// cleaned up after so the next starts from a clean PC.
+// Each test starts the command-line executable the way a person would: as the signed-in user,
+// who is the test account (test_account.h: an ordinary member of Administrators, with the limited
+// token of its interactive logon), so every administrator step goes through UAC into the
+// account's linked token; and the installer's administrator commands with this process's own
+// elevated token (another account than the user's, as an administrator who runs an installer may
+// be). What the tests check about the user (HKCU values, the slots, RunOnce, the per-user and
+// data folders, the check task) is the test account's: its loaded hive, its profile, its SID.
+// Each test checks that nothing is left afterwards, and a failed one is cleaned up after so the
+// next starts from a clean PC. If UAC does not elevate the account's step, the test that asked
+// says so with the step's own token line, and the tests after it stop at once.
 //
 // Lines starting with "[ system ]" are what the CI job looks for.
 
@@ -47,7 +52,7 @@
 #include "strings.h"
 #include "system_env.h"
 #include "tasks.h"
-#include "temp_dir.h"
+#include "test_account.h"
 #include "zoom.h"
 
 namespace pdft::systest {
@@ -64,6 +69,10 @@ constexpr const wchar_t* kV1ShippedFiles[] = {L"PdfThumbnails.ps1", L"PdfThumbna
 // The findings the runner may show without the install being at fault: the Explorer test needs a
 // thumbnail surrogate that a CI runner without a signed-in desktop may not start.
 constexpr std::string_view kExplorerTestFindings[] = {"LiveTestFailed", "LiveTestSkipped"};
+
+// Set once UAC did not elevate the test account's step: every test needs that, so the ones after
+// stop at once instead of failing for reasons that follow from it.
+bool g_uacDidNotElevate = false;
 
 bool Exists(const path& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
 
@@ -90,13 +99,13 @@ bool MakeDirs(const path& p) {
   return !error;
 }
 
-// Gives |folder| a protected DACL that lets only this user, SYSTEM and Administrators change it
-// (and, inherited, what is put in it later): what the install's permission check asks of a
-// build's folder.
-bool ProtectFolder(const path& folder) {
-  std::wstring sid;
-  if (FAILED(GetCurrentUserSid(&sid))) return false;
-  const std::wstring sddl = L"D:P(A;OICI;FA;;;" + sid + L")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+// Gives |folder| a protected DACL that lets only the accounts |sids|, SYSTEM and Administrators
+// change it (and, inherited, what is put in it later): what the install's permission check asks
+// of a build's folder.
+bool ProtectFolder(const path& folder, std::initializer_list<std::wstring_view> sids) {
+  std::wstring sddl = L"D:P";
+  for (const std::wstring_view sid : sids) sddl += L"(A;OICI;FA;;;" + std::wstring(sid) + L")";
+  sddl += L"(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
   wil::unique_hlocal_security_descriptor descriptor;
   if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1,
                                                             descriptor.put(), nullptr)) {
@@ -109,6 +118,14 @@ bool ProtectFolder(const path& folder) {
   return SetNamedSecurityInfoW(const_cast<wchar_t*>(folder.c_str()), SE_FILE_OBJECT,
                                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                                nullptr, nullptr, dacl, nullptr) == ERROR_SUCCESS;
+}
+
+// The line of |text| that starts at |at|, without its line end.
+std::string LineAt(const std::string& text, size_t at) {
+  const size_t end = text.find('\n', at);
+  std::string line = text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+  if (!line.empty() && line.back() == '\r') line.pop_back();
+  return line;
 }
 
 // The member at |keys| below |root|; nullptr when one is missing.
@@ -152,26 +169,48 @@ struct Status {
   std::vector<std::string> ids;   // every finding
 };
 
+// What the asking process's log says about the last run of an administrator step: its report's
+// first line ("elevated <step> start (token: ...)", or "... refused hr=<HRESULT>: <why> (token:
+// ...)") and the line RunElevated logs after the report ("<step> launch=<HRESULT>
+// exit=<HRESULT>", with " no-report" when nothing came through the pipe). Empty when missing.
+struct StepLog {
+  std::string first;
+  std::string summary;
+};
+
 class System : public ::testing::Test {
  protected:
   void SetUp() override {
-    ASSERT_TRUE(temp_.ok());
+    ASSERT_FALSE(g_uacDidNotElevate)
+        << "UAC did not elevate the test account's step in an earlier test (its \"[ system ] UAC "
+           "did not elevate\" line says how), and every test here needs it";
+    const TestAccount* account = CurrentTestAccount();
+    ASSERT_NE(account, nullptr) << "no test account";
+    const UserPlaces user = account->Places();
+    hive_ = user.hive;
+    sid_ = user.sid;
+    userRoot_ = user.userRoot;
+    dataDir_ = user.dataDir;
     ASSERT_HRESULT_SUCCEEDED(GetMachineRoot(&machineRoot_));
-    ASSERT_HRESULT_SUCCEEDED(GetUserRoot(&userRoot_));
-    ASSERT_HRESULT_SUCCEEDED(GetDataDir(&dataDir_));
-    ASSERT_HRESULT_SUCCEEDED(GetCurrentUserSid(&sid_));
+    std::wstring self;
+    ASSERT_HRESULT_SUCCEEDED(GetCurrentUserSid(&self));
     const std::vector<std::string> left = Leftovers();
     ASSERT_TRUE(left.empty()) << "not a clean start:" << Lines(left);
 
-    // The staged runtime, copied into a folder only this user and administrators can change.
+    // The staged runtime, copied into the test account's temp folder: it can read that folder
+    // and every folder above it (the install's permission check reads their permissions as the
+    // user), and only it, this account, SYSTEM and Administrators can change the copy.
     const std::wstring runtime = EnvironmentValue(kRuntimeEnv);
     ASSERT_FALSE(runtime.empty())
         << Text(kRuntimeEnv)
         << " must name the staged runtime (cmake --install <build> --prefix <folder> "
            "--component runtime)";
-    stage_ = path(temp_.path()) / L"runtime";
+    static int count = 0;
+    scratch_ = account->tempDir() / (L"pdft-system-" + std::to_wstring(GetCurrentProcessId()) +
+                                     L"-" + std::to_wstring(++count));
+    stage_ = scratch_ / L"runtime";
     ASSERT_TRUE(MakeDirs(stage_));
-    ASSERT_TRUE(ProtectFolder(stage_));
+    ASSERT_TRUE(ProtectFolder(stage_, {sid_, self}));
     std::error_code error;
     std::filesystem::copy(runtime, stage_, std::filesystem::copy_options::recursive, error);
     ASSERT_FALSE(error) << error.message();
@@ -185,6 +224,7 @@ class System : public ::testing::Test {
   }
 
   void TearDown() override {
+    if (!CurrentTestAccount()) return;
     const std::vector<std::string> left = Leftovers();
     if (!left.empty()) {
       std::printf("[ system ] cleaning up what the test left:%s\n", Lines(left).c_str());
@@ -195,11 +235,17 @@ class System : public ::testing::Test {
         std::printf("[ system ] %s stays until the restart\n", Text(trash.native()).c_str());
       }
     }
+    if (!scratch_.empty() && FAILED(RemoveTreeNoFollow(scratch_))) {
+      std::printf("[ system ] the test's copy of the runtime stays: %s\n",
+                  Text(scratch_.native()).c_str());
+    }
   }
 
   path Cli() const { return stage_ / kCliExe; }
   path InstalledCli() const { return machineRoot_ / kCliExe; }
   path BuildDll() const { return machineRoot_ / L"app" / buildName_ / kHandlerDll; }
+  // The user's registry: the test account's hive, and HKLM.
+  RegistryRoots Roots() const { return RegistryRoots{hive_, HKEY_LOCAL_MACHINE}; }
 
   static void Print(const char* who, const path& exe, std::wstring_view arguments,
                     const Outcome& run) {
@@ -214,6 +260,7 @@ class System : public ::testing::Test {
     }
   }
 
+  // As the test account, with the limited token of its logon.
   Outcome User(const path& exe, std::wstring_view arguments) {
     const Outcome run = RunAsUser(exe, std::wstring(arguments));
     Print("user", exe, arguments, run);
@@ -221,6 +268,7 @@ class System : public ::testing::Test {
     return run;
   }
 
+  // With this process's own (elevated) token.
   Outcome Admin(const path& exe, std::wstring_view arguments) {
     const Outcome run = RunAsAdministrator(exe, std::wstring(arguments));
     Print("administrator", exe, arguments, run);
@@ -230,24 +278,24 @@ class System : public ::testing::Test {
 
   // ---- The real state ----
 
-  static std::optional<std::wstring> ClassDll(Scope scope) {
+  std::optional<std::wstring> ClassDll(Scope scope) const {
     std::optional<ClassReg> reg;
-    EXPECT_HRESULT_SUCCEEDED(ReadClass(RegistryRoots{}, scope, &reg));
+    EXPECT_HRESULT_SUCCEEDED(ReadClass(Roots(), scope, &reg));
     if (!reg) return std::nullopt;
     return reg->dll;
   }
 
-  static std::optional<DWORD> StoredZoom() {
+  std::optional<DWORD> StoredZoom() const {
     std::optional<RegistryValue> value;
-    if (FAILED(ReadRegistryValue(HKEY_CURRENT_USER, kRegKey, kZoomValueName, &value)) || !value) {
+    if (FAILED(ReadRegistryValue(hive_, kRegKey, kZoomValueName, &value)) || !value) {
       return std::nullopt;
     }
     return RegistryDword(*value);
   }
 
-  static std::vector<std::wstring> RunOnceValues() {
+  std::vector<std::wstring> RunOnceValues() const {
     std::vector<std::wstring> names;
-    EXPECT_HRESULT_SUCCEEDED(FindRunOnceRemovals(RegistryRoots{}, &names));
+    EXPECT_HRESULT_SUCCEEDED(FindRunOnceRemovals(Roots(), &names));
     return names;
   }
 
@@ -257,6 +305,7 @@ class System : public ::testing::Test {
     return exists;
   }
 
+  // The test account's check task (named after its SID).
   TaskState UserTask() const {
     TaskLocation location;
     TaskState state;
@@ -265,23 +314,57 @@ class System : public ::testing::Test {
     return state;
   }
 
-  static bool SlotsOurs() {
+  bool SlotsOurs() const {
     SlotValues slots;
-    if (FAILED(ReadSlots(RegistryRoots{}, &slots))) return false;
+    if (FAILED(ReadSlots(Roots(), &slots))) return false;
     return std::all_of(slots.begin(), slots.end(),
                        [](const auto& slot) { return slot && IsOurClsid(*slot); });
   }
 
-  static bool MigratedFromV1() {
+  bool MigratedFromV1() const {
     bool migrated = false;
-    EXPECT_HRESULT_SUCCEEDED(ReadMigratedFromV1(RegistryRoots{}, &migrated));
+    EXPECT_HRESULT_SUCCEEDED(ReadMigratedFromV1(Roots(), &migrated));
     return migrated;
+  }
+
+  // The log of the app the test account runs: paths.h's log, in the account's data folder.
+  path UserLog() const {
+    path data;
+    path log;
+    if (FAILED(GetDataDir(&data)) || FAILED(GetLogPath(&log))) return {};
+    return dataDir_ / log.lexically_relative(data);
+  }
+
+  StepLog ReadStepLog(std::wstring_view verb) const {
+    StepLog step;
+    std::ifstream file(UserLog(), std::ios::binary);
+    if (!file.good()) return step;
+    const std::string text((std::istreambuf_iterator<char>(file)),
+                           std::istreambuf_iterator<char>());
+    const std::string name = Text(verb);
+    const std::string summaryStart = name + " launch=";
+    const size_t summary = text.rfind(summaryStart);
+    if (summary == std::string::npos) return step;
+    step.summary = LineAt(text, summary);
+    // The report's lines come right before the summary, after the summary of the run before.
+    const size_t previous =
+        summary == 0 ? std::string::npos : text.rfind(summaryStart, summary - 1);
+    const size_t from = previous == std::string::npos ? 0 : previous;
+    size_t first = std::string::npos;
+    for (const char* kind : {" start (", " refused hr="}) {
+      const size_t at = text.rfind("elevated " + name + kind, summary);
+      if (at != std::string::npos && at >= from && (first == std::string::npos || at > first)) {
+        first = at;
+      }
+    }
+    if (first != std::string::npos) step.first = LineAt(text, first);
+    return step;
   }
 
   // ---- Expectations ----
 
   // What a machine-wide install leaves: the files, the class for all users pointing at this
-  // build, this user's slots and check task (in the task folder, running the installed settings
+  // build, the user's slots and check task (in the task folder, running the installed settings
   // executable), no per-user class and no RunOnce clean-up.
   void ExpectInstalledForAllUsers() {
     for (const wchar_t* name : {kSettingsExe, kCliExe}) {
@@ -374,36 +457,69 @@ class System : public ::testing::Test {
     return wide;
   }
 
-  // The administrator step |verb| reported back through the asking process's pipe: its "start"
+  // The administrator step |verb| that |command| (the test account's) asked for got
+  // administrator rights through UAC: its report starts with "start", which the elevated side
+  // writes only after its entry check found an elevated token with Administrators enabled at
+  // High integrity. Otherwise this fails with what happened instead; when UAC did not elevate
+  // the step (it started without administrator rights, it could not be started, or nobody
+  // answered for 10 minutes), a line says so with the step's own token line, and the tests after
+  // this one stop at once. Use it as ASSERT_NO_FATAL_FAILURE(ExpectAdministratorRights(...)).
+  void ExpectAdministratorRights(std::wstring_view verb, const Outcome& command) {
+    const std::string name = Text(verb);
+    const StepLog step = ReadStepLog(verb);
+    if (step.first.find(" start (") != std::string::npos) {
+      // "elevated <step> start (token: ...)": the token part.
+      std::string token = step.first.substr(step.first.find(" start (") + 8);
+      if (!token.empty() && token.back() == ')') token.pop_back();
+      std::printf("[ system ] %s got administrator rights through UAC: yes (%s)\n", name.c_str(),
+                  token.c_str());
+      return;
+    }
+    std::printf("[ system ] %s got administrator rights through UAC: no\n", name.c_str());
+    const size_t launch = step.summary.find("launch=");
+    const bool launchFailed =
+        launch != std::string::npos && step.summary.compare(launch + 7, 10, "0x00000000") != 0;
+    std::string why;
+    bool uac = true;
+    if (command.hr == HRESULT_FROM_WIN32(ERROR_TIMEOUT)) {
+      why = "no answer within " + std::to_string(kCommandTimeoutMs / 60000) +
+            " minutes (a prompt nobody can answer?)";
+    } else if (step.first.find(": no administrator rights") != std::string::npos) {
+      why = "the step started without administrator rights; its report: " + step.first;
+    } else if (launchFailed) {
+      why = "the step could not be started: " + step.summary;
+    } else if (!step.first.empty()) {
+      uac = false;  // elevated, but refused for another reason
+      why = "the step refused: " + step.first;
+    } else if (!step.summary.empty()) {
+      uac = false;
+      why = "the step's report did not come back (no token line): " + step.summary;
+    } else {
+      uac = false;
+      why = "the command did not start the step (see its output above)";
+    }
+    if (uac) {
+      g_uacDidNotElevate = true;
+      std::printf("[ system ] UAC did not elevate %s from the test account's limited token: %s\n",
+                  name.c_str(), why.c_str());
+    }
+    FAIL() << name << ": " << why;
+  }
+
+  // The administrator step |verb| reported back through the asking process's pipe: its first
   // line reached the log of the unelevated process, and the summary line after it does not say
   // "no-report". That pipe takes lines only from the elevated process if its parent is the
-  // pipe's server, so this proves that UAC makes the asking process the parent. The start line
+  // pipe's server, so this proves that UAC makes the asking process the parent. The first line
   // is printed too: it tells what token UAC gave the step.
   void ExpectReportThroughThePipe(std::wstring_view verb) {
-    path log;
-    ASSERT_HRESULT_SUCCEEDED(GetLogPath(&log));
-    std::ifstream file(log, std::ios::binary);
-    ASSERT_TRUE(file.good()) << Text(log.native());
-    const std::string text((std::istreambuf_iterator<char>(file)),
-                           std::istreambuf_iterator<char>());
-    const std::string name = Text(verb);
-    const size_t start = text.rfind("elevated " + name + " start");
-    if (start != std::string::npos) {
-      std::string line = text.substr(start, text.find('\n', start) - start);
-      if (!line.empty() && line.back() == '\r') line.pop_back();
-      std::printf("[ system ] log: %s\n", line.c_str());
-    }
-    const size_t summary = text.rfind(name + " launch=");
-    bool reported = false;
-    if (summary != std::string::npos) {
-      const size_t end = text.find('\n', summary);
-      const std::string line = text.substr(summary, end == std::string::npos ? end : end - summary);
-      std::printf("[ system ] log: %s\n", line.c_str());
-      reported = start != std::string::npos && start < summary &&
-                 line.find(" no-report") == std::string::npos;
-    }
-    std::printf("[ system ] %s reported through the asking process's pipe: %s\n", name.c_str(),
-                reported ? "yes" : "no");
+    ASSERT_TRUE(Exists(UserLog())) << Text(UserLog().native());
+    const StepLog step = ReadStepLog(verb);
+    if (!step.first.empty()) std::printf("[ system ] log: %s\n", step.first.c_str());
+    if (!step.summary.empty()) std::printf("[ system ] log: %s\n", step.summary.c_str());
+    const bool reported = !step.first.empty() && !step.summary.empty() &&
+                          step.summary.find(" no-report") == std::string::npos;
+    std::printf("[ system ] %s reported through the asking process's pipe: %s\n",
+                Text(verb).c_str(), reported ? "yes" : "no");
     EXPECT_TRUE(reported) << "the elevated step's report did not reach the unelevated process";
   }
 
@@ -466,13 +582,12 @@ class System : public ::testing::Test {
     ASSERT_TRUE(WriteFileText(userRoot_ / L"repair.log", "repaired\r\n"));
   }
 
-  // 1.x's sign-in clean-up of its per-user folder, and a second value of the family.
+  // 1.x's sign-in clean-up of its per-user folder, and a second value of the family, in the
+  // user's RunOnce key.
   void PlantRunOnce() {
     const std::wstring command = L"cmd.exe /d /c rd /s /q \"" + userRoot_.native() + L"\"";
-    ASSERT_HRESULT_SUCCEEDED(
-        WriteRegistryString(HKEY_CURRENT_USER, kRunOnceKey, kLegacyRunOnce, command));
-    ASSERT_HRESULT_SUCCEEDED(
-        WriteRegistryString(HKEY_CURRENT_USER, kRunOnceKey, RunOnceValueName(1), command));
+    ASSERT_HRESULT_SUCCEEDED(WriteRegistryString(hive_, kRunOnceKey, kLegacyRunOnce, command));
+    ASSERT_HRESULT_SUCCEEDED(WriteRegistryString(hive_, kRunOnceKey, RunOnceValueName(1), command));
   }
 
   // 1.x's task, registered by the user as 1.1 did (a daily trigger instead of 1.1's sign-in and
@@ -504,12 +619,14 @@ class System : public ::testing::Test {
     EXPECT_TRUE(MigratedFromV1());
   }
 
-  test::TempDir temp_{L"system"};
+  path scratch_;  // in the test account's temp folder; removed after the test
   path stage_;
   path machineRoot_;
+  // The user's: the test account's hive, SID and folders.
+  HKEY hive_ = nullptr;
+  std::wstring sid_;
   path userRoot_;
   path dataDir_;
-  std::wstring sid_;
   std::wstring buildName_;
 };
 
@@ -517,6 +634,7 @@ class System : public ::testing::Test {
 
 TEST_F(System, InstallChecksZoomFixAndUninstall) {
   const Outcome install = User(Cli(), L"--install --machine");
+  ASSERT_NO_FATAL_FAILURE(ExpectAdministratorRights(L"machine-install", install));
   ExpectInstalledForAllUsers();
   EXPECT_EQ(StoredZoom(), std::optional<DWORD>(100));
   const Status installed = ReadStatus();
@@ -538,7 +656,8 @@ TEST_F(System, InstallChecksZoomFixAndUninstall) {
   EXPECT_NE(zoom.out.find("130 %"), std::string::npos) << zoom.out;
 
   // The installer's steps run again: the per-user one quietly keeps the user's choices and
-  // refuses an administrator; the one for all users needs an administrator.
+  // refuses an administrator (this process); the one for all users needs an administrator: the
+  // user's limited token is refused, this process's is not.
   const Outcome setupUser = User(InstalledCli(), L"--setup-user");
   EXPECT_EQ(setupUser.exitCode, 0u);
   EXPECT_EQ(setupUser.Output(), "");
@@ -555,6 +674,7 @@ TEST_F(System, InstallChecksZoomFixAndUninstall) {
   ASSERT_HRESULT_SUCCEEDED(WriteRegistryString(
       HKEY_LOCAL_MACHINE, ClassKeyPath() + L"\\InprocServer32", L"", missing.native()));
   const Outcome fix = User(InstalledCli(), L"--fix");
+  ASSERT_NO_FATAL_FAILURE(ExpectAdministratorRights(L"machine-repair-class", fix));
   const std::optional<std::wstring> repaired = ClassDll(Scope::kMachine);
   ASSERT_TRUE(repaired.has_value());
   EXPECT_TRUE(IEquals(*repaired, BuildDll().native())) << Text(*repaired);
@@ -562,7 +682,8 @@ TEST_F(System, InstallChecksZoomFixAndUninstall) {
   ExpectReportThroughThePipe(L"machine-repair-class");
 
   // The uninstall, from the installed executable: the running programs go to a trash folder
-  // that is deleted at the restart.
+  // that is deleted at the restart. (Its log goes with the user's data folder, so its step's
+  // report is not read back; what is left shows whether the step worked.)
   const Outcome uninstall = User(InstalledCli(), L"--uninstall --yes");
   EXPECT_EQ(uninstall.exitCode, 0u);
   EXPECT_FALSE(StoredZoom().has_value());
@@ -577,14 +698,14 @@ TEST_F(System, InstallReplaces11ForAllUsers) {
   const path v1 = PlantV1Build(machineRoot_);
   PlantClass(HKEY_LOCAL_MACHINE, v1);
   for (size_t i = 0; i < kSlotCount; ++i) {
-    ASSERT_HRESULT_SUCCEEDED(
-        WriteRegistryString(HKEY_CURRENT_USER, SlotKeyPath(i), L"", kHandlerClsidString));
+    ASSERT_HRESULT_SUCCEEDED(WriteRegistryString(hive_, SlotKeyPath(i), L"", kHandlerClsidString));
   }
   PlantV1UserFolder(120);
   PlantRunOnce();
   PlantLegacyTask();
 
   const Outcome install = User(Cli(), L"--install --machine");
+  ASSERT_NO_FATAL_FAILURE(ExpectAdministratorRights(L"machine-install", install));
   ExpectInstalledForAllUsers();
   EXPECT_FALSE(Exists(v1.parent_path()));
   EXPECT_EQ(StoredZoom(), std::optional<DWORD>(120));
@@ -600,20 +721,20 @@ TEST_F(System, InstallReplaces11ForAllUsers) {
   ExpectNothingLeft();
 }
 
-// 1.1 installed for this user only (its class in HKCU): --install --machine takes over, and the
-// per-user class and build go.
+// 1.1 installed for this user only (its class in the user's HKCU): --install --machine takes
+// over, and the per-user class and build go.
 TEST_F(System, InstallReplaces11ForThisUser) {
   const path v1 = PlantV1Build(userRoot_);
-  PlantClass(HKEY_CURRENT_USER, v1);
+  PlantClass(hive_, v1);
   for (size_t i = 0; i < kSlotCount; ++i) {
-    ASSERT_HRESULT_SUCCEEDED(
-        WriteRegistryString(HKEY_CURRENT_USER, SlotKeyPath(i), L"", kHandlerClsidString));
+    ASSERT_HRESULT_SUCCEEDED(WriteRegistryString(hive_, SlotKeyPath(i), L"", kHandlerClsidString));
   }
   PlantV1UserFolder(120);
   PlantRunOnce();
   PlantLegacyTask();
 
   const Outcome install = User(Cli(), L"--install --machine");
+  ASSERT_NO_FATAL_FAILURE(ExpectAdministratorRights(L"machine-install", install));
   ExpectInstalledForAllUsers();
   EXPECT_EQ(StoredZoom(), std::optional<DWORD>(120));
   ExpectV1UserFilesGone();
@@ -631,7 +752,8 @@ TEST_F(System, InstallReplaces11ForThisUser) {
 // administrator step remove 1.1's build folder for all users, through UAC, by the installed
 // settings executable.
 TEST_F(System, MigrateV1RemovesWhat11Left) {
-  User(Cli(), L"--install --machine");
+  const Outcome install = User(Cli(), L"--install --machine");
+  ASSERT_NO_FATAL_FAILURE(ExpectAdministratorRights(L"machine-install", install));
   ExpectInstalledForAllUsers();
   const path v1 = PlantV1Build(machineRoot_);
   PlantV1UserFolder(120);
@@ -639,6 +761,7 @@ TEST_F(System, MigrateV1RemovesWhat11Left) {
   PlantLegacyTask();
 
   const Outcome migrate = User(InstalledCli(), L"--migrate-v1");
+  ASSERT_NO_FATAL_FAILURE(ExpectAdministratorRights(L"machine-migrate-v1", migrate));
   EXPECT_EQ(migrate.exitCode, 0u);
   EXPECT_FALSE(Exists(v1.parent_path()));
   // The zoom the install wrote stays: 1.x's is taken only where there is none.
@@ -653,11 +776,13 @@ TEST_F(System, MigrateV1RemovesWhat11Left) {
 
 // ---- The installer's uninstall step ------------------------------------------------------
 
-// --uninstall-cleanup, as an installer's uninstaller runs it (elevated): the part for all users
-// and the loaded user hives, exit 0; the data folder is the signed-in user's, left to their own
+// --uninstall-cleanup, as an installer's uninstaller runs it (elevated, here as this process,
+// another account than the user's): the part for all users and the loaded user hives (the test
+// account's among them), exit 0; the data folder is the signed-in user's, left to their own
 // uninstall or a sign-in clean-up.
 TEST_F(System, UninstallCleanupAsTheInstallersUninstaller) {
-  User(Cli(), L"--install --machine");
+  const Outcome install = User(Cli(), L"--install --machine");
+  ASSERT_NO_FATAL_FAILURE(ExpectAdministratorRights(L"machine-install", install));
   ExpectInstalledForAllUsers();
 
   EXPECT_EQ(Admin(InstalledCli(), L"--uninstall-cleanup").exitCode, 0u);
@@ -666,21 +791,21 @@ TEST_F(System, UninstallCleanupAsTheInstallersUninstaller) {
   EXPECT_FALSE(UserTask().exists);
   EXPECT_FALSE(Exists(machineRoot_));
   SlotValues slots;
-  ASSERT_HRESULT_SUCCEEDED(ReadSlots(RegistryRoots{}, &slots));
+  ASSERT_HRESULT_SUCCEEDED(ReadSlots(Roots(), &slots));
   for (const auto& slot : slots) EXPECT_FALSE(slot && IsOurClsid(*slot));
   bool settings = true;
-  ASSERT_HRESULT_SUCCEEDED(RegistryKeyExists(HKEY_CURRENT_USER, kRegKey, &settings));
+  ASSERT_HRESULT_SUCCEEDED(RegistryKeyExists(hive_, kRegKey, &settings));
   EXPECT_FALSE(settings);
 
   // What is left for the user: the data folder, removed by a sign-in clean-up or their own
-  // --uninstall; the sign-in clean-up is not left for the next sign-in of the runner.
+  // --uninstall; a sign-in clean-up is not left for a sign-in that never comes.
   for (const std::wstring& name : RunOnceValues()) {
     std::optional<std::wstring> command;
-    EXPECT_HRESULT_SUCCEEDED(ReadRegistryString(HKEY_CURRENT_USER, kRunOnceKey, name, &command));
+    EXPECT_HRESULT_SUCCEEDED(ReadRegistryString(hive_, kRunOnceKey, name, &command));
     std::printf("[ system ] sign-in clean-up %s: %s\n", Text(name).c_str(),
                 Text(command.value_or(L"")).c_str());
   }
-  ASSERT_HRESULT_SUCCEEDED(DeleteRunOnceRemovals(RegistryRoots{}));
+  ASSERT_HRESULT_SUCCEEDED(DeleteRunOnceRemovals(Roots()));
   if (Exists(dataDir_)) {
     const Outcome uninstall = User(Cli(), L"--uninstall --yes");
     EXPECT_TRUE(uninstall.exitCode == 0 || uninstall.exitCode == 6) << uninstall.Output();

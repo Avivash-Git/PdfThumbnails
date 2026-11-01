@@ -492,7 +492,9 @@ std::optional<ExitCode> InstallStepExitCode(ElevatedOutcome outcome, HRESULT fai
     case ElevatedOutcome::kFailed:
       break;
   }
-  return failure == kUnsafeBuildFolderHr ? ExitCode::kWrongContext : ExitCode::kFailed;
+  if (failure == kUnsafeBuildFolderHr) return ExitCode::kWrongContext;
+  if (failure == kNoAdministratorRightsHr) return ExitCode::kNeedsAdmin;
+  return ExitCode::kFailed;
 }
 
 HRESULT InstallFromOwnFolder(const InstallOptions& options, const RegistryRoots& roots,

@@ -111,6 +111,11 @@ std::wstring InstallRefusalMessage(const InstallResult& result);
 // Why --uninstall refuses an elevated process (pure). Starts like CannotRunHereMessage.
 std::wstring UninstallElevatedRefusalMessage();
 
+// What --install, --fix, --migrate-v1 and --uninstall say when their administrator step did not
+// get administrator rights (LackedAdministratorRights; exit 7), before the step's own report
+// (pure). Not the line of a declined prompt (exit 3).
+std::wstring NoAdministratorRightsMessage();
+
 // What --uninstall prints after it ran (pure; not for a refusal, a busy lock or the installer's
 // uninstaller): the thumbnail rebuild it cannot do, the part for all users, files left for the
 // next sign-in, and the result. May throw std::bad_alloc.

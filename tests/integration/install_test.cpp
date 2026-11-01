@@ -590,6 +590,19 @@ TEST_F(Install, TheStepForAllUsersDeclinedOrFailed) {
   ASSERT_HRESULT_SUCCEEDED(InstallFromOwnFolder(options, roots_, probes_, &result));
   EXPECT_EQ(result.code, ExitCode::kFailed);
   EXPECT_TRUE(probes_.applied.empty());
+
+  // Started without administrator rights, the step refused: exit 7, no refusal of --install's
+  // own, nothing listed as failed, and nothing installed for anyone.
+  options.launcher = AnsweringLauncher(S_OK, static_cast<DWORD>(kNoAdministratorRightsHr));
+  ASSERT_HRESULT_SUCCEEDED(InstallFromOwnFolder(options, roots_, probes_, &result));
+  EXPECT_EQ(result.code, ExitCode::kNeedsAdmin);
+  EXPECT_EQ(result.refusal, InstallRefusal::kNone);
+  ASSERT_TRUE(result.run);
+  EXPECT_TRUE(LackedAdministratorRights(*result.run));
+  EXPECT_TRUE(result.failures.empty());
+  EXPECT_FALSE(MachineClassDll());
+  EXPECT_FALSE(StoredZoom());
+  EXPECT_TRUE(probes_.applied.empty());
 }
 
 TEST_F(Install, InstallForThisUser) {
@@ -786,6 +799,15 @@ TEST_F(Install, FixRepairsTheClassForAllUsers) {
   EXPECT_TRUE(IEquals(requests_[0].exe.native(), (paths_.machineRoot / kSettingsExe).native()));
   EXPECT_EQ(requests_[0].parameters, L"--elevated machine-repair-class");
 
+  // Started without administrator rights: exit 7, the class still broken.
+  options.launcher = AnsweringLauncher(S_OK, static_cast<DWORD>(kNoAdministratorRightsHr));
+  ASSERT_HRESULT_SUCCEEDED(RunCheck(options, roots_, probes_, &result));
+  ASSERT_TRUE(result.elevated);
+  EXPECT_TRUE(LackedAdministratorRights(*result.elevated));
+  EXPECT_EQ(result.code, ExitCode::kNeedsAdmin);
+  EXPECT_TRUE(result.adminStepNeeded);
+  EXPECT_TRUE(HasFinding(result.findings, FindingId::kClassDamagedMachine));
+
   options.launcher = [this](const ElevationRequest& request, DWORD* processId, DWORD* exitCode) {
     requests_.push_back(request);
     *processId = 0;
@@ -936,6 +958,15 @@ TEST_F(Install, UninstallMachinePartDeclinedOrNotPossible) {
   EXPECT_EQ(result.run->outcome, ElevatedOutcome::kCancelled);
   EXPECT_TRUE(result.machineLeft);
   EXPECT_EQ(result.code, ExitCode::kProblems);
+
+  // Started without administrator rights: the part stays, exit 7, not listed as a failure.
+  options.launcher = AnsweringLauncher(S_OK, static_cast<DWORD>(kNoAdministratorRightsHr));
+  ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
+  ASSERT_TRUE(result.run);
+  EXPECT_TRUE(LackedAdministratorRights(*result.run));
+  EXPECT_TRUE(result.machineLeft);
+  EXPECT_TRUE(result.failures.empty());
+  EXPECT_EQ(result.code, ExitCode::kNeedsAdmin);
 }
 
 TEST_F(Install, UninstallRefusalsAndTheInstallersUninstaller) {

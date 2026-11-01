@@ -183,8 +183,13 @@ int RunStatus(const CliArgs& args, const ProcessContext& context, Output& out) {
   return Code(code);
 }
 
+// The step's own report, indented: the elevated process writes no log of its own.
+void PrintReport(const ElevatedRun& run, Output& out) {
+  for (const std::wstring& line : run.report) out.Error(L"  " + line);
+}
+
 // How an administrator step (|what|, "The administrator step") went. On a failure the step's own
-// report follows, indented: the elevated process writes no log of its own.
+// report follows.
 void PrintElevatedRun(const ElevatedRun& run, std::wstring_view what, Output& out) {
   switch (run.outcome) {
     case ElevatedOutcome::kDone:
@@ -200,8 +205,12 @@ void PrintElevatedRun(const ElevatedRun& run, std::wstring_view what, Output& ou
     case ElevatedOutcome::kFailed:
       break;
   }
-  out.Error(std::wstring(what) + L" failed: " + HResultText(run.failure));
-  for (const std::wstring& line : run.report) out.Error(L"  " + line);
+  if (LackedAdministratorRights(run)) {
+    out.Error(NoAdministratorRightsMessage());
+  } else {
+    out.Error(std::wstring(what) + L" failed: " + HResultText(run.failure));
+  }
+  PrintReport(run, out);
 }
 
 // What --check and --fix print after the check ran, and their exit code.
@@ -503,6 +512,12 @@ int RunMigrateV1Command(const CliArgs& args, const ProcessContext& context, Outp
         out.Line(L"The administrator prompt was declined; 1.x's files for all users stay.");
         break;
       case ElevatedOutcome::kFailed:
+        // Other failures are listed with the rest (PrintFailures).
+        if (LackedAdministratorRights(*result.run)) {
+          out.Error(NoAdministratorRightsMessage());
+          PrintReport(*result.run, out);
+          out.Line(L"1.x's files for all users stay.");
+        }
         break;
     }
   }
@@ -554,7 +569,8 @@ int RunInstallCommand(const CliArgs& args, const ProcessContext& context, Output
              L" of this session that held an old build.");
   }
   if (result.run) PrintElevatedRun(*result.run, L"The part for all users", out);
-  if (result.run && result.run->outcome == ElevatedOutcome::kCancelled) {
+  if (result.run && (result.run->outcome == ElevatedOutcome::kCancelled ||
+                     LackedAdministratorRights(*result.run))) {
     out.Line(L"Nothing was installed.");
     return Code(result.code);
   }
@@ -922,6 +938,11 @@ std::wstring UninstallElevatedRefusalMessage() {
          L"the part for all users.";
 }
 
+std::wstring NoAdministratorRightsMessage() {
+  return L"The step for all users did not get administrator rights (Windows started it without "
+         L"them), so it changed nothing.";
+}
+
 std::vector<std::wstring> UninstallReport(const UninstallResult& result) {
   std::vector<std::wstring> lines;
   const std::wstring product = kProductName;
@@ -946,7 +967,12 @@ std::vector<std::wstring> UninstallReport(const UninstallResult& result) {
             L"install folder) stays. Run --uninstall again and approve the prompt to remove it.");
         break;
       case ElevatedOutcome::kFailed:
-        lines.push_back(L"The part for all users failed: " + HResultText(result.run->failure));
+        lines.push_back(LackedAdministratorRights(*result.run)
+                            ? NoAdministratorRightsMessage() +
+                                  L" The part for all users (its class and its install folder) "
+                                  L"stays."
+                            : L"The part for all users failed: " +
+                                  HResultText(result.run->failure));
         for (const std::wstring& line : result.run->report) lines.push_back(L"  " + line);
         break;
     }
