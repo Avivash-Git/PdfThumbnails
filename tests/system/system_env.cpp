@@ -32,6 +32,8 @@ using std::filesystem::path;
 
 constexpr wchar_t kSessionManagerKey[] = L"SYSTEM\\CurrentControlSet\\Control\\Session Manager";
 constexpr wchar_t kPendingRenamesValue[] = L"PendingFileRenameOperations";
+// Newer Windows may keep such operations here as well.
+constexpr wchar_t kPendingRenames2Value[] = L"PendingFileRenameOperations2";
 
 bool Exists(const path& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
 
@@ -213,24 +215,35 @@ std::vector<path> TrashFolders() {
 }
 
 bool QueuedForRestart(const path& target) {
-  DWORD bytes = 0;
-  if (RegGetValueW(HKEY_LOCAL_MACHINE, kSessionManagerKey, kPendingRenamesValue,
-                   RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &bytes) != ERROR_SUCCESS) {
-    return false;
-  }
-  std::vector<wchar_t> data(bytes / sizeof(wchar_t) + 2, L'\0');
-  bytes = static_cast<DWORD>(data.size() * sizeof(wchar_t));
-  if (RegGetValueW(HKEY_LOCAL_MACHINE, kSessionManagerKey, kPendingRenamesValue,
-                   RRF_RT_REG_MULTI_SZ, nullptr, data.data(), &bytes) != ERROR_SUCCESS) {
-    return false;
-  }
-  // Pairs of strings: the source ("\??\C:\..."), then the target, empty for a deletion.
-  std::vector<std::wstring> entries;
-  for (const wchar_t* at = data.data(); *at; at += wcslen(at) + 1) entries.emplace_back(at);
-  for (size_t i = 0; i + 1 < entries.size(); i += 2) {
-    std::wstring_view source = entries[i];
-    if (source.starts_with(L"\\??\\")) source.remove_prefix(4);
-    if (entries[i + 1].empty() && IEquals(source, target.native())) return true;
+  for (const wchar_t* value : {kPendingRenamesValue, kPendingRenames2Value}) {
+    DWORD bytes = 0;
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, kSessionManagerKey, value, RRF_RT_REG_MULTI_SZ, nullptr,
+                     nullptr, &bytes) != ERROR_SUCCESS) {
+      continue;
+    }
+    std::vector<wchar_t> data(bytes / sizeof(wchar_t) + 2, L'\0');
+    bytes = static_cast<DWORD>(data.size() * sizeof(wchar_t));
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, kSessionManagerKey, value, RRF_RT_REG_MULTI_SZ, nullptr,
+                     data.data(), &bytes) != ERROR_SUCCESS) {
+      continue;
+    }
+    // Pairs of strings: the source ("*1\??\C:\..." or "\??\C:\..."), then the target, which is
+    // empty for a deletion. Empty strings are entries here, so the value is split by its length,
+    // not at the first empty string.
+    const std::wstring_view all(data.data(), bytes / sizeof(wchar_t));
+    std::vector<std::wstring_view> entries;
+    for (size_t start = 0; start < all.size();) {
+      const size_t end = all.find(L'\0', start);
+      entries.push_back(all.substr(start, end == std::wstring_view::npos ? end : end - start));
+      if (end == std::wstring_view::npos) break;
+      start = end + 1;
+    }
+    for (size_t i = 0; i + 1 < entries.size(); i += 2) {
+      if (entries[i + 1].empty() &&
+          IEquals(PendingRenamePath(entries[i]), std::wstring_view(target.native()))) {
+        return true;
+      }
+    }
   }
   return false;
 }

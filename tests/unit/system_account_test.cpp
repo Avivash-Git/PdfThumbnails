@@ -202,5 +202,14 @@ TEST(TestAccountPassword, OnlyItsAlphabet) {
   }
 }
 
+TEST(PendingRenamePath, WithAndWithoutTheMarkNewerWindowsAdds) {
+  EXPECT_EQ(PendingRenamePath(L"\\??\\C:\\Program Files\\x"), L"C:\\Program Files\\x");
+  EXPECT_EQ(PendingRenamePath(L"*1\\??\\C:\\Program Files\\x"), L"C:\\Program Files\\x");
+  EXPECT_EQ(PendingRenamePath(L"*12\\??\\C:\\x"), L"C:\\x");
+  EXPECT_EQ(PendingRenamePath(L"*\\??\\C:\\x"), L"C:\\x");
+  EXPECT_EQ(PendingRenamePath(L"C:\\x"), L"C:\\x");
+  EXPECT_EQ(PendingRenamePath(L""), L"");
+}
+
 }  // namespace
 }  // namespace pdft::systest

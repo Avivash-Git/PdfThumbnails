@@ -128,4 +128,13 @@ std::optional<std::wstring> PasswordFromRandom(std::span<const BYTE> random,
   return std::optional<std::wstring>(std::move(password));  // moved: no copy left behind
 }
 
+std::wstring_view PendingRenamePath(std::wstring_view entry) noexcept {
+  if (entry.starts_with(L'*')) {
+    entry.remove_prefix(1);
+    while (!entry.empty() && entry.front() >= L'0' && entry.front() <= L'9') entry.remove_prefix(1);
+  }
+  if (entry.starts_with(L"\\??\\")) entry.remove_prefix(4);
+  return entry;
+}
+
 }  // namespace pdft::systest

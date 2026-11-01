@@ -1,6 +1,7 @@
 // The rules of the local account the system tests make for themselves (test_account.h), apart
 // from the code that makes it, so that the unit tests can check them on any PC: when the account
 // may be made at all, its name and its password, each from what it is given (no system access).
+// Also how the tests read Windows' list of files to delete at the restart.
 
 #pragma once
 
@@ -77,5 +78,9 @@ inline constexpr size_t kPasswordLength = 32;
 // std::bad_alloc.
 std::optional<std::wstring> PasswordFromRandom(std::span<const BYTE> random,
                                                std::wstring_view accountName);
+
+// The path one source entry of PendingFileRenameOperations names (pure): without the "\??\"
+// prefix, and without the "*" and digits newer Windows puts in front of it ("*1\??\C:\...").
+std::wstring_view PendingRenamePath(std::wstring_view entry) noexcept;
 
 }  // namespace pdft::systest
