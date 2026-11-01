@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <utility>
 
+#include "failure_trace.h"
 #include "instance.h"
 #include "legacy.h"
 #include "log.h"
@@ -341,11 +342,13 @@ CATCH_RETURN();
 
 HRESULT RunMachineUninstall(ElevatedReporter& report, bool* restartPending) noexcept try {
   *restartPending = false;
+  TraceStep step(L"own-paths");
   MachineUninstallOptions options;
-  RETURN_IF_FAILED(GetMachineRoot(&options.machineRoot));
-  RETURN_IF_FAILED(GetLegacyMachineRoot(&options.legacyMachineRoot));
+  RETURN_IF_FAILED(PDFT_TRACE(GetMachineRoot(&options.machineRoot)));
+  RETURN_IF_FAILED(PDFT_TRACE(GetLegacyMachineRoot(&options.legacyMachineRoot)));
+  step.Set(L"uninstall");
   MachineUninstallResult result;
-  RETURN_IF_FAILED(UninstallForAllUsers(options, RegistryRoots{}, &result));
+  RETURN_IF_FAILED(PDFT_TRACE(UninstallForAllUsers(options, RegistryRoots{}, &result)));
   if (result.classDeleted) report.Line(L"class for all users removed");
   report.Line(L"check tasks hr=" + HResultText(result.tasks) + L", 1.x task hr=" +
               HResultText(result.legacyTask));
@@ -354,7 +357,9 @@ HRESULT RunMachineUninstall(ElevatedReporter& report, bool* restartPending) noex
   ReportRoot(report, L"1.x install folder", result.legacyRoot);
   for (const std::wstring& failure : result.failures) report.Line(L"failed " + failure);
   *restartPending = result.restartPending;
-  return result.firstError;
+  // Its failures are listed above, each with its part: the trace names this place, never one of
+  // them that was tolerated.
+  return PDFT_TRACE(result.firstError);
 }
 CATCH_RETURN();
 

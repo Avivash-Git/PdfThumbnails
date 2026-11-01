@@ -358,6 +358,10 @@ jobs:
           type runtime\BUILDINFO.txt
           reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLUA
           reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v ConsentPromptBehaviorAdmin
+          rem A value that is not there has its default (FilterAdministratorToken 0: the built-in
+          rem Administrator runs without Admin Approval Mode).
+          reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v FilterAdministratorToken
+          reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v ConsentPromptBehaviorUser
           whoami /groups | findstr /i /c:"Mandatory Label" /c:"S-1-5-32-544"
           t\pdft-run-medium.exe -- t\pdft-run-medium.exe --check-token
           exit /b 0

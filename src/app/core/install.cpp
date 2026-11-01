@@ -6,6 +6,7 @@
 #include <iterator>
 #include <utility>
 
+#include "failure_trace.h"
 #include "instance.h"
 #include "legacy.h"
 #include "log.h"
@@ -40,20 +41,27 @@ bool IsRegularFile(const std::filesystem::path& path) noexcept {
 }
 
 // Makes the folder |dir| unless it is there, and checks that it is a real folder (never a link or
-// junction, which would lead the copy somewhere else).
-HRESULT MakeRealFolder(const std::filesystem::path& dir) noexcept {
+// junction, which would lead the copy somewhere else). A failure's trace detail is the folder's
+// own name: the product's, "app", a build's or a notice folder's, never a path.
+HRESULT MakeRealFolder(const std::filesystem::path& dir) noexcept try {
+  const std::wstring name = dir.filename().native();
   if (!CreateDirectoryW(dir.c_str(), nullptr)) {
     const DWORD error = GetLastError();
-    if (error != ERROR_ALREADY_EXISTS) return HRESULT_FROM_WIN32(error);
+    if (error != ERROR_ALREADY_EXISTS) return PDFT_TRACE_DETAIL(HRESULT_FROM_WIN32(error), name);
   }
   const DWORD attributes = GetFileAttributesW(dir.c_str());
-  if (attributes == INVALID_FILE_ATTRIBUTES) return HRESULT_FROM_WIN32(GetLastError());
-  if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-    return HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK);
+  if (attributes == INVALID_FILE_ATTRIBUTES) {
+    return PDFT_TRACE_DETAIL(HRESULT_FROM_WIN32(GetLastError()), name);
   }
-  if (!(attributes & FILE_ATTRIBUTE_DIRECTORY)) return HRESULT_FROM_WIN32(ERROR_DIRECTORY);
+  if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+    return PDFT_TRACE_DETAIL(HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK), name);
+  }
+  if (!(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+    return PDFT_TRACE_DETAIL(HRESULT_FROM_WIN32(ERROR_DIRECTORY), name);
+  }
   return S_OK;
 }
+CATCH_RETURN();
 
 // |file| exists as a regular file whose SHA-256 is |sha|.
 bool HasContents(const std::filesystem::path& file, const Sha256Digest& sha) noexcept {
@@ -72,7 +80,8 @@ bool SameContents(const std::filesystem::path& a, const std::filesystem::path& b
 HRESULT CollectNotices(const std::filesystem::path& base, const std::filesystem::path& relative,
                        int depth, std::vector<std::filesystem::path>* found) noexcept try {
   std::vector<FolderEntry> entries;
-  RETURN_IF_FAILED(ListFolderEntries(base / relative, &entries));
+  RETURN_IF_FAILED(PDFT_TRACE_DETAIL(ListFolderEntries(base / relative, &entries),
+                                     relative.filename().native()));
   std::sort(entries.begin(), entries.end(), [](const FolderEntry& a, const FolderEntry& b) {
     return CompareStringOrdinal(a.name.c_str(), -1, b.name.c_str(), -1, TRUE) == CSTR_LESS_THAN;
   });
@@ -122,6 +131,7 @@ bool IsRootOrInside(const std::filesystem::path& child, const std::filesystem::p
 // at the next restart) and the copy is made again; otherwise the in-use error.
 HRESULT CopyWithRetry(const std::filesystem::path& from, const std::filesystem::path& to,
                       const CopyBuildOptions& options, CopyBuildResult* result) noexcept try {
+  const std::wstring name = to.filename().native();
   const ULONGLONG deadline = GetTickCount64() + options.retryMs;
   HRESULT hr = S_OK;
   for (;;) {
@@ -130,25 +140,48 @@ HRESULT CopyWithRetry(const std::filesystem::path& from, const std::filesystem::
       ++result->copied;
       return S_OK;
     }
-    if (!IsInUseError(hr)) return hr;
+    if (!IsInUseError(hr)) return PDFT_TRACE_DETAIL(hr, name);
     const ULONGLONG now = GetTickCount64();
     if (now >= deadline) break;
     Sleep(static_cast<DWORD>(std::min<ULONGLONG>(kRetryStepMs, deadline - now)));
+    NoteHandled();  // in use: tried again, so a new failure is kept where it starts
   }
   bool elevated = false;
-  if (options.trashParent.empty() || FAILED(GetTokenElevation(&elevated)) || !elevated) return hr;
+  if (options.trashParent.empty() || FAILED(GetTokenElevation(&elevated)) || !elevated) {
+    return PDFT_TRACE_DETAIL(hr, name);
+  }
   // A running program can be renamed, not deleted or overwritten: it moves out of the way and
   // is deleted at the restart, never queued at its install path, which the new copy takes.
-  if (result->trash.empty()) RETURN_IF_FAILED(MakeTrashFolder(options.trashParent, &result->trash));
+  NoteHandled();
+  if (result->trash.empty()) {
+    RETURN_IF_FAILED(PDFT_TRACE(MakeTrashFolder(options.trashParent, &result->trash)));
+  }
   std::filesystem::path moved;
-  RETURN_IF_FAILED(MoveIntoTrash(to, result->trash, &moved));
+  RETURN_IF_FAILED(PDFT_TRACE_DETAIL(MoveIntoTrash(to, result->trash, &moved), name));
   result->restartPending = true;
   LOG_IF_FAILED(ScheduleDeleteAtRestart(moved));
-  RETURN_IF_FAILED(CopyFileVerified(from, to));
+  RETURN_IF_FAILED(PDFT_TRACE_DETAIL(CopyFileVerified(from, to), name));
   ++result->copied;
   return S_OK;
 }
 CATCH_RETURN();
+
+// What is wrong with a build's folder, for the report.
+const wchar_t* SourceProblemText(SourceProblem problem) noexcept {
+  switch (problem) {
+    case SourceProblem::kNone:
+      break;
+    case SourceProblem::kMissingFile:
+      return L"missing";
+    case SourceProblem::kWrongArch:
+      return L"made for another architecture";
+    case SourceProblem::kNot2x:
+      return L"not a 2.x build";
+    case SourceProblem::kUnreadable:
+      return L"unreadable";
+  }
+  return L"";
+}
 
 // Takes the operation lock; *busy when another process keeps it.
 HRESULT TakeLock(DWORD waitMs, std::optional<OperationLock>* lock, bool* busy) noexcept {
@@ -201,7 +234,7 @@ HRESULT ReadBuildSource(const std::filesystem::path& dir, Arch osArch, BuildSour
                         SourceCheck* check) noexcept try {
   *source = BuildSource{};
   *check = SourceCheck{};
-  RETURN_IF_FAILED(Canonicalize(dir, &source->dir));
+  RETURN_IF_FAILED(PDFT_TRACE(Canonicalize(dir, &source->dir)));
   for (const std::wstring_view name : kBinaries) {
     const std::filesystem::path file = source->dir / name;
     if (!IsRegularFile(file)) {
@@ -237,17 +270,17 @@ HRESULT ReadBuildSource(const std::filesystem::path& dir, Arch osArch, BuildSour
     check->file = kHandlerDll;
     return S_OK;
   }
-  RETURN_IF_FAILED(Sha256File(dll, &source->dllSha));
-  RETURN_IF_FAILED(Sha256File(pdfium, &source->pdfiumSha));
-  RETURN_IF_FAILED(
-      BuildIdFromHashes(source->version, source->dllSha, source->pdfiumSha, &source->buildName));
+  RETURN_IF_FAILED(PDFT_TRACE_DETAIL(Sha256File(dll, &source->dllSha), kHandlerDll));
+  RETURN_IF_FAILED(PDFT_TRACE_DETAIL(Sha256File(pdfium, &source->pdfiumSha), kPdfiumDll));
+  RETURN_IF_FAILED(PDFT_TRACE(
+      BuildIdFromHashes(source->version, source->dllSha, source->pdfiumSha, &source->buildName)));
   for (const std::wstring_view name : kTopNotices) {
     if (IsRegularFile(source->dir / name)) source->notices.emplace_back(name);
   }
   const DWORD licenses = GetFileAttributesW((source->dir / kLicensesFolder).c_str());
   if (licenses != INVALID_FILE_ATTRIBUTES && (licenses & FILE_ATTRIBUTE_DIRECTORY) &&
       !(licenses & FILE_ATTRIBUTE_REPARSE_POINT)) {
-    RETURN_IF_FAILED(CollectNotices(source->dir, kLicensesFolder, 1, &source->notices));
+    RETURN_IF_FAILED(PDFT_TRACE(CollectNotices(source->dir, kLicensesFolder, 1, &source->notices)));
   }
   return S_OK;
 }
@@ -256,10 +289,12 @@ CATCH_RETURN();
 HRESULT CopyBuild(const BuildSource& source, const std::filesystem::path& root,
                   const CopyBuildOptions& options, CopyBuildResult* result) noexcept try {
   *result = CopyBuildResult{};
-  RETURN_HR_IF(E_INVALIDARG, !root.is_absolute() || source.buildName.empty() || source.dir.empty());
-  RETURN_IF_FAILED(MakeRealFolder(root));
+  if (!root.is_absolute() || source.buildName.empty() || source.dir.empty()) {
+    RETURN_HR(PDFT_TRACE(E_INVALIDARG));
+  }
+  RETURN_IF_FAILED(PDFT_TRACE(MakeRealFolder(root)));
   const std::filesystem::path app = root / kBuildsFolderName;
-  RETURN_IF_FAILED(MakeRealFolder(app));
+  RETURN_IF_FAILED(PDFT_TRACE(MakeRealFolder(app)));
   result->buildDir = app / source.buildName;
   result->dll = result->buildDir / kHandlerDll;
 
@@ -268,19 +303,20 @@ HRESULT CopyBuild(const BuildSource& source, const std::filesystem::path& root,
     const wchar_t* name;
     const Sha256Digest* sha;
   } dlls[] = {{kHandlerDll, &source.dllSha}, {kPdfiumDll, &source.pdfiumSha}};
-  RETURN_IF_FAILED(MakeRealFolder(result->buildDir));
+  RETURN_IF_FAILED(PDFT_TRACE(MakeRealFolder(result->buildDir)));
   result->reused = true;
   for (const auto& dll : dlls) {
     const std::filesystem::path target = result->buildDir / dll.name;
     if (HasContents(target, *dll.sha)) continue;
     result->reused = false;
     Sha256Digest copied = {};
-    RETURN_IF_FAILED(CopyFileVerified(source.dir / dll.name, target, &copied));
+    RETURN_IF_FAILED(
+        PDFT_TRACE_DETAIL(CopyFileVerified(source.dir / dll.name, target, &copied), dll.name));
     ++result->copied;
     if (copied != *dll.sha) {
       // The file changed after the build id was computed from it: never install that.
       DeleteFileW(target.c_str());
-      return HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
+      return PDFT_TRACE_DETAIL(HRESULT_FROM_WIN32(ERROR_FILE_INVALID), dll.name);
     }
   }
 
@@ -291,12 +327,13 @@ HRESULT CopyBuild(const BuildSource& source, const std::filesystem::path& root,
     std::filesystem::path folder = root;
     for (const std::filesystem::path& part : relative.parent_path()) {
       folder /= part;
-      RETURN_IF_FAILED(MakeRealFolder(folder));
+      RETURN_IF_FAILED(PDFT_TRACE(MakeRealFolder(folder)));
     }
     const std::filesystem::path from = source.dir / relative;
     const std::filesystem::path to = root / relative;
     if (SameContents(from, to)) continue;
-    RETURN_IF_FAILED(CopyWithRetry(from, to, options, result));
+    RETURN_IF_FAILED(
+        PDFT_TRACE_DETAIL(CopyWithRetry(from, to, options, result), relative.filename().native()));
   }
   // The trash folder goes once its files went.
   if (!result->trash.empty()) LOG_IF_FAILED(ScheduleDeleteAtRestart(result->trash));
@@ -307,34 +344,46 @@ CATCH_RETURN();
 HRESULT InstallForAllUsers(const MachineInstallOptions& options, const RegistryRoots& roots,
                            MachineInstallResult* result) noexcept try {
   *result = MachineInstallResult{};
-  RETURN_HR_IF(E_INVALIDARG, !options.machineRoot.is_absolute() ||
-                                 !options.machineRoot.has_relative_path() ||
-                                 !options.source.is_absolute());
+  // The parts of the step, for the report of where it failed (failure_trace.h).
+  TraceStep step(L"arguments");
+  if (!options.machineRoot.is_absolute() || !options.machineRoot.has_relative_path() ||
+      !options.source.is_absolute()) {
+    RETURN_HR(PDFT_TRACE(E_INVALIDARG));
+  }
   const std::filesystem::path trashParent =
       options.trashParent.empty() ? options.machineRoot.parent_path() : options.trashParent;
 
   // Checked again here: the unelevated side checked before asking, and the folder could have
   // changed since.
   if (options.checkSourceAccess) {
+    step.Set(L"folder-access");
     const std::vector<std::wstring> binaries(kBinaries, kBinaries + std::size(kBinaries));
-    RETURN_IF_FAILED(FindUnsafeBuildFolderAccess(options.source, binaries, &result->unsafe));
-    if (result->unsafe) return kUnsafeBuildFolderHr;
+    RETURN_IF_FAILED(
+        PDFT_TRACE(FindUnsafeBuildFolderAccess(options.source, binaries, &result->unsafe)));
+    if (result->unsafe) return PDFT_TRACE(kUnsafeBuildFolderHr);
   }
-  RETURN_IF_FAILED(
-      ReadBuildSource(options.source, options.osArch, &result->source, &result->sourceCheck));
+  step.Set(L"read-build");
+  RETURN_IF_FAILED(PDFT_TRACE(
+      ReadBuildSource(options.source, options.osArch, &result->source, &result->sourceCheck)));
   if (result->sourceCheck.problem != SourceProblem::kNone) {
-    return HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
+    return PDFT_TRACE_DETAIL(HRESULT_FROM_WIN32(ERROR_BAD_FORMAT), result->sourceCheck.file);
   }
-  RETURN_HR_IF(E_INVALIDARG, IsRootOrInside(result->source.dir, options.machineRoot));
-  RETURN_IF_FAILED(CheckNoReparsePoints(options.machineRoot, {}));
+  step.Set(L"machine-root");
+  if (IsRootOrInside(result->source.dir, options.machineRoot)) RETURN_HR(PDFT_TRACE(E_INVALIDARG));
+  RETURN_IF_FAILED(PDFT_TRACE(CheckNoReparsePoints(options.machineRoot, {})));
 
+  step.Set(L"copy-build");
   CopyBuildOptions copy;
   copy.trashParent = trashParent;
   copy.retryMs = options.retryMs;
-  RETURN_IF_FAILED(CopyBuild(result->source, options.machineRoot, copy, &result->copy));
+  RETURN_IF_FAILED(PDFT_TRACE(CopyBuild(result->source, options.machineRoot, copy, &result->copy)));
   // Again now that every folder on the way exists.
-  RETURN_IF_FAILED(CheckNoReparsePoints(result->copy.buildDir, {}));
-  RETURN_IF_FAILED(WriteMachineClass(roots, options.machineRoot, result->copy.dll));
+  step.Set(L"build-links");
+  RETURN_IF_FAILED(PDFT_TRACE(CheckNoReparsePoints(result->copy.buildDir, {})));
+  step.Set(L"machine-class");
+  RETURN_IF_FAILED(PDFT_TRACE(WriteMachineClass(roots, options.machineRoot, result->copy.dll)));
+  // From here on failures are listed, not returned.
+  step.Set(L"after-class");
 
   std::vector<std::wstring>& failures = result->failures;
   if (!options.taskFolder.empty()) {
@@ -358,6 +407,7 @@ HRESULT InstallForAllUsers(const MachineInstallOptions& options, const RegistryR
   if (FAILED(result->old.firstError)) Failed(&failures, L"old-builds", result->old.firstError);
   result->restartPending =
       result->copy.restartPending || result->v1.restartPending || result->old.restartPending;
+  NoteHandled();  // the failures since the class are listed, not returned
   return S_OK;
 }
 CATCH_RETURN();
@@ -378,22 +428,28 @@ CATCH_RETURN();
 
 HRESULT RunMachineInstall(ElevatedReporter& report, bool* restartPending) noexcept try {
   *restartPending = false;
+  TraceStep step(L"own-paths");
   std::filesystem::path own;
-  RETURN_IF_FAILED(GetOwnExe(&own));
+  RETURN_IF_FAILED(PDFT_TRACE(GetOwnExe(&own)));
   MachineInstallOptions options;
   options.source = own.parent_path();
-  RETURN_IF_FAILED(GetMachineRoot(&options.machineRoot));
-  RETURN_IF_FAILED(GetLegacyMachineRoot(&options.legacyMachineRoot));
+  RETURN_IF_FAILED(PDFT_TRACE(GetMachineRoot(&options.machineRoot)));
+  RETURN_IF_FAILED(PDFT_TRACE(GetLegacyMachineRoot(&options.legacyMachineRoot)));
   options.osArch = NativeArch();
   MachineInstallResult result;
-  const HRESULT hr = InstallForAllUsers(options, RegistryRoots{}, &result);
+  // InstallForAllUsers names its own parts; this one covers what it returns untraced.
+  step.Set(L"install");
+  const HRESULT hr = PDFT_TRACE(InstallForAllUsers(options, RegistryRoots{}, &result));
   // No paths: the build's folder lies in the user's profile, and the parent logs these lines.
   if (result.unsafe) {
     report.Line(L"the build's folder (or a folder above it) can be changed by " +
                 result.unsafe->access.principal);
   }
   if (result.sourceCheck.problem != SourceProblem::kNone) {
-    report.Line(L"not a build to install: " + result.sourceCheck.file);
+    std::wstring line = L"not a build to install: " + result.sourceCheck.file + L" (" +
+                        SourceProblemText(result.sourceCheck.problem);
+    if (FAILED(result.sourceCheck.hr)) line += L", hr=" + HResultText(result.sourceCheck.hr);
+    report.Line(line + L")");
   }
   if (!result.copy.buildDir.empty() && SUCCEEDED(hr)) {
     report.Line((result.copy.reused ? L"reused app\\" : L"copied app\\") + result.source.buildName +
@@ -412,10 +468,11 @@ HRESULT RunMachineInstall(ElevatedReporter& report, bool* restartPending) noexce
 CATCH_RETURN();
 
 HRESULT RunMachineRepairClass(ElevatedReporter& report) noexcept try {
+  TraceStep step(L"repair-class");
   std::filesystem::path root;
-  RETURN_IF_FAILED(GetMachineRoot(&root));
+  RETURN_IF_FAILED(PDFT_TRACE(GetMachineRoot(&root)));
   std::filesystem::path dll;
-  const HRESULT hr = RepairMachineClass(RegistryRoots{}, root, NativeArch(), &dll);
+  const HRESULT hr = PDFT_TRACE(RepairMachineClass(RegistryRoots{}, root, NativeArch(), &dll));
   if (SUCCEEDED(hr)) {
     report.Line(L"class for all users -> app\\" + dll.parent_path().filename().native());
   } else if (hr == HRESULT_FROM_WIN32(ERROR_NOT_FOUND)) {

@@ -11,9 +11,10 @@
 #                                   status text, the JSON status, the masked diagnostics); the
 #                                   install side (copying and removing builds, the sign-in
 #                                   clean-up, build-folder permissions, processes holding DLLs,
-#                                   the elevation boundary and its report pipe, the installer's
-#                                   records); the 1.x clean-up (with the table of the files 1.x
-#                                   shipped, cmake/scripts/V1FileTable.cmake) and the installer's
+#                                   the elevation boundary, its report pipe and where its steps
+#                                   failed, the installer's records); the 1.x clean-up (with
+#                                   the table of the files 1.x shipped,
+#                                   cmake/scripts/V1FileTable.cmake) and the installer's
 #                                   per-user and machine-wide steps; installing from a build's
 #                                   folder and uninstalling, with their administrator steps
 #   PdfThumbnailsSettings  WIN32    ${PDFT_SETTINGS_EXE}: the window, scheduled checks, elevated
@@ -39,6 +40,7 @@ add_library(pdft_appcore STATIC
   core/evaluate.cpp core/evaluate.h
   core/exit_code.h
   core/explorer_settings.cpp core/explorer_settings.h
+  core/failure_trace.cpp core/failure_trace.h
   core/file_ops.cpp core/file_ops.h
   core/inno.cpp core/inno.h
   core/install.cpp core/install.h

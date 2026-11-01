@@ -5,9 +5,12 @@
 #include <wil/result_macros.h>
 
 #include <algorithm>
+#include <cwchar>
 #include <utility>
+#include <vector>
 
 #include "context.h"
+#include "failure_trace.h"
 #include "file_ops.h"
 #include "install.h"
 #include "instance.h"
@@ -113,12 +116,14 @@ void ReportRemoval(ElevatedReporter& report, const MachineRemoval& removal) {
 // machine-migrate-v1: 1.x's build folders for all users, except the one the machine-wide class
 // still uses. In-use files go to a trash folder next to the install folder (same volume).
 HRESULT RunMachineMigrateV1(ElevatedReporter& report, bool* restartPending) noexcept try {
+  TraceStep step(L"legacy-root");
   std::filesystem::path legacyRoot;
-  RETURN_IF_FAILED(GetLegacyMachineRoot(&legacyRoot));
-  RETURN_IF_FAILED(CheckNoReparsePoints(legacyRoot, {}));
+  RETURN_IF_FAILED(PDFT_TRACE(GetLegacyMachineRoot(&legacyRoot)));
+  RETURN_IF_FAILED(PDFT_TRACE(CheckNoReparsePoints(legacyRoot, {})));
+  step.Set(L"remove-1x");
   MachineRemoval removal;
   const HRESULT hr =
-      MigrateV1Machine(RegistryRoots{}, legacyRoot, legacyRoot.parent_path(), &removal);
+      PDFT_TRACE(MigrateV1Machine(RegistryRoots{}, legacyRoot, legacyRoot.parent_path(), &removal));
   ReportRemoval(report, removal);
   if (removal.classInV1) {
     report.Line(L"the class for all users still points at a 1.x build; installing " +
@@ -126,7 +131,8 @@ HRESULT RunMachineMigrateV1(ElevatedReporter& report, bool* restartPending) noex
   }
   *restartPending = removal.restartPending;
   RETURN_IF_FAILED(hr);
-  return removal.firstError;
+  // The failures it went on after are listed above (ReportRemoval).
+  return PDFT_TRACE(removal.firstError);
 }
 CATCH_RETURN();
 
@@ -141,6 +147,70 @@ HRESULT GetTokenElevation(bool* elevated) noexcept {
                                                  &elevation, sizeof(elevation), &size));
   *elevated = elevation.TokenIsElevated != 0;
   return S_OK;
+}
+
+HRESULT ReadTokenFacts(HANDLE token, TokenFacts* facts) noexcept try {
+  *facts = TokenFacts{};
+  TOKEN_ELEVATION elevation = {};
+  DWORD size = 0;
+  RETURN_IF_WIN32_BOOL_FALSE(
+      GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size));
+  facts->elevated = elevation.TokenIsElevated != 0;
+  RETURN_IF_WIN32_BOOL_FALSE(GetTokenInformation(token, TokenElevationType, &facts->elevationType,
+                                                 sizeof(facts->elevationType), &size));
+
+  alignas(TOKEN_MANDATORY_LABEL) BYTE label[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
+  RETURN_IF_WIN32_BOOL_FALSE(
+      GetTokenInformation(token, TokenIntegrityLevel, label, sizeof(label), &size));
+  const PSID labelSid = reinterpret_cast<TOKEN_MANDATORY_LABEL*>(label)->Label.Sid;
+  const UCHAR count = *GetSidSubAuthorityCount(labelSid);
+  facts->integrityRid = count ? *GetSidSubAuthority(labelSid, count - 1u) : 0;
+
+  BYTE administrators[SECURITY_MAX_SID_SIZE];
+  DWORD administratorsSize = sizeof(administrators);
+  RETURN_IF_WIN32_BOOL_FALSE(CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr,
+                                                administrators, &administratorsSize));
+  size = 0;
+  GetTokenInformation(token, TokenGroups, nullptr, 0, &size);  // the size it needs
+  RETURN_LAST_ERROR_IF(size == 0);
+  std::vector<BYTE> buffer(size);
+  RETURN_IF_WIN32_BOOL_FALSE(GetTokenInformation(token, TokenGroups, buffer.data(), size, &size));
+  const auto* groups = reinterpret_cast<const TOKEN_GROUPS*>(buffer.data());
+  for (DWORD i = 0; i < groups->GroupCount; ++i) {
+    if (!EqualSid(groups->Groups[i].Sid, administrators)) continue;
+    const DWORD attributes = groups->Groups[i].Attributes;
+    facts->administrators = (attributes & SE_GROUP_USE_FOR_DENY_ONLY) ? TokenFacts::Group::kDenyOnly
+                            : (attributes & SE_GROUP_ENABLED) ? TokenFacts::Group::kEnabled
+                                                              : TokenFacts::Group::kDisabled;
+    break;
+  }
+  return S_OK;
+}
+CATCH_RETURN();
+
+std::wstring TokenFactsText(const TokenFacts& facts) {
+  const wchar_t* type = L"default";
+  if (facts.elevationType == TokenElevationTypeFull) type = L"full";
+  if (facts.elevationType == TokenElevationTypeLimited) type = L"limited";
+  const wchar_t* administrators = L"absent";
+  switch (facts.administrators) {
+    case TokenFacts::Group::kEnabled:
+      administrators = L"enabled";
+      break;
+    case TokenFacts::Group::kDenyOnly:
+      administrators = L"deny-only";
+      break;
+    case TokenFacts::Group::kDisabled:
+      administrators = L"not enabled";
+      break;
+    case TokenFacts::Group::kAbsent:
+      break;
+  }
+  wchar_t integrity[16] = {};
+  swprintf_s(integrity, L"0x%04lX", static_cast<unsigned long>(facts.integrityRid));
+  return std::wstring(L"token: elevated ") + (facts.elevated ? L"yes" : L"no") +
+         L", elevation type " + std::to_wstring(static_cast<int>(facts.elevationType)) + L" (" +
+         type + L"), integrity " + integrity + L", Administrators " + administrators;
 }
 
 std::wstring_view ElevatedVerbName(ElevatedVerb verb) noexcept {
@@ -200,17 +270,32 @@ int ElevatedMain() noexcept {
   const std::wstring_view name =
       facts.verb ? ElevatedVerbName(*facts.verb) : std::wstring_view(L"(none)");
   try {
+    // Once, first: what this process's token can do decides much of what the step can.
+    TokenFacts token;
+    const HRESULT read = ReadTokenFacts(GetCurrentProcessToken(), &token);
+    const std::wstring tokenText =
+        SUCCEEDED(read) ? TokenFactsText(token) : L"token: unreadable, hr=" + HResultText(read);
     if (FAILED(hr)) {
-      report.Line(L"elevated " + std::wstring(name) + L" refused hr=" + HResultText(hr));
+      report.Line(L"elevated " + std::wstring(name) + L" refused hr=" + HResultText(hr) + L" (" +
+                  tokenText + L")");
       return static_cast<int>(hr);
     }
-    report.Line(L"elevated " + std::wstring(name) + L" start");
+    report.Line(L"elevated " + std::wstring(name) + L" start (" + tokenText + L")");
   } catch (...) {
     return static_cast<int>(FAILED(hr) ? hr : E_OUTOFMEMORY);
   }
   bool restartPending = false;
+  // Where the step's failure started: the functions on its way note it (failure_trace.h).
+  FailureTrace trace;
   hr = RunElevatedStep(*facts.verb, report, &restartPending);
   try {
+    if (FAILED(hr)) {
+      std::wstring where = trace.failure() ? TracedFailureText(*trace.failure())
+                                           : std::wstring(L"at a place not traced");
+      // A caller may pass a failure on as another HRESULT; the end line says which.
+      if (trace.failure() && trace.failure()->hr != hr) where += L" (end hr differs)";
+      report.Line(L"elevated " + std::wstring(name) + L" failed " + where);
+    }
     report.Line(L"elevated " + std::wstring(name) + L" end hr=" + HResultText(hr) +
                 (restartPending ? L" restart-pending" : L""));
   } catch (...) {

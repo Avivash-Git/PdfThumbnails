@@ -8,6 +8,7 @@
 #include <iterator>
 
 #include "build_folder.h"
+#include "failure_trace.h"
 #include "pe_info.h"
 #include "project_config.h"
 #include "strings.h"
@@ -197,14 +198,17 @@ bool IsMachineClassPath(const std::filesystem::path& machineRoot,
 
 HRESULT WriteMachineClass(const RegistryRoots& roots, const std::filesystem::path& machineRoot,
                           const std::filesystem::path& dll) noexcept try {
-  RETURN_HR_IF(E_INVALIDARG, roots.machine == nullptr || !IsMachineClassPath(machineRoot, dll));
-  RETURN_HR_IF(E_INVALIDARG, !IsFile(dll) || !IsFile(dll.parent_path() / kPdfiumDll));
+  if (roots.machine == nullptr || !IsMachineClassPath(machineRoot, dll)) {
+    RETURN_HR(PDFT_TRACE(E_INVALIDARG));
+  }
+  if (!IsFile(dll) || !IsFile(dll.parent_path() / kPdfiumDll)) RETURN_HR(PDFT_TRACE(E_INVALIDARG));
   // 1.x's order: the class name, then the server and its threading model.
-  RETURN_IF_FAILED(WriteRegistryString(roots.machine, ClassKeyPath(), L"", kHandlerClassName));
-  const std::wstring inproc = InprocKeyPath();
-  RETURN_IF_FAILED(WriteRegistryString(roots.machine, inproc, L"", dll.native()));
   RETURN_IF_FAILED(
-      WriteRegistryString(roots.machine, inproc, kThreadingModel, kApartmentThreading));
+      PDFT_TRACE(WriteRegistryString(roots.machine, ClassKeyPath(), L"", kHandlerClassName)));
+  const std::wstring inproc = InprocKeyPath();
+  RETURN_IF_FAILED(PDFT_TRACE(WriteRegistryString(roots.machine, inproc, L"", dll.native())));
+  RETURN_IF_FAILED(
+      PDFT_TRACE(WriteRegistryString(roots.machine, inproc, kThreadingModel, kApartmentThreading)));
   return S_OK;
 }
 CATCH_RETURN();

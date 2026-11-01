@@ -20,7 +20,8 @@
 #                             clean-up names and command lines, the broad-group permission
 #                             check on SDDL descriptors, the elevated steps and their one
 #                             command line, the elevated side's entry checks, exit codes, the
-#                             report lines, the installer's records, which DLL holders may be
+#                             report lines, the token facts and the trace of where a step
+#                             failed, the installer's records, which DLL holders may be
 #                             ended); the 1.x clean-up's pure parts (the table of 1.x files, the
 #                             plan for 1.x's per-user folder on fake trees of both layouts, the
 #                             plans for build folders for all users) and the installer step's
@@ -167,6 +168,7 @@ if(TARGET pdft_appcore)
     unit/elevation_test.cpp
     unit/evaluate_test.cpp
     unit/explorer_settings_test.cpp
+    unit/failure_trace_test.cpp
     unit/file_ops_test.cpp
     unit/install_test.cpp
     unit/json_test.cpp

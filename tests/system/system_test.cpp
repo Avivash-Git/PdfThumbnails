@@ -377,7 +377,8 @@ class System : public ::testing::Test {
   // The administrator step |verb| reported back through the asking process's pipe: its "start"
   // line reached the log of the unelevated process, and the summary line after it does not say
   // "no-report". That pipe takes lines only from the elevated process if its parent is the
-  // pipe's server, so this proves that UAC makes the asking process the parent.
+  // pipe's server, so this proves that UAC makes the asking process the parent. The start line
+  // is printed too: it tells what token UAC gave the step.
   void ExpectReportThroughThePipe(std::wstring_view verb) {
     path log;
     ASSERT_HRESULT_SUCCEEDED(GetLogPath(&log));
@@ -387,6 +388,11 @@ class System : public ::testing::Test {
                            std::istreambuf_iterator<char>());
     const std::string name = Text(verb);
     const size_t start = text.rfind("elevated " + name + " start");
+    if (start != std::string::npos) {
+      std::string line = text.substr(start, text.find('\n', start) - start);
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      std::printf("[ system ] log: %s\n", line.c_str());
+    }
     const size_t summary = text.rfind(name + " launch=");
     bool reported = false;
     if (summary != std::string::npos) {

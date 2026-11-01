@@ -26,6 +26,7 @@
 #include "check.h"
 #include "child_process.h"
 #include "elevation.h"
+#include "failure_trace.h"
 #include "fake_probes.h"
 #include "file_ops.h"
 #include "instance.h"
@@ -67,12 +68,8 @@ bool MakeDirs(const path& p) {
 
 std::wstring BuiltFile(const wchar_t* name) { return test::SelfFolder() + L"\\" + name; }
 
-// Gives |folder| a protected DACL: this user, SYSTEM and Administrators, plus |extra|.
-bool SetFolderDacl(const path& folder, const std::wstring& extra) {
-  std::wstring sid;
-  if (FAILED(GetCurrentUserSid(&sid))) return false;
-  const std::wstring sddl =
-      L"D:P(A;OICI;FA;;;" + sid + L")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" + extra;
+// Gives |folder| the protected DACL |sddl| ("D:P...").
+bool SetDacl(const path& folder, const std::wstring& sddl) {
   wil::unique_hlocal_security_descriptor descriptor;
   if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1,
                                                             descriptor.put(), nullptr)) {
@@ -85,6 +82,13 @@ bool SetFolderDacl(const path& folder, const std::wstring& extra) {
   return SetNamedSecurityInfoW(const_cast<wchar_t*>(folder.c_str()), SE_FILE_OBJECT,
                                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                                nullptr, nullptr, dacl, nullptr) == ERROR_SUCCESS;
+}
+
+// Gives |folder| a protected DACL: this user, SYSTEM and Administrators, plus |extra|.
+bool SetFolderDacl(const path& folder, const std::wstring& extra) {
+  std::wstring sid;
+  if (FAILED(GetCurrentUserSid(&sid))) return false;
+  return SetDacl(folder, L"D:P(A;OICI;FA;;;" + sid + L")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" + extra);
 }
 
 class Install : public ::testing::Test {
@@ -411,6 +415,81 @@ TEST_F(Install, InstallForAllUsersInTestPlaces) {
   ASSERT_TRUE(
       CopyFileW((stage_ / kPdfiumDll).c_str(), (paths_.machineRoot / kPdfiumDll).c_str(), FALSE));
   EXPECT_EQ(InstallForAllUsers(options, roots_, &result), E_INVALIDARG);
+}
+
+// The step for all users says where it failed (failure_trace.h): the part of the step, the
+// source file's name, the function, the HRESULT and a name of the product's own, never a path.
+TEST_F(Install, TheStepForAllUsersSaysWhereItFailed) {
+  MachineInstallOptions options;
+  options.source = stage_;
+  options.machineRoot = paths_.machineRoot;
+  options.legacyMachineRoot = paths_.legacyMachineRoot;
+  options.trashParent = temp_.path();
+  options.taskFolder.clear();
+  options.checkSourceAccess = false;  // the folders above %TEMP% are the PC's
+  options.osArch = probes_.context.osArch;
+  MachineInstallResult result;
+  {
+    const FailureTrace trace;
+    ASSERT_HRESULT_SUCCEEDED(InstallForAllUsers(options, roots_, &result));
+    EXPECT_FALSE(trace.failure());  // nothing pending once it worked
+  }
+
+  // An install folder this user may not make, as in Program Files for a process without the
+  // Administrators group: the first folder of the copy fails, and nothing is made.
+  const path locked = path(temp_.path()) / L"locked";
+  ASSERT_TRUE(MakeDirs(locked));
+  std::wstring sid;
+  ASSERT_HRESULT_SUCCEEDED(GetCurrentUserSid(&sid));
+  ASSERT_TRUE(SetDacl(locked, L"D:P(A;;0x1200a9;;;" + sid + L")"));  // read and list only
+  // Changeable again however the checks below end, or the temporary folder could not go.
+  auto unlock = wil::scope_exit([&]() noexcept { SetFolderDacl(locked, L""); });
+  options.machineRoot = locked / kProductName;
+  {
+    const FailureTrace trace;
+    EXPECT_EQ(InstallForAllUsers(options, roots_, &result), E_ACCESSDENIED);
+    ASSERT_TRUE(trace.failure());
+    const TracedFailure& failure = *trace.failure();
+    EXPECT_EQ(failure.hr, E_ACCESSDENIED);
+    EXPECT_STREQ(failure.step, L"copy-build");
+    EXPECT_STREQ(failure.site.file, "install.cpp");
+    EXPECT_STREQ(failure.site.function, "MakeRealFolder");
+    EXPECT_STREQ(failure.detail.data(), kProductName);
+    const std::wstring text = TracedFailureText(failure);
+    std::printf("traced: %ls\n", text.c_str());
+    EXPECT_EQ(text.find_first_of(L"\\/"), std::wstring::npos) << WideToUtf8Lossy(text);
+  }
+  EXPECT_FALSE(Exists(options.machineRoot));
+  unlock.release();
+  ASSERT_TRUE(SetFolderDacl(locked, L""));
+
+  // An install folder that is a file.
+  const path file = path(temp_.path()) / L"a-file";
+  ASSERT_TRUE(WriteFileText(file, "not a folder"));
+  options.machineRoot = file;
+  {
+    const FailureTrace trace;
+    EXPECT_EQ(InstallForAllUsers(options, roots_, &result), HRESULT_FROM_WIN32(ERROR_DIRECTORY));
+    ASSERT_TRUE(trace.failure());
+    EXPECT_STREQ(trace.failure()->step, L"copy-build");
+    EXPECT_STREQ(trace.failure()->site.function, "MakeRealFolder");
+    EXPECT_STREQ(trace.failure()->detail.data(), L"a-file");
+  }
+
+  // A binary gone from the build's folder: the permission check names it.
+  options.machineRoot = paths_.machineRoot;
+  options.checkSourceAccess = true;
+  ASSERT_TRUE(DeleteFileW((stage_ / kPdfiumDll).c_str()));
+  {
+    const FailureTrace trace;
+    EXPECT_EQ(InstallForAllUsers(options, roots_, &result),
+              HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND));
+    ASSERT_TRUE(trace.failure());
+    EXPECT_STREQ(trace.failure()->step, L"folder-access");
+    EXPECT_STREQ(trace.failure()->site.file, "file_ops.cpp");
+    EXPECT_STREQ(trace.failure()->site.function, "FindUnsafeBuildFolderAccess");
+    EXPECT_STREQ(trace.failure()->detail.data(), kPdfiumDll);
+  }
 }
 
 TEST_F(Install, RepairMachineClassPicksTheNewestCompleteBuild) {

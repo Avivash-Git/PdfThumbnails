@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "elevation.h"
+#include "failure_trace.h"
 #include "legacy.h"
 #include "paths.h"
 #include "project_config.h"
@@ -324,7 +325,9 @@ ACCESS_MASK RightsOf(PACL dacl, PSID owner, std::span<const PSID> set) noexcept 
 
 HRESULT CheckNoReparsePoints(const std::filesystem::path& path,
                              const std::filesystem::path& stopAt) noexcept try {
-  RETURN_HR_IF(E_INVALIDARG, !path.is_absolute() || (!stopAt.empty() && !stopAt.is_absolute()));
+  if (!path.is_absolute() || (!stopAt.empty() && !stopAt.is_absolute())) {
+    RETURN_HR(PDFT_TRACE(E_INVALIDARG));
+  }
   const std::filesystem::path target = NormalPath(path);
   const std::filesystem::path stop = stopAt.empty() ? target.root_path() : NormalPath(stopAt);
   std::vector<std::filesystem::path> chain;
@@ -332,18 +335,20 @@ HRESULT CheckNoReparsePoints(const std::filesystem::path& path,
     chain.push_back(part);
     if (IEquals(part.native(), stop.native())) break;
     // At the root without meeting |stopAt|: it is not above |path|.
-    RETURN_HR_IF(E_INVALIDARG, !part.has_relative_path());
+    if (!part.has_relative_path()) RETURN_HR(PDFT_TRACE(E_INVALIDARG));
   }
-  // From the top down: below a missing folder nothing exists either.
+  // From the top down: below a missing folder nothing exists either. A failure's trace detail
+  // is how deep the folder lies below the top, never its name.
   for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+    const std::wstring depth = L"depth " + std::to_wstring(it - chain.rbegin());
     const DWORD attributes = GetFileAttributesW(it->c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
       const DWORD error = GetLastError();
       if (IsMissingError(error)) return S_OK;
-      return HRESULT_FROM_WIN32(error);
+      return PDFT_TRACE_DETAIL(HRESULT_FROM_WIN32(error), depth);
     }
     if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-      return HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK);
+      return PDFT_TRACE_DETAIL(HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK), depth);
     }
   }
   return S_OK;
@@ -353,44 +358,55 @@ CATCH_RETURN();
 HRESULT CopyFileVerified(const std::filesystem::path& from, const std::filesystem::path& to,
                          Sha256Digest* sha) noexcept try {
   if (sha) sha->fill(0);
-  RETURN_HR_IF(E_INVALIDARG, !from.is_absolute() || !to.is_absolute() || !to.has_filename());
+  if (!from.is_absolute() || !to.is_absolute() || !to.has_filename()) {
+    RETURN_HR(PDFT_TRACE(E_INVALIDARG));
+  }
+  // A failure's trace detail: the file's name, never its path.
+  const std::wstring name = to.filename().native();
   const std::filesystem::path folder = NormalPath(to.parent_path());
   const DWORD folderAttributes = GetFileAttributesW(folder.c_str());
-  if (folderAttributes == INVALID_FILE_ATTRIBUTES) return LastErrorOr(E_FAIL);
-  if (folderAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-    return HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK);
+  if (folderAttributes == INVALID_FILE_ATTRIBUTES) {
+    return PDFT_TRACE_DETAIL(LastErrorOr(E_FAIL), name);
   }
-  RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_DIRECTORY), !(folderAttributes & FILE_ATTRIBUTE_DIRECTORY));
+  if (folderAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+    return PDFT_TRACE_DETAIL(HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK), name);
+  }
+  if (!(folderAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+    RETURN_HR(PDFT_TRACE_DETAIL(HRESULT_FROM_WIN32(ERROR_DIRECTORY), name));
+  }
 
   // Read sharing only: nobody can change or delete the source while it is copied, and a
   // process that already has it open for writing makes this open fail.
   wil::unique_hfile source(
       CreateFileW(from.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                   FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
-  if (!source) return LastErrorOr(E_FAIL);
-  RETURN_IF_FAILED(CheckRegularFile(source.get()));
+  if (!source) return PDFT_TRACE_DETAIL(LastErrorOr(E_FAIL), name);
+  RETURN_IF_FAILED(PDFT_TRACE_DETAIL(CheckRegularFile(source.get()), name));
 
   std::wstring unique;
-  RETURN_IF_FAILED(NewHexName(&unique));
-  const std::filesystem::path temporary =
-      folder / (to.filename().native() + L"." + unique + L".tmp");
+  RETURN_IF_FAILED(PDFT_TRACE(NewHexName(&unique)));
+  const std::filesystem::path temporary = folder / (name + L"." + unique + L".tmp");
   wil::unique_hfile target(CreateFileW(temporary.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, 0,
                                        nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
-  if (!target) return LastErrorOr(E_FAIL);
+  if (!target) return PDFT_TRACE_DETAIL(LastErrorOr(E_FAIL), name);
   // From here on every failure deletes the temporary file again.
   auto discard = wil::scope_exit([&]() noexcept { DeleteOnClose(target.get()); });
 
   std::vector<BYTE> buffer(kCopyChunkBytes);
   Sha256Digest copied = {};
-  RETURN_IF_FAILED(Pump(source.get(), target.get(), &buffer, &copied));
-  RETURN_IF_WIN32_BOOL_FALSE(FlushFileBuffers(target.get()));
+  RETURN_IF_FAILED(PDFT_TRACE_DETAIL(Pump(source.get(), target.get(), &buffer, &copied), name));
+  if (!FlushFileBuffers(target.get())) RETURN_HR(PDFT_TRACE_DETAIL(LastErrorOr(E_FAIL), name));
   LARGE_INTEGER start = {};
-  RETURN_IF_WIN32_BOOL_FALSE(SetFilePointerEx(target.get(), start, nullptr, FILE_BEGIN));
+  if (!SetFilePointerEx(target.get(), start, nullptr, FILE_BEGIN)) {
+    RETURN_HR(PDFT_TRACE_DETAIL(LastErrorOr(E_FAIL), name));
+  }
   Sha256Digest written = {};
-  RETURN_IF_FAILED(Pump(target.get(), nullptr, &buffer, &written));
-  RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_DATA_CHECKSUM_ERROR), written != copied);
+  RETURN_IF_FAILED(PDFT_TRACE_DETAIL(Pump(target.get(), nullptr, &buffer, &written), name));
+  if (written != copied) {
+    RETURN_HR(PDFT_TRACE_DETAIL(HRESULT_FROM_WIN32(ERROR_DATA_CHECKSUM_ERROR), name));
+  }
 
-  RETURN_IF_FAILED(RenameByHandle(target.get(), NormalPath(to)));
+  RETURN_IF_FAILED(PDFT_TRACE_DETAIL(RenameByHandle(target.get(), NormalPath(to)), name));
   discard.release();
   if (sha) *sha = copied;
   return S_OK;
@@ -765,7 +781,7 @@ HRESULT FindUnsafeBuildFolderAccess(const std::filesystem::path& folder,
                                     std::optional<UnsafeAccess>* unsafe) noexcept try {
   unsafe->reset();
   std::filesystem::path canonical;
-  RETURN_IF_FAILED(Canonicalize(folder, &canonical));
+  RETURN_IF_FAILED(PDFT_TRACE(Canonicalize(folder, &canonical)));
   canonical = NormalPath(canonical);
 
   const auto check = [&](const std::filesystem::path& object, ACCESS_MASK mask) -> HRESULT {
@@ -780,21 +796,28 @@ HRESULT FindUnsafeBuildFolderAccess(const std::filesystem::path& folder,
     return S_OK;
   };
 
-  RETURN_IF_FAILED(check(canonical, kBuildObjectChangeRights));
+  // A failure's trace detail: a binary's name, or how many folders up; never a path (the build's
+  // folder may lie in the user's profile).
+  RETURN_IF_FAILED(PDFT_TRACE(check(canonical, kBuildObjectChangeRights)));
   if (*unsafe) return S_OK;
   for (const std::wstring& name : binaries) {
     const std::filesystem::path file = NormalPath(canonical / name);
-    RETURN_HR_IF(E_INVALIDARG, name.empty() || !IsUnderLexically(file, canonical));
+    if (name.empty() || !IsUnderLexically(file, canonical)) RETURN_HR(PDFT_TRACE(E_INVALIDARG));
     const DWORD attributes = GetFileAttributesW(file.c_str());
-    if (attributes == INVALID_FILE_ATTRIBUTES) return LastErrorOr(E_FAIL);
-    RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_BAD_FILE_TYPE),
-                 (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0);
-    RETURN_IF_FAILED(check(file, kBuildObjectChangeRights & ~FILE_DELETE_CHILD));
+    if (attributes == INVALID_FILE_ATTRIBUTES) return PDFT_TRACE_DETAIL(LastErrorOr(E_FAIL), name);
+    if (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) {
+      RETURN_HR(PDFT_TRACE_DETAIL(HRESULT_FROM_WIN32(ERROR_BAD_FILE_TYPE), name));
+    }
+    RETURN_IF_FAILED(
+        PDFT_TRACE_DETAIL(check(file, kBuildObjectChangeRights & ~FILE_DELETE_CHILD), name));
     if (*unsafe) return S_OK;
   }
+  int up = 0;
   for (std::filesystem::path parent = canonical; parent.has_relative_path();) {
     parent = parent.parent_path();
-    RETURN_IF_FAILED(check(parent, kBuildParentChangeRights));
+    ++up;
+    const std::wstring levels = std::to_wstring(up) + (up == 1 ? L" level up" : L" levels up");
+    RETURN_IF_FAILED(PDFT_TRACE_DETAIL(check(parent, kBuildParentChangeRights), levels));
     if (*unsafe) return S_OK;
   }
   return S_OK;

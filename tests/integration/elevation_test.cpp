@@ -1,8 +1,9 @@
 // The elevation boundary (elevation.h) without any elevation: RunElevated with launchers that
 // never ask for administrator rights (one starts this test program's "report" child normally,
 // so the report pipe is tested end to end between real processes), the reporter's refusal to
-// write to a pipe its parent does not serve, and the installer's records (inno.h) in private
-// registry keys. Nothing here calls the real launcher: a UAC prompt never appears.
+// write to a pipe its parent does not serve, the token facts the report starts with (this
+// process's, and a standard user's token made from it), and the installer's records (inno.h) in
+// private registry keys. Nothing here calls the real launcher: a UAC prompt never appears.
 
 #include <windows.h>
 
@@ -11,6 +12,7 @@
 #include <gtest/gtest.h>
 #include <wil/resource.h>
 
+#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -147,6 +149,39 @@ TEST(ElevatedReporterTest, NoPipeNoReport) {
   ASSERT_EQ(child.Start(test::SelfPath(), L"--pdft-child report 0 \"nobody listens\""), S_OK);
   EXPECT_EQ(child.ReadLine(), "connected=0");
   EXPECT_EQ(child.Wait(10000), 0u);
+}
+
+// ---- the token facts an elevated step's report starts with ----
+
+TEST(TokenFactsTest, ThisProcessAndAStandardUsersToken) {
+  TokenFacts facts;
+  ASSERT_HRESULT_SUCCEEDED(ReadTokenFacts(GetCurrentProcessToken(), &facts));
+  std::printf("this process: %ls\n", TokenFactsText(facts).c_str());
+  bool elevated = false;
+  ASSERT_HRESULT_SUCCEEDED(GetTokenElevation(&elevated));
+  EXPECT_EQ(facts.elevated, elevated);
+  EXPECT_EQ(facts.integrityRid, test::CurrentIntegrityRid());
+  BYTE administrators[SECURITY_MAX_SID_SIZE];
+  DWORD size = sizeof(administrators);
+  ASSERT_TRUE(CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr, administrators, &size));
+  BOOL member = FALSE;
+  ASSERT_TRUE(CheckTokenMembership(nullptr, administrators, &member));
+  EXPECT_EQ(facts.administrators == TokenFacts::Group::kEnabled, member != FALSE);
+
+  // The token the system tests run the commands with: Administrators deny-only (or absent, for
+  // an account outside the group), Medium. Whether it counts as elevated depends on the token it
+  // is made from: made from a limited token (a split administrator's) it does not. Made from a
+  // token without a linked one (elevation type 1: the built-in Administrator, as on CI) it may:
+  // the line printed says which, and is not held to either answer.
+  const TOKEN_ELEVATION_TYPE sourceType = facts.elevationType;
+  wil::unique_handle standard;
+  ASSERT_HRESULT_SUCCEEDED(
+      test::CreateMediumTokenForSelf(test::MediumToken::kFiltered, standard.put()));
+  ASSERT_HRESULT_SUCCEEDED(ReadTokenFacts(standard.get(), &facts));
+  std::printf("standard user's: %ls\n", TokenFactsText(facts).c_str());
+  if (sourceType == TokenElevationTypeLimited) EXPECT_FALSE(facts.elevated);
+  EXPECT_EQ(facts.integrityRid, static_cast<DWORD>(SECURITY_MANDATORY_MEDIUM_RID));
+  EXPECT_NE(facts.administrators, TokenFacts::Group::kEnabled);
 }
 
 // ---- the installer's records, in private keys ----

@@ -133,8 +133,14 @@ int ReportOwnToken() {
   TOKEN_ELEVATION_TYPE type = TokenElevationTypeDefault;
   DWORD size = 0;
   GetTokenInformation(token.get(), TokenElevationType, &type, sizeof(type), &size);
-  std::printf("integrity 0x%04lX, Administrators %s, elevation type %d\n", rid,
-              admin ? "enabled" : "not enabled", static_cast<int>(type));
+  // TokenElevation on its own: what the elevated side's entry check and UAC go by.
+  TOKEN_ELEVATION elevation = {};
+  const char* elevated =
+      GetTokenInformation(token.get(), TokenElevation, &elevation, sizeof(elevation), &size)
+          ? (elevation.TokenIsElevated ? "yes" : "no")
+          : "unknown";
+  std::printf("integrity 0x%04lX, Administrators %s, elevation type %d, elevated %s\n", rid,
+              admin ? "enabled" : "not enabled", static_cast<int>(type), elevated);
 
   // The owner and default DACL that objects this process creates get.
   SECURITY_DESCRIPTOR descriptor;

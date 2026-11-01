@@ -31,8 +31,8 @@ DWORD CurrentIntegrityRid();
 // enabled (not deny-only). False when it cannot tell.
 bool TokenHasEnabledAdministrators(HANDLE token);
 // Prints this process's integrity level, whether Administrators is enabled, the elevation type,
-// and the token's owner and default DACL as SDDL; returns 0 when it runs at Medium without
-// Administrators enabled, else 3.
+// whether the token counts as elevated (TokenElevation), and the token's owner and default DACL
+// as SDDL; returns 0 when it runs at Medium without Administrators enabled, else 3.
 int ReportOwnToken();
 
 // True for the errors Windows gives when Application Control (WDAC, Smart App Control) refuses
@@ -41,7 +41,7 @@ int ReportOwnToken();
 bool IsApplicationControlBlock(HRESULT hr);
 
 enum class MediumToken {
-  kLabelOnly,  // the same token with the Medium label (D11; what the handler tests use)
+  kLabelOnly,  // the same token with the Medium label (what the handler tests use)
   kFiltered,   // also Administrators deny-only and every privilege but SeChangeNotify removed
 };
 

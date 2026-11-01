@@ -47,6 +47,30 @@ namespace pdft {
 // SYSTEM. Not the same as ProcessContext::elevated, which also counts a raised integrity level.
 [[nodiscard]] HRESULT GetTokenElevation(bool* elevated) noexcept;
 
+// What a token is, as far as writing for all users goes: the first line of an administrator
+// step's report says it, because an elevated token alone does not prove that the step can write
+// to Program Files and HKLM (that takes the Administrators group, enabled).
+struct TokenFacts {
+  bool elevated = false;  // TokenElevation
+  TOKEN_ELEVATION_TYPE elevationType = TokenElevationTypeDefault;
+  DWORD integrityRid = 0;  // SECURITY_MANDATORY_*_RID
+  enum class Group {
+    kEnabled,
+    kDenyOnly,  // as in a filtered token: it can deny access, never grant it
+    kDisabled,
+    kAbsent,
+  };
+  Group administrators = Group::kAbsent;  // the Administrators group among the token's groups
+};
+
+// Reads the facts of |token| (opened with TOKEN_QUERY, or a pseudo handle such as
+// GetCurrentProcessToken()).
+[[nodiscard]] HRESULT ReadTokenFacts(HANDLE token, TokenFacts* facts) noexcept;
+
+// "token: elevated yes, elevation type 2 (full), integrity 0x3000, Administrators enabled"
+// (pure). May throw std::bad_alloc.
+std::wstring TokenFactsText(const TokenFacts& facts);
+
 // ---- Steps and their command line (pure) ----------------------------------------------------
 
 // "machine-install", "machine-repair-class", "machine-uninstall", "machine-migrate-v1".
@@ -92,7 +116,11 @@ HRESULT CheckElevatedEntry(const ElevatedEntryFacts& facts) noexcept;
 
 // The elevated process (--elevated <step>): reads its own command line and context, checks them
 // (CheckElevatedEntry), reports through the parent's pipe if there is one, and runs the step.
-// Returns the process exit code: 0, 1 (done, restart pending) or the failing HRESULT.
+// Returns the process exit code: 0, 1 (done, restart pending) or the failing HRESULT. The
+// report's first line ("elevated <step> start" or "... refused hr=<HRESULT>") ends with its
+// token's facts (TokenFactsText); a step that fails says where its failure started before its
+// last line ("elevated <step> failed in <part> at <file>:<line> <function> hr=<HRESULT>",
+// failure_trace.h, with " (end hr differs)" when the step returned another HRESULT).
 int ElevatedMain() noexcept;
 
 // The step itself, after the entry checks passed (install.h, uninstall.h, migrate_v1.h).

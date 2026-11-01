@@ -8,8 +8,9 @@
 //       WDAC) blocked it.
 //   pdft-run-medium --check-token
 //       Prints this process's integrity level, whether the Administrators group is enabled, the
-//       elevation type, and the token's owner and default DACL as SDDL; exit 0 when it runs at
-//       Medium without Administrators, else 3.
+//       elevation type, whether the token counts as elevated (TokenElevation), and the token's
+//       owner and default DACL as SDDL; exit 0 when it runs at Medium without Administrators,
+//       else 3.
 //   pdft-run-medium --exit <n>
 //       Exits with <n> (a harmless target for tests).
 
