@@ -59,7 +59,8 @@ enum class FindingId {
   kTaskStaleAction,  // the task runs another program than the installed settings executable
                      // (repaired only while that program is there)
   kTaskDisabled,     // the task is disabled
-  kCleanupPending,   // 1.x's clean-up would delete the per-user folder at the next sign-in
+  kCleanupPending,   // a sign-in clean-up (RunOnce) would delete a folder at the next sign-in, or
+                     // (information) files in use wait in a trash folder for the next restart
   kV1Leftovers,      // 1.x left files, settings, its task or its classes
   kOldBuildFolders,  // per-user 2.x build folders no class uses
   kZoomInvalid,      // the Zoom value has the wrong type or is out of range
@@ -86,7 +87,8 @@ struct Finding {
   // not start, why); kSacBlocked: the load-blocked error when no blocks were counted;
   // kLiveTestSkipped: why it could not start.
   std::optional<HRESULT> hr;
-  int count = 0;  // kSacBlocked: logged blocks; kOldBuildFolders: how many
+  int count = 0;  // kSacBlocked: logged blocks; kOldBuildFolders: how many; kCleanupPending: trash
+                  // folders waiting for the restart (when no sign-in clean-up is pending)
   LiveTestSkip liveSkip = LiveTestSkip::kNone;              // kLiveTestSkipped, kTestFileSkipped
   WindowsChecksSkip checksSkip = WindowsChecksSkip::kNone;  // kVirtualized
   SacVerdictKind sac = SacVerdictKind::kNone;               // the kSac* findings

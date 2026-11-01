@@ -14,6 +14,7 @@
 #include <array>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -100,6 +101,10 @@ struct Snapshot {
   // <installRoot>\<settings executable> is a file: the program the check task runs. A 1.x build
   // has none.
   bool settingsExeFound = false;
+  // <paths.userRoot>\<settings executable> is a file, looked at only for a per-user install
+  // forced over 1.x's install for all users (UserInstallOverV1Machine), whose scope is still the
+  // machine-wide one.
+  bool userSettingsExeFound = false;
   std::optional<ClassReg> machineClass;
   std::optional<ClassReg> userClass;
   SlotValues slots;
@@ -137,6 +142,9 @@ struct Snapshot {
   LegacyState legacy;
   std::vector<BuildInfo> userBuilds;     // <userRoot>\app\*, every real folder
   std::vector<BuildInfo> machineBuilds;  // <machineRoot>\app\*
+  // Trash folders an elevated step left next to the machine-wide install root
+  // (<Product>.trash-<id>, file_ops.h): files that were in use, deleted at the next restart.
+  std::vector<std::wstring> pendingTrash;
 
   std::vector<GatherIssue> issues;
 
@@ -180,14 +188,32 @@ Scope DecideScope(const std::optional<ClassReg>& machineClass,
 // (from the folder name), then by build id. std::nullopt when there is none.
 std::optional<std::filesystem::path> ChooseUserBuildDll(const Snapshot& snapshot);
 
+// The same choice among any |builds| (pure): the newest complete 2.x build whose DLL is made for
+// |osArch|; never a 1.x build. The machine-wide class's repair picks with it too.
+std::optional<std::filesystem::path> ChooseBuildDll(std::span<const BuildInfo> builds, Arch osArch);
+
+// The build folders in |appDir| (ListBuildFolders), with the DLL's PE machine read for the
+// complete 2.x ones.
+[[nodiscard]] HRESULT ListBuilds(const std::filesystem::path& appDir,
+                                 std::vector<BuildInfo>* builds) noexcept;
+
 // |dll| lies directly in |folder| (pure, lexical, ignoring case).
 bool DllIsInFolder(const std::filesystem::path& dll, const std::filesystem::path& folder);
 
+// A per-user install of this version forced over 1.x's install for all users (pure): the
+// machine-wide class lies in a 1.x build folder of |paths.legacyMachineRoot| and the per-user one
+// in a build folder of version 2 or later of |paths.userRoot|. The scope stays the machine-wide
+// one (1.x's rule), but this version's program is the per-user one.
+bool UserInstallOverV1Machine(const std::optional<ClassReg>& machineClass,
+                              const std::optional<ClassReg>& userClass, const EnginePaths& paths);
+
 // The program the check task runs (pure): <install root>\<settings executable> of the install
 // |snapshot| found, when its root is the one |snapshot.paths| names for its scope and the file
-// was there (settingsExeFound). std::nullopt otherwise: nothing installed, or an install without
-// it (a 1.x build), where a task would point at a program that is not there. The program that
-// asks plays no part: a copy started from a build tree still names the installed one.
+// was there (settingsExeFound); for a per-user install forced over 1.x's install for all users
+// (UserInstallOverV1Machine), the per-user one when it was there (userSettingsExeFound).
+// std::nullopt otherwise: nothing installed, or an install without it (a 1.x build), where a task
+// would point at a program that is not there. The program that asks plays no part: a copy
+// started from a build tree still names the installed one.
 std::optional<std::filesystem::path> InstalledSettingsExe(const Snapshot& snapshot);
 
 }  // namespace pdft

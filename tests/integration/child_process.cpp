@@ -95,7 +95,8 @@ std::wstring& NamedObjectSuffix() {
   return suffix;
 }
 
-CapturedRun RunCaptured(const std::wstring& exe, const std::wstring& arguments, DWORD timeoutMs) {
+CapturedRun RunCaptured(const std::wstring& exe, const std::wstring& arguments, DWORD timeoutMs,
+                        HANDLE token) {
   CapturedRun run;
   HANDLE outRead = nullptr;
   HANDLE outWrite = nullptr;
@@ -107,7 +108,7 @@ CapturedRun RunCaptured(const std::wstring& exe, const std::wstring& arguments, 
     return run;
   }
   PROCESS_INFORMATION process = {};
-  run.hr = Spawn(exe, arguments, nullptr, outWrite, errWrite, &process);
+  run.hr = Spawn(exe, arguments, nullptr, outWrite, errWrite, &process, token);
   // Only the child holds the write ends now: reading ends when it ends.
   Close(&outWrite);
   Close(&errWrite);

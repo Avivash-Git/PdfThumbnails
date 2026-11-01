@@ -486,10 +486,11 @@ std::wstring BuildDiagnostics(const Snapshot& s, std::span<const Finding> findin
       L", settings.ini " +
       (s.zoom.legacyIniZoom ? std::to_wstring(*s.zoom.legacyIniZoom) : std::wstring(L"none")) +
       L" (" + s.zoom.legacyIni.native() + L")");
-  add(L"  Task program: " + (s.installRoot.empty()
-                                 ? std::wstring(L"none (nothing installed)")
-                                 : (s.installRoot / kSettingsExe).native() +
-                                       (s.settingsExeFound ? L" (there)" : L" (missing)")));
+  const std::optional<std::filesystem::path> program = InstalledSettingsExe(s);
+  add(L"  Task program: " + (s.installRoot.empty() ? std::wstring(L"none (nothing installed)")
+                             : program ? program->native() + L" (there)"
+                                       : (s.installRoot / kSettingsExe).native() +
+                                             (s.settingsExeFound ? L" (there)" : L" (missing)")));
   if (s.task.exists) {
     add(L"  Check task:   " + s.task.path + (s.task.atFallback ? L" (root-folder name)" : L"") +
         L", enabled " + YesNo(s.task.enabled) + L", after " + kPdfCraftProductName + L" updates " +

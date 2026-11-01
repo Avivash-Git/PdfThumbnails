@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <string_view>
 
+#include "file_ops.h"
 #include "paths.h"
 #include "project_config.h"
 #include "settings.h"
@@ -108,24 +109,38 @@ bool HasV1Leftovers(const LegacyState& state) noexcept {
          state.userClassInV1;
 }
 
+bool HasV1Manager(std::span<const FolderEntry> root) {
+  const std::wstring legacyName = kLegacyRootName;
+  const std::wstring script = legacyName + L".ps1";
+  const std::wstring launcher = legacyName + L".cmd";
+  return std::any_of(root.begin(), root.end(), [&](const FolderEntry& entry) {
+    return !entry.directory && !entry.reparsePoint &&
+           (IEquals(entry.name, script) || IEquals(entry.name, launcher));
+  });
+}
+
+bool Has2xInstallFiles(std::span<const FolderEntry> root) noexcept {
+  return std::any_of(root.begin(), root.end(), [&](const FolderEntry& entry) {
+    return IEquals(entry.name, kSettingsExe) || IEquals(entry.name, kCliExe) ||
+           IsOneOf(entry.name, k2xRootFiles) || IStartsWith(entry.name, k2xUninstallerPrefix);
+  });
+}
+
+bool IsV1GeneratedFileName(std::wstring_view name) noexcept { return IsOneOf(name, kV1OnlyFiles); }
+
+bool IsV1BuildFolderName(std::wstring_view name) noexcept {
+  return IStartsWith(name, kV1BuildPrefix);
+}
+
 std::vector<std::wstring> ClassifyV1Files(const UserFolderListing& listing) {
   const std::wstring legacyName = kLegacyRootName;
   const std::wstring script = legacyName + L".ps1";
   const std::wstring launcher = legacyName + L".cmd";
 
-  const auto hasFile = [&](std::wstring_view name) {
-    return std::any_of(listing.root.begin(), listing.root.end(), [&](const FolderEntry& entry) {
-      return !entry.directory && !entry.reparsePoint && IEquals(entry.name, name);
-    });
-  };
   // The 1.x manager is still there: its own documents next to it are 1.x's too.
-  const bool manager = hasFile(script) || hasFile(launcher);
+  const bool manager = HasV1Manager(listing.root);
   // Anything of a 2.x install, whatever its kind: then licenses\ may be 2.x's.
-  const bool has2x =
-      std::any_of(listing.root.begin(), listing.root.end(), [&](const FolderEntry& entry) {
-        return IEquals(entry.name, kSettingsExe) || IEquals(entry.name, kCliExe) ||
-               IsOneOf(entry.name, k2xRootFiles) || IStartsWith(entry.name, k2xUninstallerPrefix);
-      });
+  const bool has2x = Has2xInstallFiles(listing.root);
   // Only files that 1.x shipped, no subfolders (2.x keeps PDFium's notices in licenses\pdfium\).
   // A partly emptied folder still counts, so an interrupted clean-up is finished later.
   const bool licensesAre1x =
@@ -195,6 +210,12 @@ HRESULT GetLegacyMachineRoot(std::filesystem::path* root) noexcept try {
 }
 CATCH_RETURN();
 
+HRESULT ListFolderEntries(const std::filesystem::path& dir,
+                          std::vector<FolderEntry>* entries) noexcept try {
+  return ListFolder(dir, entries);
+}
+CATCH_RETURN();
+
 HRESULT ListUserFolder(const std::filesystem::path& root, UserFolderListing* listing) noexcept try {
   *listing = {};
   const DWORD attributes = GetFileAttributesW(root.c_str());
@@ -233,6 +254,11 @@ HRESULT ReadLegacyState(const RegistryRoots& roots, const std::filesystem::path&
   std::optional<RegistryValue> runOnce;
   RETURN_IF_FAILED(ReadRegistryValue(roots.user, kRunOnceKey, kLegacyRunOnce, &runOnce));
   state->runOnce = runOnce.has_value();
+  std::vector<std::wstring> family;
+  RETURN_IF_FAILED(FindRunOnceRemovals(roots, &family));
+  state->runOnceOthers = std::any_of(family.begin(), family.end(), [](const std::wstring& name) {
+    return !IEquals(name, kLegacyRunOnce);
+  });
 
   const std::filesystem::path ini = userRoot / kSettingsIni;
   state->ini = IsFile(ini);

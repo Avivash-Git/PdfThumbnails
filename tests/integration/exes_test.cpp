@@ -16,12 +16,14 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "child_process.h"
 #include "cli_args.h"
 #include "commands.h"
 #include "context.h"
 #include "diagnostics.h"
+#include "elevation.h"
 #include "evaluate.h"
 #include "instance.h"
 #include "json_check.h"
@@ -296,6 +298,62 @@ TEST_P(Exes, ChecksAreRefusedWhereWritesAreSwallowed) {
   }
 }
 
+// The installer's per-user step and the 1.x clean-up write the user's settings, so they run only
+// where the virtualization guard refuses them before they read or change anything (and before
+// --migrate-v1 could ask for administrator rights).
+TEST_P(Exes, SetupUserAndMigrationAreRefusedWhereWritesAreSwallowed) {
+  std::wstring ancestor;
+  if (const std::optional<std::string> why = WhyAWritingCommandMayNotRunHere(&ancestor)) {
+    GTEST_SKIP() << *why;
+  }
+  for (const wchar_t* arguments :
+       {L"--setup-user", L"--setup-user --checks signin --zoom 120", L"--migrate-v1",
+        L"--migrate-v1 --user-only", L"--migrate-v1 --machine-only"}) {
+    test::CapturedRun run;
+    RUN_OR_SKIP(arguments, run);
+    std::printf("%ls %ls -> exit %lu: %s", GetParam(), arguments, run.exitCode, run.err.c_str());
+    EXPECT_EQ(run.exitCode, 8u) << WideToUtf8Lossy(arguments);
+    EXPECT_EQ(run.err.rfind("Cannot run here: ", 0), 0u) << run.err;
+    EXPECT_NE(run.err.find(WideToUtf8Lossy(ancestor)), std::string::npos) << run.err;
+    EXPECT_EQ(run.out, "");
+  }
+}
+
+// Elevated where the registry is the real one (CI), they stop at their elevation guard (exit 8)
+// before anything is read: everything they change belongs to the signed-in user.
+TEST_P(Exes, SetupUserAndMigrationAreRefusedElevated) {
+  ProcessContext context;
+  ASSERT_HRESULT_SUCCEEDED(GetProcessContext(ContextProbe::kWrite, &context));
+  if (!context.elevated) GTEST_SKIP() << "not elevated here (CI runs elevated)";
+  if (context.virtualization != Virtualization::kNo) {
+    GTEST_SKIP() << "the registry may be virtualized here, so the virtualization guard answers "
+                    "first (checked by SetupUserAndMigrationAreRefusedWhereWritesAreSwallowed)";
+  }
+  for (const wchar_t* arguments : {L"--setup-user", L"--migrate-v1"}) {
+    test::CapturedRun run;
+    RUN_OR_SKIP(arguments, run);
+    std::printf("%ls %ls (elevated) -> exit %lu: %s", GetParam(), arguments, run.exitCode,
+                run.err.c_str());
+    EXPECT_EQ(run.exitCode, 8u) << WideToUtf8Lossy(arguments);
+    EXPECT_NE(run.err.find("running as administrator"), std::string::npos) << run.err;
+    EXPECT_EQ(run.out, "");
+  }
+}
+
+// --setup-machine changes the PC for all users, so it is only started where it stops at once:
+// unelevated, it needs an administrator (exit 7) and touches nothing.
+TEST_P(Exes, SetupMachineNeedsAnAdministrator) {
+  bool elevated = false;
+  ASSERT_HRESULT_SUCCEEDED(GetTokenElevation(&elevated));
+  if (elevated) GTEST_SKIP() << "elevated: it would really set up this PC";
+  test::CapturedRun run;
+  RUN_OR_SKIP(L"--setup-machine", run);
+  std::printf("%ls --setup-machine -> exit %lu: %s", GetParam(), run.exitCode, run.err.c_str());
+  EXPECT_EQ(run.exitCode, 7u);
+  EXPECT_NE(run.err.find("administrator"), std::string::npos) << run.err;
+  EXPECT_EQ(run.out, "");
+}
+
 // A value that is not one of the five is a usage error before anything is read, anywhere.
 TEST_P(Exes, ChecksValueIsChecked) {
   for (const wchar_t* arguments : {L"--checks bogus", L"--checks", L"--checks=signin,pdfcraft"}) {
@@ -307,6 +365,28 @@ TEST_P(Exes, ChecksValueIsChecked) {
     EXPECT_EQ(run.err.find("Cannot run here"), std::string::npos) << run.err;
     EXPECT_EQ(run.out, "");
   }
+}
+
+// The elevated half of a change refuses to run from anywhere but the install folder: this build
+// folder is not under Program Files, so the step never starts. Unelevated (here) it stops even
+// earlier, at the elevation check. Only the settings executable knows --elevated at all. The
+// step is one that never installs anything; machine-install is never started by a test.
+TEST_P(Exes, ElevatedStepRefusedOutsideTheInstallFolder) {
+  test::CapturedRun run;
+  RUN_OR_SKIP(L"--elevated machine-repair-class", run);
+  if (!IsSettings()) {
+    EXPECT_EQ(run.exitCode, 2u) << run.err;
+    return;
+  }
+  bool elevated = false;
+  ASSERT_HRESULT_SUCCEEDED(GetTokenElevation(&elevated));
+  std::printf("%ls --elevated machine-repair-class (elevated=%d) -> exit 0x%08lX\n", GetParam(),
+              elevated ? 1 : 0, run.exitCode);
+  EXPECT_EQ(
+      run.exitCode,
+      static_cast<DWORD>(elevated ? E_ACCESSDENIED : HRESULT_FROM_WIN32(ERROR_ELEVATION_REQUIRED)));
+  EXPECT_EQ(run.out, "");
+  EXPECT_EQ(run.err, "");
 }
 
 // Elevated where the registry is the real one (CI), --checks stops at its elevation guard (exit
@@ -399,6 +479,87 @@ TEST_P(Exes, FixTakeBackWithoutYesAndWithoutAConsoleIsAUsageError) {
   EXPECT_NE(run.err.find("--yes"), std::string::npos) << run.err;
   EXPECT_EQ(run.err.find("Cannot run here"), std::string::npos) << run.err;
   EXPECT_EQ(run.out, "");
+}
+
+// The commands that install, uninstall or set the zoom, in the forms a test may start.
+std::vector<std::wstring> InstallUninstallZoomCommands() {
+  std::vector<std::wstring> commands = {L"--uninstall --yes",
+                                        L"--uninstall --yes --rebuild-thumbnails", L"--zoom 130",
+                                        L"--zoom 130 --no-refresh"};
+  if (kDevInstall) {
+    commands.emplace_back(L"--install");
+    commands.emplace_back(L"--install --user --checks signin --zoom 120");
+  }
+  return commands;
+}
+
+// --install, --uninstall and --zoom <n> write (and the first two would ask for administrator
+// rights), so they run only where the virtualization guard refuses them before anything is read.
+TEST_P(Exes, InstallUninstallAndZoomAreRefusedWhereWritesAreSwallowed) {
+  std::wstring ancestor;
+  if (const std::optional<std::string> why = WhyAWritingCommandMayNotRunHere(&ancestor)) {
+    GTEST_SKIP() << *why;
+  }
+  for (const std::wstring& arguments : InstallUninstallZoomCommands()) {
+    test::CapturedRun run;
+    RUN_OR_SKIP(arguments, run);
+    std::printf("%ls %ls -> exit %lu: %s", GetParam(), arguments.c_str(), run.exitCode,
+                run.err.c_str());
+    EXPECT_EQ(run.exitCode, 8u) << WideToUtf8Lossy(arguments);
+    EXPECT_EQ(run.err.rfind("Cannot run here: ", 0), 0u) << run.err;
+    EXPECT_NE(run.err.find(WideToUtf8Lossy(ancestor)), std::string::npos) << run.err;
+    EXPECT_EQ(run.out, "");
+  }
+}
+
+// Elevated where the registry is the real one (CI), they stop at their elevation guard (exit 8)
+// before anything else is read: each has a part that belongs to the signed-in user, and the
+// install and the uninstall ask for administrator rights themselves.
+TEST_P(Exes, InstallUninstallAndZoomAreRefusedElevated) {
+  ProcessContext context;
+  ASSERT_HRESULT_SUCCEEDED(GetProcessContext(ContextProbe::kWrite, &context));
+  if (!context.elevated) GTEST_SKIP() << "not elevated here (CI runs elevated)";
+  if (context.virtualization != Virtualization::kNo) {
+    GTEST_SKIP() << "the registry may be virtualized here, so the virtualization guard answers "
+                    "first";
+  }
+  for (const std::wstring& arguments : InstallUninstallZoomCommands()) {
+    test::CapturedRun run;
+    RUN_OR_SKIP(arguments, run);
+    std::printf("%ls %ls (elevated) -> exit %lu: %s", GetParam(), arguments.c_str(), run.exitCode,
+                run.err.c_str());
+    EXPECT_EQ(run.exitCode, 8u) << WideToUtf8Lossy(arguments);
+    EXPECT_NE(run.err.find("running as administrator"), std::string::npos) << run.err;
+    EXPECT_EQ(run.out, "");
+  }
+}
+
+// --uninstall removes the product for all users: without --yes and without a console to ask on
+// it is a usage error before anything is read. Started only where the guard would refuse anyway.
+TEST_P(Exes, UninstallWithoutYesAndWithoutAConsoleIsAUsageError) {
+  if (const std::optional<std::string> why = WhyAWritingCommandMayNotRunHere(nullptr)) {
+    GTEST_SKIP() << *why;
+  }
+  test::CapturedRun run;
+  RUN_OR_SKIP(L"--uninstall", run);
+  std::printf("%ls --uninstall -> exit %lu: %s", GetParam(), run.exitCode, run.err.c_str());
+  EXPECT_EQ(run.exitCode, 2u);
+  EXPECT_NE(run.err.find("--yes"), std::string::npos) << run.err;
+  EXPECT_EQ(run.err.find("Cannot run here"), std::string::npos) << run.err;
+  EXPECT_EQ(run.out, "");
+}
+
+// Options that do not fit are usage errors before anything is read, anywhere.
+TEST_P(Exes, InstallUninstallAndZoomUsageErrors) {
+  for (const wchar_t* arguments : {L"--install --machine --user", L"--uninstall --force",
+                                   L"--zoom 99", L"--install --zoom 250", L"--zoom --no-refresh"}) {
+    test::CapturedRun run;
+    RUN_OR_SKIP(arguments, run);
+    EXPECT_EQ(run.exitCode, 2u) << WideToUtf8Lossy(arguments);
+    EXPECT_NE(run.err.find("Run --help"), std::string::npos) << run.err;
+    EXPECT_EQ(run.err.find("Cannot run here"), std::string::npos) << run.err;
+    EXPECT_EQ(run.out, "");
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(Executables, Exes, ::testing::Values(kCliExe, kSettingsExe),

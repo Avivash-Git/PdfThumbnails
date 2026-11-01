@@ -93,8 +93,7 @@ TEST(StatusFormat, ThisPcsShape) {
       L"     Smart App Control  On; not blocking " + kProduct + L" (the Explorer test passed)",
       L"     1.x leftovers  1.x left the task " + std::wstring(kLegacyTask) +
           L", settings.ini (Zoom=130)",
-      L"                    A later build's --migrate-v1 removes them (for now this only reports "
-      L"them)",
+      L"                    --migrate-v1 removes them, once this version is installed",
       L"Result: healthy",
   };
   EXPECT_EQ(ToText(Report(ThisPcSnapshot())), ToText(expected));
@@ -154,6 +153,30 @@ TEST(StatusFormat, NothingInstalled) {
   EXPECT_EQ(lines[10], L"     Checks         off");
   // Smart App Control absent: no line.
   EXPECT_EQ(lines[11], L"Result: not installed");
+  // The install hint names --install only where the build has it, and never as "later".
+  const std::wstring hint = lines[2];
+  EXPECT_EQ(hint.find(L"later"), std::wstring::npos) << hint;
+  EXPECT_EQ(hint.find(L"--install") != std::wstring::npos, kDevInstall) << hint;
+}
+
+// Files in use waiting in trash folders for the restart: a neutral line of its own, never "!!",
+// and no command to run.
+TEST(StatusFormat, FilesWaitingForTheRestart) {
+  Snapshot s = MachineInstallSnapshot();
+  s.pendingTrash = {L"a", L"b"};
+  const std::vector<StatusLine> lines = Lines(s);
+  const std::optional<StatusLine> restart = FindLine(lines, L"Restart", ' ');
+  ASSERT_TRUE(restart);
+  EXPECT_EQ(restart->text,
+            L"files of an old build that were in use wait in trash folders next "
+            L"to " +
+                kMachineRoot.native() + L"; Windows deletes them at the next restart");
+  EXPECT_EQ(restart->hint, L"Restart Windows to finish");
+  EXPECT_FALSE(FindLine(lines, L"1.x clean-up", '!'));
+  EXPECT_EQ(Report(s).back(), L"Result: healthy");
+  s.pendingTrash = {L"a"};
+  EXPECT_NE(FindLine(Lines(s), L"Restart", ' ')->text.find(L"in a trash folder"),
+            std::wstring::npos);
 }
 
 TEST(StatusFormat, NoSmartAppControlLineWhenItIsOff) {
@@ -326,10 +349,13 @@ TEST(StatusFormat, DamagedClasses) {
   std::vector<StatusLine> lines = Lines(s);
   std::optional<StatusLine> handler = FindLine(lines, L"Handler", '!', L"(missing)");
   ASSERT_TRUE(handler);
-  // This build cannot run the administrator step: the hint names what works today.
+  // A complete build for all users and the settings executable there: --fix repairs it.
+  const std::wstring fix =
+      L"--fix points it at the newest complete build for all users (asks for administrator "
+      L"rights)";
   const std::wstring reinstall =
       L"Reinstall " + kProduct + L" for all users (needs administrator rights)";
-  EXPECT_EQ(handler->hint, reinstall);
+  EXPECT_EQ(handler->hint, fix);
   EXPECT_FALSE(FindLine(lines, L"PDFium", '!')) << "nothing to look for next to a missing DLL";
   ExpectHintsOnProblems(s);
 
@@ -342,7 +368,7 @@ TEST(StatusFormat, DamagedClasses) {
   ASSERT_TRUE(handler);
   EXPECT_EQ(handler->text, elsewhere + L" (2.0.0.0, " + kNativeArchName +
                                L", Apartment); outside " + kMachineRoot.native() + L"\\app");
-  EXPECT_EQ(handler->hint, reinstall);
+  EXPECT_EQ(handler->hint, fix);
   EXPECT_TRUE(FindLine(lines, L"PDFium", 'K'));
   Finding misplaced;
   misplaced.id = FindingId::kClassDamagedMachine;
@@ -371,7 +397,26 @@ TEST(StatusFormat, DamagedClasses) {
   s.machineClass->threading = L"Both";
   handler = FindLine(Lines(s), L"Handler", '!', L", Both)");
   ASSERT_TRUE(handler);
+  EXPECT_EQ(handler->hint, fix);
+  // Without the settings executable for all users, or without a complete build there, only a
+  // new install for all users helps; elevated, --fix must come from a normal prompt.
+  s.settingsExeFound = false;
+  handler = FindLine(Lines(s), L"Handler", '!', L", Both)");
+  ASSERT_TRUE(handler);
   EXPECT_EQ(handler->hint, reinstall);
+  s = MachineInstallSnapshot();
+  s.machineClass->dllExists = false;
+  s.machineBuilds[0].folder.complete = false;
+  s.machineBuilds[0].dllMachine.reset();
+  handler = FindLine(Lines(s), L"Handler", '!');
+  ASSERT_TRUE(handler);
+  EXPECT_EQ(handler->hint, reinstall);
+  s = MachineInstallSnapshot();
+  s.machineClass->dllExists = false;
+  s.context.elevated = true;
+  handler = FindLine(Lines(s), L"Handler", '!');
+  ASSERT_TRUE(handler);
+  EXPECT_EQ(handler->hint, fix + L" from a normal, not administrator, prompt");
 
   s = MachineInstallSnapshot();
   s.machineClass->peMachine = kForeignMachine;

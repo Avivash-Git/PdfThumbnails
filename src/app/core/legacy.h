@@ -19,7 +19,9 @@
 
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "registration.h"
@@ -32,7 +34,10 @@ namespace pdft {
 inline constexpr wchar_t kRunOnceKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce";
 
 struct LegacyState {
-  bool runOnce = false;        // HKCU RunOnce holds the 1.x clean-up value
+  bool runOnce = false;  // HKCU RunOnce holds the 1.x clean-up value
+  // ... or other values of the sign-in clean-up family (file_ops.h: <Product>Cleanup2, ...), which
+  // a 2.x uninstall writes for folders it could not remove; not 1.x leftovers themselves
+  bool runOnceOthers = false;
   bool legacyTask = false;     // the 1.x scheduled task exists; the task reader fills this in
   bool ini = false;            // the 1.x settings.ini exists in the 1.x per-user folder
   std::optional<int> iniZoom;  // its zoom (clamped like the handler), when it has one
@@ -64,6 +69,21 @@ struct UserFolderListing {
 // ("bin", "app\1.1.0.0-67a1323e"), sorted ignoring case (pure). May throw std::bad_alloc.
 std::vector<std::wstring> ClassifyV1Files(const UserFolderListing& listing);
 
+// The 1.x manager (<1.x name>.ps1 or .cmd, as a real file) is among the folder's entries |root|
+// (pure). May throw std::bad_alloc.
+bool HasV1Manager(std::span<const FolderEntry> root);
+
+// Something of a 2.x install is among |root|: its executables, LICENSE.txt,
+// THIRD-PARTY-NOTICES.md or an installer's uninstaller, whatever kind of entry it is (pure).
+bool Has2xInstallFiles(std::span<const FolderEntry> root) noexcept;
+
+// A file name that only 1.x ever wrote into its per-user folder and whose contents vary
+// (settings.ini and its logs), so it is recognized by its name alone (pure).
+bool IsV1GeneratedFileName(std::wstring_view name) noexcept;
+
+// The name of a 1.x build folder: "1." followed by anything (pure).
+bool IsV1BuildFolderName(std::wstring_view name) noexcept;
+
 // |dll| lies in a 1.x build folder of the install root |root|: <root>\app\1.<anything>\<file>,
 // compared as IsUnderLexically does (pure).
 bool IsInV1BuildFolder(const std::filesystem::path& dll,
@@ -73,6 +93,10 @@ bool IsInV1BuildFolder(const std::filesystem::path& dll,
 // FOLDERID_ProgramFiles\<1.x name>. They stay where 1.x put them even if this product is renamed.
 [[nodiscard]] HRESULT GetLegacyUserRoot(std::filesystem::path* root) noexcept;
 [[nodiscard]] HRESULT GetLegacyMachineRoot(std::filesystem::path* root) noexcept;
+
+// The entries of the folder |dir| (not "." and ".."), reading only; a missing folder has none.
+[[nodiscard]] HRESULT ListFolderEntries(const std::filesystem::path& dir,
+                                        std::vector<FolderEntry>* entries) noexcept;
 
 // Lists |root| for ClassifyV1Files, reading only. A missing folder gives an empty listing.
 [[nodiscard]] HRESULT ListUserFolder(const std::filesystem::path& root,

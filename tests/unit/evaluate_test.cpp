@@ -307,6 +307,18 @@ TEST(Evaluate, UserClassShadowsMachine) {
   findings = Evaluate(s);
   ExpectKind(*Find(findings, FindingId::kUserClassShadowsMachine), Severity::kWarning, true,
              FixKind::kNone);
+
+  // A per-user install of this version forced over 1.x's install for all users stays until this
+  // version is installed for all users; a per-user 1.x class over it still goes.
+  s = MachineInstall();
+  s.userBuilds = {Build(kUserRoot, L"2.0.0.0-99999999")};
+  s.userClass = Class(DllIn(s.userBuilds[0]));
+  s.legacy.machineClassInV1 = true;
+  ExpectKind(*Find(Evaluate(s), FindingId::kUserClassShadowsMachine), Severity::kWarning, true,
+             FixKind::kNone);
+  s.legacy.userClassInV1 = true;
+  ExpectKind(*Find(Evaluate(s), FindingId::kUserClassShadowsMachine), Severity::kWarning, true,
+             FixKind::kAuto);
 }
 
 TEST(Evaluate, ThreadingModel) {
@@ -592,6 +604,39 @@ TEST(Evaluate, InstalledSettingsExe) {
   EXPECT_FALSE(InstalledSettingsExe(s));  // nothing installed
 }
 
+// A per-user install forced over 1.x's install for all users: the scope stays the machine-wide
+// one, whose root has no settings executable, and the program is the per-user one.
+TEST(Evaluate, InstalledSettingsExeOfAPerUserInstallOverV1) {
+  Snapshot s = Empty();
+  s.machineBuilds = {Build(kMachineRoot, L"1.1.0.0-67a1323e")};
+  s.machineClass = Class(DllIn(s.machineBuilds[0]), L"1.1.0.0");
+  s.userBuilds = {Build(kUserRoot, L"2.0.0.0-1a2b3c4d")};
+  s.userClass = Class(DllIn(s.userBuilds[0]));
+  s.scope = Scope::kMachine;
+  s.installRoot = kMachineRoot;
+  s.settingsExeFound = false;
+  s.userSettingsExeFound = true;
+  EXPECT_TRUE(UserInstallOverV1Machine(s.machineClass, s.userClass, s.paths));
+  EXPECT_EQ(InstalledSettingsExe(s), kUserRoot / kSettingsExe);
+
+  s.userSettingsExeFound = false;  // the per-user program is not there
+  EXPECT_FALSE(InstalledSettingsExe(s));
+  s.userSettingsExeFound = true;
+  // A per-user class in a 1.x build folder, or outside the per-user root's build folders.
+  s.userClass = Class(kUserRoot / L"app" / L"1.1.0.0-67a1323e" / kHandlerDll, L"1.1.0.0");
+  EXPECT_FALSE(UserInstallOverV1Machine(s.machineClass, s.userClass, s.paths));
+  EXPECT_FALSE(InstalledSettingsExe(s));
+  s.userClass = Class(std::filesystem::path(L"D:\\Elsewhere\\app\\2.0.0.0-1a2b3c4d") / kHandlerDll);
+  EXPECT_FALSE(InstalledSettingsExe(s));
+  // A machine-wide class of this version: its own root's program or none.
+  s = MachineInstall();
+  s.userClass = Class(DllIn(Build(kUserRoot, L"2.0.0.0-1a2b3c4d")));
+  s.settingsExeFound = false;
+  s.userSettingsExeFound = true;
+  EXPECT_FALSE(UserInstallOverV1Machine(s.machineClass, s.userClass, s.paths));
+  EXPECT_FALSE(InstalledSettingsExe(s));
+}
+
 TEST(Evaluate, CleanupPendingOnlyWhileInstalled) {
   Snapshot s = UserInstall();
   s.legacy.runOnce = true;
@@ -600,6 +645,26 @@ TEST(Evaluate, CleanupPendingOnlyWhileInstalled) {
              FixKind::kAuto);
   EXPECT_TRUE(Find(findings, FindingId::kV1Leftovers));
   EXPECT_TRUE(HealthyFromFindings(findings));
+}
+
+// Files in use that an elevated step moved into trash folders: information, nothing to repair,
+// and a pending sign-in clean-up still comes first.
+TEST(Evaluate, CleanupPendingForTrashFolders) {
+  Snapshot s = MachineInstall();
+  s.pendingTrash = {L"x.trash-1", L"x.trash-2"};
+  std::vector<Finding> findings = Evaluate(s);
+  const Finding* finding = Find(findings, FindingId::kCleanupPending);
+  ASSERT_TRUE(finding);
+  ExpectKind(*finding, Severity::kInfo, false, FixKind::kNone);
+  EXPECT_EQ(finding->count, 2);
+  EXPECT_TRUE(HealthyFromFindings(findings));
+  EXPECT_EQ(ExitCodeFromFindings(findings), ExitCode::kOk);
+  s.legacy.runOnceOthers = true;
+  ExpectKind(*Find(Evaluate(s), FindingId::kCleanupPending), Severity::kWarning, false,
+             FixKind::kAuto);
+  s = Empty();
+  s.pendingTrash = {L"x.trash-1"};
+  EXPECT_FALSE(Find(Evaluate(s), FindingId::kCleanupPending));
 }
 
 TEST(Evaluate, V1Leftovers) {

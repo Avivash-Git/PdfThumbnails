@@ -173,6 +173,12 @@ void EnableLog() noexcept {
   ReleaseSRWLockExclusive(&g_lock);
 }
 
+void DisableLog() noexcept {
+  AcquireSRWLockExclusive(&g_lock);
+  State().enabled = false;
+  ReleaseSRWLockExclusive(&g_lock);
+}
+
 void Log(LogLevel level, std::wstring_view component, std::wstring_view message) noexcept {
   // A failure inside logging reaches WIL's callback, which would log again: once is enough.
   thread_local bool writing = false;

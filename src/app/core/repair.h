@@ -4,7 +4,8 @@
 // handler (the user may have chosen it), registers the per-user class again, removes a per-user
 // class that hides the machine-wide one, removes 1.x's pending clean-up while installed, rewrites
 // a broken zoom value, registers the check task again when it runs another program than the
-// installed one, and removes per-user build folders nothing uses. Taking slots back needs an
+// installed one, removes per-user build folders nothing uses, and finishes the 1.x clean-up once it
+// has run for the user (files 1.x left that were in use then). Taking slots back needs an
 // explicit request. The machine-wide part needs an administrator step, which the plan names but
 // this code never runs.
 
@@ -40,6 +41,7 @@ struct RepairStep {
     kRewriteZoom,        // the Zoom value -> |zoom|
     kReRegisterTask,     // the task again, same triggers, the installed program |path|
     kRemoveUserBuild,    // the per-user build folder |path|
+    kRemoveV1Files,      // what 1.x left in its per-user folder, once its clean-up has run
   };
   Kind kind = Kind::kFillSlot;
   int slot = -1;

@@ -19,46 +19,6 @@ constexpr DWORD kHashChunkBytes = 64 * 1024;
 // The build id is this many bytes of the digest, as hex.
 constexpr size_t kBuildIdBytes = 4;
 
-// A SHA-256 computation (CNG's shared algorithm object; nothing to open or close but the hash).
-class Sha256 {
- public:
-  Sha256() = default;
-  Sha256(const Sha256&) = delete;
-  Sha256& operator=(const Sha256&) = delete;
-  ~Sha256() {
-    if (hash_) BCryptDestroyHash(hash_);
-  }
-
-  HRESULT Start() noexcept {
-    const NTSTATUS status =
-        BCryptCreateHash(BCRYPT_SHA256_ALG_HANDLE, &hash_, nullptr, 0, nullptr, 0, 0);
-    RETURN_HR_IF(HRESULT_FROM_NT(status), !BCRYPT_SUCCESS(status));
-    return S_OK;
-  }
-
-  HRESULT Add(const BYTE* bytes, size_t size) noexcept {
-    while (size > 0) {
-      const ULONG piece = static_cast<ULONG>(std::min<size_t>(size, kHashChunkBytes));
-      // BCryptHashData does not write through the pointer; its parameter is not const.
-      const NTSTATUS status = BCryptHashData(hash_, const_cast<BYTE*>(bytes), piece, 0);
-      RETURN_HR_IF(HRESULT_FROM_NT(status), !BCRYPT_SUCCESS(status));
-      bytes += piece;
-      size -= piece;
-    }
-    return S_OK;
-  }
-
-  HRESULT Finish(Sha256Digest* digest) noexcept {
-    const NTSTATUS status =
-        BCryptFinishHash(hash_, digest->data(), static_cast<ULONG>(digest->size()), 0);
-    RETURN_HR_IF(HRESULT_FROM_NT(status), !BCRYPT_SUCCESS(status));
-    return S_OK;
-  }
-
- private:
-  BCRYPT_HASH_HANDLE hash_ = nullptr;
-};
-
 bool IsHexDigit(wchar_t c) noexcept {
   return (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F');
 }
@@ -81,9 +41,46 @@ std::pair<std::wstring, std::wstring> DllNames(bool is1x) {
 
 }  // namespace
 
+// CNG's shared algorithm object: nothing to open or close but the hash.
+Sha256Stream::~Sha256Stream() {
+  if (hash_) BCryptDestroyHash(static_cast<BCRYPT_HASH_HANDLE>(hash_));
+}
+
+HRESULT Sha256Stream::Start() noexcept {
+  RETURN_HR_IF(E_UNEXPECTED, hash_ != nullptr);
+  BCRYPT_HASH_HANDLE hash = nullptr;
+  const NTSTATUS status =
+      BCryptCreateHash(BCRYPT_SHA256_ALG_HANDLE, &hash, nullptr, 0, nullptr, 0, 0);
+  RETURN_HR_IF(HRESULT_FROM_NT(status), !BCRYPT_SUCCESS(status));
+  hash_ = hash;
+  return S_OK;
+}
+
+HRESULT Sha256Stream::Add(const BYTE* bytes, size_t size) noexcept {
+  RETURN_HR_IF(E_UNEXPECTED, hash_ == nullptr);
+  while (size > 0) {
+    const ULONG piece = static_cast<ULONG>(std::min<size_t>(size, kHashChunkBytes));
+    // BCryptHashData does not write through the pointer; its parameter is not const.
+    const NTSTATUS status =
+        BCryptHashData(static_cast<BCRYPT_HASH_HANDLE>(hash_), const_cast<BYTE*>(bytes), piece, 0);
+    RETURN_HR_IF(HRESULT_FROM_NT(status), !BCRYPT_SUCCESS(status));
+    bytes += piece;
+    size -= piece;
+  }
+  return S_OK;
+}
+
+HRESULT Sha256Stream::Finish(Sha256Digest* digest) noexcept {
+  RETURN_HR_IF(E_UNEXPECTED, hash_ == nullptr);
+  const NTSTATUS status = BCryptFinishHash(static_cast<BCRYPT_HASH_HANDLE>(hash_), digest->data(),
+                                           static_cast<ULONG>(digest->size()), 0);
+  RETURN_HR_IF(HRESULT_FROM_NT(status), !BCRYPT_SUCCESS(status));
+  return S_OK;
+}
+
 HRESULT Sha256Bytes(std::span<const BYTE> bytes, Sha256Digest* digest) noexcept {
   digest->fill(0);
-  Sha256 hash;
+  Sha256Stream hash;
   RETURN_IF_FAILED(hash.Start());
   RETURN_IF_FAILED(hash.Add(bytes.data(), bytes.size()));
   return hash.Finish(digest);
@@ -94,7 +91,7 @@ HRESULT Sha256File(const std::filesystem::path& file, Sha256Digest* digest) noex
   wil::unique_hfile handle;
   const HRESULT opened = OpenFileForReading(file, handle.put());
   if (FAILED(opened)) return opened;
-  Sha256 hash;
+  Sha256Stream hash;
   RETURN_IF_FAILED(hash.Start());
   std::vector<BYTE> buffer(kHashChunkBytes);
   for (;;) {

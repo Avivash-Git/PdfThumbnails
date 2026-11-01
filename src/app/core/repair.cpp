@@ -7,7 +7,9 @@
 #include <string>
 #include <utility>
 
+#include "file_ops.h"
 #include "log.h"
+#include "migrate_v1.h"
 #include "project_config.h"
 #include "registration.h"
 #include "settings.h"
@@ -17,9 +19,6 @@ namespace pdft {
 namespace {
 
 constexpr wchar_t kLogComponent[] = L"check";
-
-// Folders nested deeper than this in a build folder are not ours (a build folder is flat).
-constexpr int kMaxRemoveDepth = 16;
 
 std::filesystem::path NormalFolder(const std::filesystem::path& path) {
   std::filesystem::path normal = path.lexically_normal();
@@ -55,46 +54,6 @@ HRESULT DeletePlainFile(const std::filesystem::path& file, DWORD attributes) noe
   if (DeleteFileW(file.c_str())) return S_OK;
   return LastErrorOr(E_FAIL);
 }
-
-// Deletes |dir| and everything in it. Links and junctions inside are removed themselves; their
-// targets are never entered.
-HRESULT RemoveTreeNoFollow(const std::filesystem::path& dir, int depth) noexcept try {
-  RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_DIRECTORY), depth > kMaxRemoveDepth);
-  WIN32_FIND_DATAW entry = {};
-  const std::filesystem::path pattern = dir / L"*";
-  wil::unique_hfind find(FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &entry,
-                                          FindExSearchNameMatch, nullptr,
-                                          FIND_FIRST_EX_LARGE_FETCH));
-  if (!find) {
-    const DWORD error = GetLastError();
-    if (error != ERROR_FILE_NOT_FOUND) return HRESULT_FROM_WIN32(error);
-  } else {
-    HRESULT result = S_OK;
-    do {
-      const std::wstring_view name = entry.cFileName;
-      if (name == L"." || name == L"..") continue;
-      const std::filesystem::path child = dir / entry.cFileName;
-      const DWORD attributes = entry.dwFileAttributes;
-      HRESULT hr = S_OK;
-      if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-        const BOOL removed = (attributes & FILE_ATTRIBUTE_DIRECTORY)
-                                 ? RemoveDirectoryW(child.c_str())
-                                 : DeleteFileW(child.c_str());
-        if (!removed) hr = LastErrorOr(E_FAIL);
-      } else if (attributes & FILE_ATTRIBUTE_DIRECTORY) {
-        hr = RemoveTreeNoFollow(child, depth + 1);
-      } else {
-        hr = DeletePlainFile(child, attributes);
-      }
-      if (FAILED(hr) && SUCCEEDED(result)) result = hr;
-    } while (FindNextFileW(find.get(), &entry));
-    find.reset();
-    RETURN_IF_FAILED(result);
-  }
-  if (!RemoveDirectoryW(dir.c_str())) return LastErrorOr(E_FAIL);
-  return S_OK;
-}
-CATCH_RETURN();
 
 // The DLL may become the per-user class: <userRoot>\app\<2.x build>\<handler DLL>, every folder
 // on the way a real folder, the DLL and PDFium present.
@@ -245,9 +204,10 @@ RepairOutcome Apply(const RegistryRoots& roots, const SystemProbes& probes,
   };
   switch (step.kind) {
     case RepairStep::Kind::kDeleteRunOnce: {
-      bool deleted = false;
-      const HRESULT hr = DeleteRegistryValue(roots.user, kRunOnceKey, kLegacyRunOnce, &deleted);
-      finish(hr, deleted);
+      // The whole family: 1.x's value and any an uninstall left (file_ops.h).
+      size_t deleted = 0;
+      const HRESULT hr = DeleteRunOnceRemovals(roots, &deleted);
+      finish(hr, deleted > 0);
       break;
     }
     case RepairStep::Kind::kRegisterUserClass: {
@@ -301,6 +261,42 @@ RepairOutcome Apply(const RegistryRoots& roots, const SystemProbes& probes,
       if (SUCCEEDED(hr) && kept) outcome.result = RepairResult::kKept;
       break;
     }
+    case RepairStep::Kind::kRemoveV1Files: {
+      if (snapshot.context.elevated) {
+        // The user's profile again: left to an unelevated check.
+        outcome.result = RepairResult::kNotApplied;
+        outcome.hr = S_OK;
+        outcome.notApplied = NotApplied::kElevated;
+        break;
+      }
+      V1FilePlan plan;
+      std::vector<V1FileOutcome> files;
+      const HRESULT hr = RemoveV1UserFiles(roots, probes, snapshot, &plan, &files);
+      const auto any = [&](V1FileOutcome::Result result) {
+        return std::any_of(files.begin(), files.end(),
+                           [&](const V1FileOutcome& file) { return file.result == result; });
+      };
+      if (FAILED(hr) || any(V1FileOutcome::Result::kFailed)) {
+        outcome.result = RepairResult::kFailed;
+        outcome.hr = hr;
+        for (const V1FileOutcome& file : files) {
+          if (SUCCEEDED(outcome.hr) && FAILED(file.hr)) outcome.hr = file.hr;
+        }
+        if (SUCCEEDED(outcome.hr)) outcome.hr = E_FAIL;
+      } else if (std::any_of(files.begin(), files.end(), [](const V1FileOutcome& file) {
+                   // Only what waits for a process counts; contents that differ stay for good.
+                   return file.result == V1FileOutcome::Result::kKept &&
+                          (file.reason == V1KeepReason::kInUse ||
+                           file.reason == V1KeepReason::kHeld ||
+                           file.reason == V1KeepReason::kWaiting);
+                 })) {
+        outcome.result = RepairResult::kKept;
+      } else {
+        outcome.result =
+            any(V1FileOutcome::Result::kDone) ? RepairResult::kDone : RepairResult::kUnchanged;
+      }
+      break;
+    }
   }
   return outcome;
 }
@@ -331,6 +327,8 @@ const wchar_t* RepairStepName(RepairStep::Kind kind) noexcept {
       return L"reregister-task";
     case RepairStep::Kind::kRemoveUserBuild:
       return L"remove-user-build";
+    case RepairStep::Kind::kRemoveV1Files:
+      return L"remove-v1-files";
   }
   return L"unknown";
 }
@@ -386,6 +384,9 @@ RepairPlan PlanRepairs(const Snapshot& snapshot, std::span<const Finding> findin
     for (const std::filesystem::path& folder : finding.paths) {
       step(RepairStep::Kind::kRemoveUserBuild).path = folder;
     }
+  }
+  if (HasFix(findings, FindingId::kV1Leftovers, FixKind::kAuto)) {
+    step(RepairStep::Kind::kRemoveV1Files);
   }
 
   const bool machinePart =
@@ -477,7 +478,7 @@ HRESULT RemoveUserBuildFolder(const std::filesystem::path& userRoot,
     }
     RETURN_IF_FAILED(hr);
   }
-  const HRESULT hr = RemoveTreeNoFollow(folder, 0);
+  const HRESULT hr = RemoveTreeNoFollow(folder);
   if (IsInUseError(hr) || hr == HRESULT_FROM_WIN32(ERROR_DIR_NOT_EMPTY)) {
     *kept = true;
     return S_OK;

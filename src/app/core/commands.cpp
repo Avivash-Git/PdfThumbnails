@@ -3,6 +3,7 @@
 #include <wil/resource.h>
 #include <wil/result_macros.h>
 
+#include <algorithm>
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
@@ -14,18 +15,25 @@
 #include "check.h"
 #include "check_schedule.h"
 #include "diagnostics.h"
+#include "elevation.h"
 #include "evaluate.h"
+#include "install.h"
 #include "instance.h"
 #include "json.h"
 #include "live_test.h"
 #include "log.h"
 #include "paths.h"
 #include "project_config.h"
+#include "registration.h"
 #include "registry_roots.h"
+#include "settings.h"
+#include "setup.h"
 #include "snapshot.h"
 #include "status_format.h"
 #include "strings.h"
 #include "system_probes.h"
+#include "uninstall.h"
+#include "zoom.h"
 
 namespace pdft {
 namespace {
@@ -175,6 +183,27 @@ int RunStatus(const CliArgs& args, const ProcessContext& context, Output& out) {
   return Code(code);
 }
 
+// How an administrator step (|what|, "The administrator step") went. On a failure the step's own
+// report follows, indented: the elevated process writes no log of its own.
+void PrintElevatedRun(const ElevatedRun& run, std::wstring_view what, Output& out) {
+  switch (run.outcome) {
+    case ElevatedOutcome::kDone:
+      out.Line(std::wstring(what) + L" is done.");
+      return;
+    case ElevatedOutcome::kRestartPending:
+      out.Line(std::wstring(what) +
+               L" is done; files that were in use are deleted at the next restart.");
+      return;
+    case ElevatedOutcome::kCancelled:
+      out.Line(L"The administrator prompt was declined.");
+      return;
+    case ElevatedOutcome::kFailed:
+      break;
+  }
+  out.Error(std::wstring(what) + L" failed: " + HResultText(run.failure));
+  for (const std::wstring& line : run.report) out.Error(L"  " + line);
+}
+
 // What --check and --fix print after the check ran, and their exit code.
 int ReportCheck(HRESULT hr, const CheckResult& result, const ProcessContext& context, bool quiet,
                 Output& out) {
@@ -194,15 +223,21 @@ int ReportCheck(HRESULT hr, const CheckResult& result, const ProcessContext& con
   }
   if (quiet) return Code(result.code);
   for (const RepairOutcome& outcome : result.repairs) out.Line(RepairOutcomeText(outcome));
-  if (!result.repairs.empty()) out.Line(L"");
+  if (result.elevated) PrintElevatedRun(*result.elevated, L"The administrator step", out);
+  if (!result.repairs.empty() || result.elevated) out.Line(L"");
   out.Line(RenderStatus(FormatStatus(result.after, result.findings)));
-  if (result.adminStepNeeded && result.plan.machine) {
-    // --fix will run the administrator step once this build has it; until then both say the same.
+  if (result.adminStepNeeded && result.plan.machine && !result.elevated) {
     out.Line(L"");
-    out.Line(L"The machine-wide part needs an administrator to " +
-             ElevatedVerbText(*result.plan.machine) +
-             L". This build cannot run the administrator step yet; reinstall " + kProductName +
-             L" for all users to repair it.");
+    std::wstring text = L"The machine-wide part needs an administrator to " +
+                        ElevatedVerbText(*result.plan.machine) + L". ";
+    if (result.adminStepUnavailable) {
+      text += L"No " + std::wstring(kSettingsExe) +
+              L" is installed for all users to do it; reinstall " + kProductName +
+              L" for all users to repair it.";
+    } else {
+      text += L"--fix does it (it asks for administrator rights).";
+    }
+    out.Line(text);
   }
   return Code(result.code);
 }
@@ -253,6 +288,8 @@ int RunFixCommand(const CliArgs& args, const ProcessContext& context, Output& ou
   CheckOptions options;
   options.repair = args.takeBack ? RepairMode::kSafeAndTakeBack : RepairMode::kSafe;
   options.context = context;
+  // The part for all users: the settings executable installed there, through UAC.
+  options.launcher = LaunchElevatedWithShell;
   CheckResult result;
   const HRESULT hr = RunCheck(options, RegistryRoots{}, RealSystemProbes(), &result);
   return ReportCheck(hr, result, context, false, out);
@@ -292,6 +329,367 @@ int RunChecksCommand(const CliArgs& args, const ProcessContext& context, Output&
   for (const std::wstring& line : report.out) out.Line(line);
   if (!report.error.empty()) out.Error(report.error);
   return Code(result.code);
+}
+
+// ---- The installer's steps and the 1.x clean-up --------------------------------------------
+
+constexpr wchar_t kBusyMessage[] =
+    L"Another check or change is running and did not finish within 30 seconds; try again later.";
+
+// What a refused per-user step says, and its exit code.
+int ReportSetupRefusal(SetupRefusal refusal, std::wstring_view command,
+                       const ProcessContext& context, Output& out) {
+  switch (refusal) {
+    case SetupRefusal::kWrongContext:
+      out.Error(CannotRunHereMessage(context));
+      return Code(ExitCode::kWrongContext);
+    case SetupRefusal::kElevated:
+      out.Error(SetupElevatedRefusalMessage(command));
+      return Code(ExitCode::kWrongContext);
+    case SetupRefusal::kNotInstalled:
+      out.Error(std::wstring(kProductName) + L" is not installed (no " + kSettingsExe +
+                L" in the install folder), so there is nothing to set up for; 1.x, if it is "
+                L"there, stays as it is.");
+      return Code(ExitCode::kNotInstalled);
+    case SetupRefusal::kNotElevated:
+      out.Error(std::wstring(command) +
+                L" sets up this PC for all users and must run as administrator.");
+      return Code(ExitCode::kNeedsAdmin);
+    case SetupRefusal::kPackaged:
+      out.Error(
+          L"Cannot run here: started inside or below an app package, where files and the "
+          L"registry may be private copies.");
+      return Code(ExitCode::kWrongContext);
+    case SetupRefusal::kNone:
+      break;
+  }
+  return Code(ExitCode::kFailed);
+}
+
+void PrintFailures(const std::vector<std::wstring>& failures, Output& out) {
+  for (const std::wstring& failure : failures) out.Error(L"Not done: " + failure);
+}
+
+int RunSetupUserCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
+  SetupUserOptions options;
+  options.checks = args.checks;
+  options.zoom = args.zoom;
+  options.context = context;
+  SetupUserResult result;
+  if (const HRESULT hr = SetupUser(options, RegistryRoots{}, RealSystemProbes(), &result);
+      FAILED(hr)) {
+    out.Error(L"Cannot read the state of the installation: " + HResultText(hr));
+    return Code(ExitCode::kFailed);
+  }
+  if (result.refusal != SetupRefusal::kNone) {
+    return ReportSetupRefusal(result.refusal, Describe(args.verb).name, context, out);
+  }
+  if (result.busy) {
+    out.Error(kBusyMessage);
+    return Code(result.code);
+  }
+  // Quiet when everything went: it runs at sign-in.
+  PrintFailures(result.failures, out);
+  return Code(result.code);
+}
+
+int RunSetupMachineCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
+  SetupMachineResult result;
+  if (const HRESULT hr = SetupMachine(SetupMachineOptions{}, RegistryRoots{}, &result);
+      FAILED(hr)) {
+    out.Error(L"Cannot set up this PC: " + HResultText(hr));
+    return Code(ExitCode::kFailed);
+  }
+  if (result.refusal != SetupRefusal::kNone) {
+    return ReportSetupRefusal(result.refusal, Describe(args.verb).name, context, out);
+  }
+  if (result.busy) {
+    out.Error(kBusyMessage);
+    return Code(result.code);
+  }
+  PrintFailures(result.failures, out);
+  if (result.v1.restartPending || result.old.restartPending) {
+    out.Line(L"Some old files are in use; Windows deletes them at the next restart.");
+  }
+  return Code(result.code);
+}
+
+// The lines --migrate-v1 prints about the user part.
+void PrintUserMigration(const V1UserResult& user, Output& out) {
+  if (user.runOnceDeleted > 0) out.Line(L"Deleted 1.x's pending sign-in clean-up.");
+  if (user.zoomMigrated) {
+    out.Line(L"Kept 1.x's zoom: " + std::to_wstring(*user.zoomMigrated) + L" %.");
+  }
+  if (user.taskRegistered) {
+    out.Line(L"Registered the check task (after " + std::wstring(kPdfCraftProductName) +
+             L" updates, at sign-in).");
+  }
+  if (user.legacyTaskDeleted) out.Line(L"Deleted 1.x's task " + std::wstring(kLegacyTask) + L".");
+  switch (user.userClass) {
+    case V1UserResult::ClassChange::kRepointed:
+      out.Line(L"Pointed the per-user class at this version.");
+      break;
+    case V1UserResult::ClassChange::kDeleted:
+      out.Line(L"Removed the per-user 1.x class (the class for all users applies).");
+      break;
+    case V1UserResult::ClassChange::kKept:
+      out.Line(L"Kept the per-user 1.x class: nothing of this version could replace it.");
+      break;
+    case V1UserResult::ClassChange::kNone:
+      break;
+  }
+  const size_t removed = static_cast<size_t>(std::count_if(
+      user.files.begin(), user.files.end(),
+      [](const V1FileOutcome& outcome) { return outcome.result == V1FileOutcome::Result::kDone; }));
+  if (removed > 0) {
+    out.Line(L"Removed " + std::to_wstring(removed) + (removed == 1 ? L" item" : L" items") +
+             L" 1.x left in its per-user folder.");
+  }
+  size_t waiting = 0;
+  for (const V1FileOutcome& outcome : user.files) {
+    if (outcome.result == V1FileOutcome::Result::kKept &&
+        (outcome.reason == V1KeepReason::kInUse || outcome.reason == V1KeepReason::kWaiting)) {
+      ++waiting;
+    }
+  }
+  for (const V1Kept& kept : user.plan.kept) {
+    if (kept.reason == V1KeepReason::kHeld) ++waiting;
+  }
+  if (waiting > 0) {
+    out.Line(std::to_wstring(waiting) + (waiting == 1 ? L" item is" : L" items are") +
+             L" still in use; the next check removes " + (waiting == 1 ? L"it." : L"them."));
+  }
+  for (const V1Kept& kept : user.plan.kept) {
+    if (kept.reason == V1KeepReason::kContentDiffers) {
+      out.Line(L"Kept " + kept.path + L": its contents are not what 1.x shipped.");
+    }
+  }
+}
+
+int RunMigrateV1Command(const CliArgs& args, const ProcessContext& context, Output& out) {
+  MigrateOptions options;
+  options.scope = args.migrateScope;
+  options.context = context;
+  options.launcher = LaunchElevatedWithShell;
+  MigrateResult result;
+  if (const HRESULT hr = MigrateV1(options, RegistryRoots{}, RealSystemProbes(), &result);
+      FAILED(hr)) {
+    out.Error(L"Cannot read the state of the installation: " + HResultText(hr));
+    return Code(ExitCode::kFailed);
+  }
+  if (result.refusal != SetupRefusal::kNone) {
+    return ReportSetupRefusal(result.refusal, Describe(args.verb).name, context, out);
+  }
+  if (result.busy) {
+    out.Error(kBusyMessage);
+    return Code(result.code);
+  }
+  if (result.userPart) PrintUserMigration(result.user, out);
+  if (result.machineNoInstall) {
+    out.Line(L"1.x's files for all users stay until " + std::wstring(kProductName) +
+             L" is installed for all users, which removes them.");
+  }
+  if (result.run) {
+    switch (result.run->outcome) {
+      case ElevatedOutcome::kDone:
+        out.Line(L"Removed 1.x's build folders for all users.");
+        break;
+      case ElevatedOutcome::kRestartPending:
+        out.Line(
+            L"Removed 1.x's build folders for all users; files in use go at the next "
+            L"restart.");
+        break;
+      case ElevatedOutcome::kCancelled:
+        out.Line(L"The administrator prompt was declined; 1.x's files for all users stay.");
+        break;
+      case ElevatedOutcome::kFailed:
+        break;
+    }
+  }
+  PrintFailures(result.failures, out);
+  if (result.code == ExitCode::kOk) out.Line(L"Nothing of 1.x is left to clean up.");
+  return Code(result.code);
+}
+
+// ---- --install, --uninstall, --uninstall-cleanup, --zoom ------------------------------------
+
+int RunInstallCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
+  InstallOptions options;
+  options.scope = args.scope;
+  options.checks = args.checks;
+  options.zoom = args.zoom;
+  options.force = args.force;
+  options.context = context;
+  options.launcher = LaunchElevatedWithShell;
+  InstallResult result;
+  if (const HRESULT hr =
+          InstallFromOwnFolder(options, RegistryRoots{}, RealSystemProbes(), &result);
+      FAILED(hr)) {
+    out.Error(L"Cannot install: " + HResultText(hr));
+    return Code(ExitCode::kFailed);
+  }
+  if (result.refusal == InstallRefusal::kWrongContext) {
+    out.Error(CannotRunHereMessage(context));
+    return Code(result.code);
+  }
+  if (result.refusal != InstallRefusal::kNone) {
+    out.Error(InstallRefusalMessage(result));
+    if (result.run) {
+      for (const std::wstring& line : result.run->report) out.Error(L"  " + line);
+    }
+    return Code(result.code);
+  }
+  if (result.busy) {
+    out.Error(kBusyMessage);
+    return Code(result.code);
+  }
+  if (result.switchedToMachine) {
+    out.Line(std::wstring(kProductName) +
+             L" is installed for all users, so this updates the install for all users (one "
+             L"administrator prompt). To switch to a per-user install, run --uninstall first.");
+  }
+  if (result.holdersEnded > 0) {
+    out.Line(L"Ended " + std::to_wstring(result.holdersEnded) +
+             (result.holdersEnded == 1 ? L" thumbnail process" : L" thumbnail processes") +
+             L" of this session that held an old build.");
+  }
+  if (result.run) PrintElevatedRun(*result.run, L"The part for all users", out);
+  if (result.run && result.run->outcome == ElevatedOutcome::kCancelled) {
+    out.Line(L"Nothing was installed.");
+    return Code(result.code);
+  }
+  const size_t v1Removed = static_cast<size_t>(std::count_if(
+      result.v1Files.begin(), result.v1Files.end(),
+      [](const V1FileOutcome& outcome) { return outcome.result == V1FileOutcome::Result::kDone; }));
+  if (v1Removed > 0) {
+    out.Line(L"Removed " + std::to_wstring(v1Removed) + (v1Removed == 1 ? L" item" : L" items") +
+             L" 1.x left in the per-user folder.");
+  }
+  if (result.setup.migration.legacyTaskDeleted) {
+    out.Line(L"Deleted 1.x's task " + std::wstring(kLegacyTask) + L".");
+  }
+  if (result.setup.zoomWritten) {
+    out.Line(L"Zoom: " + std::to_wstring(*result.setup.zoomWritten) + L" %.");
+  }
+  PrintFailures(result.failures, out);
+  if (result.code == ExitCode::kFailed && result.after.scope == Scope::kNone) {
+    return Code(result.code);
+  }
+  out.Line(result.scope == Scope::kMachine ? L"Installed for all users."
+                                           : L"Installed for this user.");
+  out.Line(L"");
+  out.Line(RenderStatus(FormatStatus(result.after, result.findings)));
+  return Code(result.code);
+}
+
+int RunUninstallCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
+  // Refused before the question: an elevated process could not do the per-user part.
+  if (context.elevated) {
+    out.Error(UninstallElevatedRefusalMessage());
+    return Code(ExitCode::kWrongContext);
+  }
+  if (!args.yes &&
+      !AskYesNo(out, L"Remove " + std::wstring(kProductName) + L" for all users of this PC?")) {
+    out.Line(L"Nothing changed.");
+    return Code(ExitCode::kCancelled);
+  }
+  UninstallOptions options;
+  options.yes = args.yes;
+  options.rebuildThumbnails = args.rebuildThumbnails;
+  options.context = context;
+  options.launcher = LaunchElevatedWithShell;
+  options.runner = RunProgramAndWait;
+  UninstallResult result;
+  if (const HRESULT hr = Uninstall(options, RegistryRoots{}, RealSystemProbes(), &result);
+      FAILED(hr)) {
+    out.Error(L"Cannot uninstall: " + HResultText(hr));
+    return Code(ExitCode::kFailed);
+  }
+  switch (result.refusal) {
+    case UninstallRefusal::kWrongContext:
+      out.Error(CannotRunHereMessage(context));
+      return Code(result.code);
+    case UninstallRefusal::kElevated:
+      out.Error(UninstallElevatedRefusalMessage());
+      return Code(result.code);
+    case UninstallRefusal::kNotInstalled:
+      out.Error(std::wstring(kProductName) +
+                L" is not installed here; there is nothing to remove.");
+      return Code(result.code);
+    case UninstallRefusal::kNone:
+      break;
+  }
+  if (result.busy) {
+    out.Error(kBusyMessage);
+    return Code(result.code);
+  }
+  if (result.inno) {
+    if (SUCCEEDED(result.innoRun)) {
+      out.Line(std::wstring(kProductName) +
+               L" was installed by its installer, so its uninstaller ran (exit code " +
+               std::to_wstring(result.innoExit) + L").");
+    } else if (result.code == ExitCode::kCancelled) {
+      out.Line(L"The installer's uninstaller did not start: it was cancelled.");
+    }
+    PrintFailures(result.failures, out);
+    return Code(result.code);
+  }
+  for (const std::wstring& line : UninstallReport(result)) out.Line(line);
+  PrintFailures(result.failures, out);
+  return Code(result.code);
+}
+
+int RunUninstallCleanupCommand(Output& out) {
+  // The uninstaller's step: whatever it can, never a question, never a failure.
+  UninstallCleanupResult result;
+  const HRESULT hr =
+      UninstallCleanup(UninstallCleanupOptions{}, RegistryRoots{}, RealSystemProbes(), &result);
+  Log(FAILED(hr) || !result.failures.empty() ? LogLevel::kWarning : LogLevel::kInfo,
+      L"uninstall-cleanup",
+      L"uninstall-cleanup hr=" + HResultText(hr) + L" machine=" +
+          (result.machinePart ? L"yes" : L"no") + L" user=" + (result.userPart ? L"yes" : L"no") +
+          L" failures=" + std::to_wstring(result.failures.size()));
+  (void)out;
+  return Code(ExitCode::kOk);
+}
+
+int RunZoomCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
+  if (!args.zoom) {
+    Settings settings;
+    ZoomDetails details;
+    if (const HRESULT hr = LoadSettings(RegistryRoots{}, &settings, &details); FAILED(hr)) {
+      out.Error(L"Cannot read the zoom: " + HResultText(hr));
+      return Code(ExitCode::kFailed);
+    }
+    out.Line(ZoomText(details.decision));
+    return Code(ExitCode::kOk);
+  }
+  // The zoom is the signed-in user's own setting.
+  if (context.elevated) {
+    out.Error(
+        L"Cannot run here: running as administrator. The zoom is the signed-in user's own "
+        L"setting, which an administrator process does not write; run --zoom from a normal (not "
+        L"administrator) prompt.");
+    return Code(ExitCode::kWrongContext);
+  }
+  std::optional<OperationLock> lock;
+  const HRESULT locked = OperationLock::Acquire(kCheckLockWaitMs, &lock);
+  if (locked == OperationLock::kBusy || locked == OperationLock::kTakenByLowerIntegrity) {
+    out.Error(kBusyMessage);
+    return Code(ExitCode::kBusy);
+  }
+  if (FAILED(locked)) {
+    out.Error(L"Cannot save the zoom: " + HResultText(locked));
+    return Code(ExitCode::kFailed);
+  }
+  if (const HRESULT hr = SaveZoom(RegistryRoots{}, *args.zoom); FAILED(hr)) {
+    out.Error(L"Cannot save the zoom: " + HResultText(hr));
+    return Code(ExitCode::kFailed);
+  }
+  (void)NotifyAssocChanged(RegistryRoots{});
+  Log(LogLevel::kInfo, L"zoom", L"zoom saved=" + std::to_wstring(*args.zoom));
+  out.Line(ZoomSavedText(*args.zoom));
+  return Code(ExitCode::kOk);
 }
 
 HRESULT CopyToClipboard(std::wstring_view text) noexcept {
@@ -441,6 +839,172 @@ std::wstring ChecksElevatedRefusalMessage() {
          L"prompt.";
 }
 
+std::wstring SetupElevatedRefusalMessage(std::wstring_view command) {
+  return L"Cannot run here: running as administrator. " + std::wstring(command) +
+         L" changes the signed-in user's own settings, which an administrator process does not "
+         L"write; run it from a normal (not administrator) prompt. Where a part for all users "
+         L"needs an administrator, it asks for one itself.";
+}
+
+std::wstring InstallRefusalMessage(const InstallResult& result) {
+  const std::wstring product = kProductName;
+  const std::wstring folder = result.source.dir.native();
+  switch (result.refusal) {
+    case InstallRefusal::kElevated:
+      return L"Cannot run here: running as administrator. --install also sets up the signed-in "
+             L"user, which an administrator process does not do; run it from a normal (not "
+             L"administrator) prompt. It asks for administrator rights itself for the part for "
+             L"all users.";
+    case InstallRefusal::kInnoInstall:
+      return L"Cannot install here: " + product + L" is installed by its installer (" +
+             (result.inno && result.inno->scope == Scope::kUser ? L"for this user"
+                                                                : L"for all users") +
+             L"). Update it with a newer installer, or remove it in Settings > Apps first.";
+    case InstallRefusal::kNotABuild: {
+      const SourceCheck& check = result.sourceCheck;
+      std::wstring text = L"Cannot install from " + folder + L": ";
+      switch (check.problem) {
+        case SourceProblem::kMissingFile:
+          text += check.file + L" is not there. Run --install from the folder of a build.";
+          break;
+        case SourceProblem::kWrongArch:
+          text += check.file + L" is built for " + ArchName(check.arch) +
+                  L", which this Windows cannot use; install the build for this Windows.";
+          break;
+        case SourceProblem::kNot2x:
+          text += check.file + L" is not a build of version 2 or later.";
+          break;
+        case SourceProblem::kUnreadable:
+          text += check.file + L" cannot be read (" + HResultText(check.hr) + L").";
+          break;
+        case SourceProblem::kNone:
+          break;
+      }
+      return text;
+    }
+    case InstallRefusal::kInsideRoot:
+      return L"Cannot install from " + folder +
+             L": it is the install folder itself, or inside it. Run --install from the folder of "
+             L"a build.";
+    case InstallRefusal::kUnsafeFolder: {
+      std::wstring text = L"Cannot install from " + folder + L": ";
+      if (result.unsafe) {
+        text += result.unsafe->object.native() + L" can be changed by " +
+                result.unsafe->access.principal;
+      } else {
+        text += L"the step for all users found that other accounts can change it";
+      }
+      text += result.scope == Scope::kUser
+                  ? L", so File Explorer's thumbnail process and your sign-in task would run "
+                    L"whatever another account put there."
+                  : L", so an administrator would copy and register for every user whatever was "
+                    L"put there.";
+      return text +
+             L" Put the build in a folder only you and administrators can change (inside your "
+             L"user profile, for example) and run --install from there.";
+    }
+    case InstallRefusal::kV1Machine:
+      return L"Version 1.x is installed for all users, and File Explorer's thumbnail process would "
+             L"go on loading it instead of a per-user install. --install --machine replaces it "
+             L"(one administrator prompt); --install --user --force installs for this user "
+             L"anyway.";
+    case InstallRefusal::kWrongContext:
+    case InstallRefusal::kNone:
+      break;
+  }
+  return L"Cannot install.";
+}
+
+std::wstring UninstallElevatedRefusalMessage() {
+  return L"Cannot run here: running as administrator. --uninstall also removes the signed-in "
+         L"user's own settings and files, which an administrator process does not do; run it "
+         L"from a normal (not administrator) prompt. It asks for administrator rights itself for "
+         L"the part for all users.";
+}
+
+std::vector<std::wstring> UninstallReport(const UninstallResult& result) {
+  std::vector<std::wstring> lines;
+  const std::wstring product = kProductName;
+  if (result.rebuildNotAvailable) {
+    lines.push_back(
+        L"--rebuild-thumbnails: this build cannot rebuild the thumbnail cache yet; thumbnails "
+        L"File Explorer already made stay until Windows makes them again.");
+  }
+  if (result.run) {
+    switch (result.run->outcome) {
+      case ElevatedOutcome::kDone:
+        lines.push_back(L"Removed the part for all users.");
+        break;
+      case ElevatedOutcome::kRestartPending:
+        lines.push_back(
+            L"Removed the part for all users; files that were in use are deleted at the next "
+            L"restart.");
+        break;
+      case ElevatedOutcome::kCancelled:
+        lines.push_back(
+            L"The administrator prompt was declined: the part for all users (its class and its "
+            L"install folder) stays. Run --uninstall again and approve the prompt to remove it.");
+        break;
+      case ElevatedOutcome::kFailed:
+        lines.push_back(L"The part for all users failed: " + HResultText(result.run->failure));
+        for (const std::wstring& line : result.run->report) lines.push_back(L"  " + line);
+        break;
+    }
+  }
+  if (result.machineNoProgram) {
+    std::wstring line = L"The part for all users stays: no " + std::wstring(kSettingsExe) +
+                        L" is installed for all users to remove it. If version 1.x is installed "
+                        L"for all users, its own uninstall removes it";
+    line += kDevInstall
+                ? L"; otherwise install this version for all users (--install --machine) and "
+                  L"run --uninstall again."
+                : L"; otherwise reinstall this version for all users and run --uninstall again.";
+    lines.push_back(std::move(line));
+  }
+  if (!result.files.scheduled.empty()) {
+    lines.push_back(L"Some files are in use; they are removed when you next sign in.");
+  }
+  for (const std::filesystem::path& dir : result.files.notScheduled) {
+    lines.push_back(L"Some files in " + dir.native() +
+                    L" are in use; delete them once they are "
+                    L"closed.");
+  }
+  if (!result.machineLeft && result.failures.empty()) {
+    lines.push_back(product + L" removed. PDF files show their app icon again.");
+  } else if (result.machineLeft) {
+    lines.push_back(
+        L"PDF thumbnails are off for you, but the part for all users is still "
+        L"installed.");
+  }
+  return lines;
+}
+
+std::wstring ZoomText(const ZoomDecision& decision) {
+  std::wstring text = L"Zoom: " + std::to_wstring(decision.zoom) + L" % (";
+  switch (decision.origin) {
+    case ZoomOrigin::kRegistry:
+      text += L"saved setting";
+      break;
+    case ZoomOrigin::kLegacyIni:
+      text += L"1.x's settings.ini";
+      break;
+    case ZoomOrigin::kDefault:
+      text += L"default";
+      break;
+  }
+  return text + L")";
+}
+
+std::wstring ZoomSavedText(int zoom) {
+  return L"Zoom set to " + std::to_wstring(ClampZoom(zoom)) +
+         L" %. Thumbnails made from now on use it; thumbnails File Explorer already made keep "
+         L"their old zoom until Windows makes them again (this build cannot refresh them).";
+}
+
+bool UninstallNeedsYes(const CliArgs& args, bool canAskOnConsole) noexcept {
+  return args.verb == Verb::kUninstall && !args.yes && !canAskOnConsole;
+}
+
 bool ShouldStartSettingsWindow(DWORD consoleProcessCount, bool hasConsoleWindow) noexcept {
   return consoleProcessCount == 1 && hasConsoleWindow;
 }
@@ -488,9 +1052,10 @@ int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWin
       out.Line(UsageText(parseOptions));
       return Code(ExitCode::kOk);
     case Verb::kElevated:
-      // The elevated half of a change shows nothing and logs nothing: its exit code is its
-      // report. The steps themselves come with installing.
-      return static_cast<int>(E_NOTIMPL);
+      // The elevated half of a change shows nothing and logs nothing: its exit code and the
+      // lines it sends its parent are its report. It reads its own command line again and
+      // checks it, and where it runs from, before anything else (elevation.h).
+      return ElevatedMain();
     case Verb::kNone:
       if (mode == Mode::kCli) {
         DWORD processes[2] = {};
@@ -516,6 +1081,11 @@ int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWin
     out.Error(
         L"--fix --take-back takes .pdf slots from another handler and needs --yes when there is "
         L"no console to ask on. Run --help");
+    return Code(ExitCode::kUsage);
+  }
+  if (UninstallNeedsYes(args, CanAskOnConsole())) {
+    out.Error(L"--uninstall removes " + std::wstring(kProductName) +
+              L" for all users and needs --yes when there is no console to ask on. Run --help");
     return Code(ExitCode::kUsage);
   }
 
@@ -565,6 +1135,27 @@ int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWin
       break;
     case Verb::kDiagnostics:
       code = RunDiagnostics(args, context, out);
+      break;
+    case Verb::kSetupUser:
+      code = RunSetupUserCommand(args, context, out);
+      break;
+    case Verb::kSetupMachine:
+      code = RunSetupMachineCommand(args, context, out);
+      break;
+    case Verb::kMigrateV1:
+      code = RunMigrateV1Command(args, context, out);
+      break;
+    case Verb::kInstall:
+      code = RunInstallCommand(args, context, out);
+      break;
+    case Verb::kUninstall:
+      code = RunUninstallCommand(args, context, out);
+      break;
+    case Verb::kUninstallCleanup:
+      code = RunUninstallCleanupCommand(out);
+      break;
+    case Verb::kZoom:
+      code = RunZoomCommand(args, context, out);
       break;
     default:
       out.Error(std::wstring(Describe(args.verb).name) + L" is not available in this build yet");

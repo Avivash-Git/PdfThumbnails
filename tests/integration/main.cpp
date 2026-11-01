@@ -33,6 +33,18 @@
 //                                root folder's permissions inherited, as whatever token it runs
 //                                with (the tests start it with a standard user's token, so that
 //                                user owns it); prints "make-folder hr=0x<HRESULT>"
+//   hold-file <path>             opens the file <path> for reading, sharing only reading (so it
+//                                can be neither deleted nor renamed), prints "held", and keeps
+//                                it open until its standard input closes
+//   parent                       prints this process's parent process id (GetParentProcessId)
+//                                as "parent=<id>", or "parent=none"
+//   report <exit code> <line>... connects to its parent's elevation report pipe the way the
+//                                elevated process does (ElevatedReporter), prints "connected=1"
+//                                or "connected=0", writes each <line> to the pipe and exits with
+//                                <exit code> (decimal, or hexadecimal with 0x)
+//   pipe-squat <process id>      creates the elevation report pipe named after <process id>, as
+//                                someone else would, prints "ready", waits up to 10 s for a
+//                                client and prints "got=<bytes it sent>" or "got=none"
 
 #include <windows.h>
 
@@ -51,8 +63,10 @@
 #include "child_process.h"
 #include "com_security.h"
 #include "context.h"
+#include "elevation.h"
 #include "instance.h"
 #include "medium_il.h"
+#include "processes.h"
 #include "strings.h"
 #include "tasks.h"
 
@@ -177,6 +191,89 @@ int MakeFolder(const wchar_t* folder) {
   return 0;
 }
 
+void WaitForInputToClose() {
+  char buffer[64];
+  DWORD read = 0;
+  while (ReadFile(GetStdHandle(STD_INPUT_HANDLE), buffer, sizeof(buffer), &read, nullptr) &&
+         read > 0) {
+  }
+}
+
+int HoldFile(const wchar_t* path) {
+  wil::unique_hfile file(CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                     FILE_ATTRIBUTE_NORMAL, nullptr));
+  if (!file) return 3;
+  Print("held\n");
+  WaitForInputToClose();
+  return 0;
+}
+
+int Parent() {
+  DWORD parent = 0;
+  if (FAILED(pdft::GetParentProcessId(&parent))) {
+    Print("parent=none\n");
+  } else {
+    Print("parent=" + std::to_string(parent) + "\n");
+  }
+  return 0;
+}
+
+int Report(int argc, wchar_t** argv) {
+  const DWORD exitCode = wcstoul(argv[3], nullptr, 0);
+  pdft::ElevatedReporter reporter = pdft::ElevatedReporter::Connect();
+  Print(reporter.connected() ? "connected=1\n" : "connected=0\n");
+  for (int i = 4; i < argc; ++i) reporter.Line(argv[i]);
+  return static_cast<int>(exitCode);
+}
+
+int PipeSquat(const wchar_t* processId) {
+  const std::wstring name = pdft::ElevationPipeName(wcstoul(processId, nullptr, 10));
+  wil::unique_hfile pipe(CreateNamedPipeW(
+      name.c_str(), PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+      PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 0, 65536, 0,
+      nullptr));
+  if (!pipe) return 3;
+  wil::unique_event_nothrow event;
+  if (FAILED(event.create(wil::EventOptions::ManualReset))) return 4;
+  Print("ready\n");
+  OVERLAPPED overlapped = {};
+  overlapped.hEvent = event.get();
+  DWORD transferred = 0;
+  if (!ConnectNamedPipe(pipe.get(), &overlapped)) {
+    const DWORD error = GetLastError();
+    if (error == ERROR_IO_PENDING) {
+      if (WaitForSingleObject(event.get(), 10000) != WAIT_OBJECT_0) {
+        CancelIoEx(pipe.get(), &overlapped);
+        GetOverlappedResult(pipe.get(), &overlapped, &transferred, TRUE);
+        Print("got=none\n");
+        return 0;
+      }
+    } else if (error != ERROR_PIPE_CONNECTED && error != ERROR_NO_DATA) {
+      Print("got=none\n");
+      return 0;
+    }
+  }
+  size_t got = 0;
+  char buffer[256];
+  for (;;) {
+    overlapped = OVERLAPPED{};
+    overlapped.hEvent = event.get();
+    transferred = 0;
+    if (!ReadFile(pipe.get(), buffer, sizeof(buffer), &transferred, &overlapped)) {
+      if (GetLastError() != ERROR_IO_PENDING) break;
+      if (WaitForSingleObject(event.get(), 5000) != WAIT_OBJECT_0 ||
+          !GetOverlappedResult(pipe.get(), &overlapped, &transferred, FALSE)) {
+        CancelIoEx(pipe.get(), &overlapped);
+        GetOverlappedResult(pipe.get(), &overlapped, &transferred, TRUE);
+        break;
+      }
+    }
+    got += transferred;
+  }
+  Print("got=" + std::to_string(got) + "\n");
+  return 0;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -194,6 +291,10 @@ int wmain(int argc, wchar_t** argv) {
     if (mode == L"squat-lock" && argc == 5) return SquatLock(argv[3], argv[4]);
     if (mode == L"apply-task" && argc == 7) return ApplyTask(argv[3], argv[4], argv[5], argv[6]);
     if (mode == L"make-folder" && argc == 4) return MakeFolder(argv[3]);
+    if (mode == L"hold-file" && argc == 4) return HoldFile(argv[3]);
+    if (mode == L"parent" && argc == 3) return Parent();
+    if (mode == L"report" && argc >= 4) return Report(argc, argv);
+    if (mode == L"pipe-squat" && argc == 4) return PipeSquat(argv[3]);
     return 2;
   }
 

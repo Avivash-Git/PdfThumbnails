@@ -7,6 +7,7 @@
 #include <optional>
 #include <utility>
 
+#include "file_ops.h"
 #include "pe_info.h"
 #include "project_config.h"
 #include "registration.h"
@@ -38,6 +39,7 @@ constexpr wchar_t kLabelUserClass[] = L"Per-user class";
 constexpr wchar_t kLabelExplorer[] = L"Explorer";
 constexpr wchar_t kLabelPolicy[] = L"Policy";
 constexpr wchar_t kLabelCleanup[] = L"1.x clean-up";
+constexpr wchar_t kLabelRestart[] = L"Restart";
 constexpr wchar_t kLabelLeftovers[] = L"1.x leftovers";
 constexpr wchar_t kLabelOldBuilds[] = L"Old builds";
 constexpr wchar_t kLabelAccount[] = L"Account";
@@ -224,11 +226,10 @@ std::wstring Joined(const std::vector<std::wstring>& parts, std::wstring_view se
   return text;
 }
 
-// The verbs that install are not in this build yet: the hints say so rather than name a command
-// that only answers "not available".
+// How to install for all users. Developer builds also install from a build's own folder.
 std::wstring InstallCommandHint() {
-  return kDevInstall ? L"the installer, choosing all users (or, in a later developer build, "
-                       L"--install --machine)"
+  return kDevInstall ? L"the installer, choosing all users (or, in a developer build, "
+                       L"--install --machine from the build's folder)"
                      : L"the installer, choosing all users";
 }
 
@@ -242,10 +243,24 @@ std::wstring ChecksCommandHint(const Snapshot& s, std::wstring_view value, std::
   return hint;
 }
 
-// What a damaged machine-wide part needs while this build cannot run the administrator step.
+// A new install for all users: what a machine-wide part needs that --fix cannot repair.
 std::wstring ReinstallForAllUsersHint() {
   return L"Reinstall " + std::wstring(kProductName) +
          L" for all users (needs administrator rights)";
+}
+
+// What a damaged machine-wide class needs: --fix runs the administrator step that points it at
+// the newest complete build for all users, where one is there together with the settings
+// executable that runs the step; otherwise a new install for all users.
+std::wstring MachineRepairHint(const Snapshot& s) {
+  if (s.scope != Scope::kMachine || !s.settingsExeFound ||
+      !ChooseBuildDll(s.machineBuilds, s.context.osArch)) {
+    return ReinstallForAllUsersHint();
+  }
+  std::wstring hint =
+      L"--fix points it at the newest complete build for all users (asks for administrator rights)";
+  if (s.context.elevated) hint += L" from a normal, not administrator, prompt";
+  return hint;
 }
 
 // The folder a machine-wide class's DLL belongs in: <machine root>\app.
@@ -383,8 +398,17 @@ std::wstring FindingText(const Snapshot& s, const Finding& f) {
     case FindingId::kTaskDisabled:
       return L"the check task is disabled";
     case FindingId::kCleanupPending:
-      return L"1.x's pending clean-up (RunOnce value " + std::wstring(kLegacyRunOnce) +
-             L") would delete " + s.paths.legacyUserRoot.native() + L" at the next sign-in";
+      if (f.severity == Severity::kInfo) {
+        return L"files of an old build that were in use wait in " +
+               std::wstring(f.count == 1 ? L"a trash folder" : L"trash folders") + L" next to " +
+               s.paths.machineRoot.native() + L"; Windows deletes them at the next restart";
+      }
+      if (s.legacy.runOnce) {
+        return L"1.x's pending clean-up (RunOnce value " + std::wstring(kLegacyRunOnce) +
+               L") would delete " + s.paths.legacyUserRoot.native() + L" at the next sign-in";
+      }
+      return L"a pending clean-up (RunOnce values " + RunOnceValueName(0) +
+             L"...) would delete folders at the next sign-in";
     case FindingId::kV1Leftovers: {
       const LegacyState& l = s.legacy;
       std::vector<std::wstring> parts;
@@ -449,20 +473,22 @@ std::wstring HintFor(const Snapshot& s, std::span<const Finding> findings, const
   switch (f.id) {
     case FindingId::kNotInstalled:
       return L"Install it with " +
-             std::wstring(kDevInstall ? L"the installer (or, in a later developer build, --install)"
-                                      : L"the installer");
+             std::wstring(kDevInstall
+                              ? L"the installer (or, in a developer build, --install from the "
+                                L"build's folder)"
+                              : L"the installer");
     case FindingId::kClassMissingUser:
     case FindingId::kClassDamagedUser:
       if (f.fix == FixKind::kAuto) return L"--check registers the newest per-user build again";
       return L"Reinstall " + product;
     case FindingId::kClassDamagedMachine:
-      return ReinstallForAllUsersHint();
+      return MachineRepairHint(s);
     case FindingId::kUserClassShadowsMachine:
       if (f.fix == FixKind::kAuto) return L"--check removes the per-user class";
-      return L"Repair the machine-wide part first: " + ReinstallForAllUsersHint();
+      return L"Repair the machine-wide part first: " + MachineRepairHint(s);
     case FindingId::kThreadingModel:
       if (f.fix == FixKind::kAuto) return L"--check registers the class again";
-      if (f.fix == FixKind::kNeedsAdmin) return ReinstallForAllUsersHint();
+      if (f.fix == FixKind::kNeedsAdmin) return MachineRepairHint(s);
       return L"Reinstall " + product;
     case FindingId::kDllArchMismatch:
       return L"Reinstall the " + OsArchName(s) + L" build of " + product;
@@ -530,9 +556,12 @@ std::wstring HintFor(const Snapshot& s, std::span<const Finding> findings, const
       // The program it should run is not there: registering it again would point at nothing.
       return L"Reinstall " + product + L"; until then --checks none removes the task";
     case FindingId::kCleanupPending:
+      if (f.severity == Severity::kInfo) return L"Restart Windows to finish";
       return L"--check deletes the pending clean-up";
     case FindingId::kV1Leftovers:
-      return L"A later build's --migrate-v1 removes them (for now this only reports them)";
+      if (f.fix == FixKind::kAuto) return L"--check removes the files once nothing uses them";
+      if (InstalledSettingsExe(s)) return L"--migrate-v1 removes them and keeps the zoom";
+      return L"--migrate-v1 removes them, once this version is installed";
     case FindingId::kOldBuildFolders:
       return L"--check removes them (a folder still in use stays until the next check)";
     case FindingId::kZoomInvalid:
@@ -591,7 +620,7 @@ std::wstring RepairOutcomeText(const RepairOutcome& outcome) {
   std::wstring what;
   switch (step.kind) {
     case RepairStep::Kind::kDeleteRunOnce:
-      what = L"delete 1.x's pending clean-up";
+      what = L"delete the pending sign-in clean-up";
       break;
     case RepairStep::Kind::kRegisterUserClass:
       what = L"register the per-user class for " + step.path.native();
@@ -613,6 +642,9 @@ std::wstring RepairOutcomeText(const RepairOutcome& outcome) {
       break;
     case RepairStep::Kind::kRemoveUserBuild:
       what = L"remove the old build folder " + step.path.filename().native();
+      break;
+    case RepairStep::Kind::kRemoveV1Files:
+      what = L"remove the files 1.x left in its per-user folder";
       break;
   }
   switch (outcome.result) {
@@ -1011,7 +1043,11 @@ std::vector<StatusLine> FormatStatus(const Snapshot& s, std::span<const Finding>
         line('!', kLabelPolicy, FindingText(s, f), hint(f));
         break;
       case FindingId::kCleanupPending:
-        line('!', kLabelCleanup, FindingText(s, f), hint(f));
+        if (f.severity == Severity::kInfo) {
+          line(' ', kLabelRestart, FindingText(s, f), hint(f));
+        } else {
+          line('!', kLabelCleanup, FindingText(s, f), hint(f));
+        }
         break;
       case FindingId::kV1Leftovers:
         line(' ', kLabelLeftovers, FindingText(s, f), hint(f));

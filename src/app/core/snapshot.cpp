@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <utility>
 
+#include "file_ops.h"
 #include "paths.h"
 #include "pe_info.h"
 #include "project_config.h"
@@ -12,6 +13,22 @@
 
 namespace pdft {
 namespace {
+
+// The trash folders next to the machine-wide install root |machineRoot| (real folders only).
+HRESULT ListPendingTrash(const std::filesystem::path& machineRoot,
+                         std::vector<std::wstring>* names) noexcept try {
+  names->clear();
+  if (!machineRoot.has_relative_path()) return S_OK;
+  std::vector<FolderEntry> entries;
+  RETURN_IF_FAILED(ListFolderEntries(machineRoot.parent_path(), &entries));
+  for (const FolderEntry& entry : entries) {
+    if (entry.directory && !entry.reparsePoint && IsTrashFolderName(entry.name)) {
+      names->push_back(entry.name);
+    }
+  }
+  return S_OK;
+}
+CATCH_RETURN();
 
 // |path| normalized, without a trailing separator, for comparing folders as text.
 std::filesystem::path NormalFolder(const std::filesystem::path& path) {
@@ -26,7 +43,8 @@ bool IsComplete2xBuild(const BuildFolder& folder) noexcept {
   return folder.complete && !folder.is1x && !folder.version.empty();
 }
 
-// The build folders in |appDir|, with the DLL's machine for the complete 2.x ones.
+}  // namespace
+
 HRESULT ListBuilds(const std::filesystem::path& appDir, std::vector<BuildInfo>* builds) noexcept
     try {
   builds->clear();
@@ -45,6 +63,8 @@ HRESULT ListBuilds(const std::filesystem::path& appDir, std::vector<BuildInfo>* 
   return S_OK;
 }
 CATCH_RETURN();
+
+namespace {
 
 // |path| in its long form, or as it is when that cannot be read.
 std::filesystem::path LongPathOr(const std::filesystem::path& path) {
@@ -146,7 +166,21 @@ bool DllIsInFolder(const std::filesystem::path& dll, const std::filesystem::path
   return IEquals(parent.native(), NormalFolder(folder).native());
 }
 
+bool UserInstallOverV1Machine(const std::optional<ClassReg>& machineClass,
+                              const std::optional<ClassReg>& userClass, const EnginePaths& paths) {
+  // The per-user class's path follows the rule a machine-wide class of this version follows, in
+  // the per-user root.
+  return machineClass && userClass && !paths.legacyMachineRoot.empty() &&
+         IsInV1BuildFolder(machineClass->dll, paths.legacyMachineRoot) &&
+         IsMachineClassPath(paths.userRoot, userClass->dll);
+}
+
 std::optional<std::filesystem::path> InstalledSettingsExe(const Snapshot& snapshot) {
+  if (snapshot.scope == Scope::kMachine && !snapshot.settingsExeFound &&
+      snapshot.userSettingsExeFound && snapshot.paths.userRoot.is_absolute() &&
+      UserInstallOverV1Machine(snapshot.machineClass, snapshot.userClass, snapshot.paths)) {
+    return NormalFolder(snapshot.paths.userRoot) / kSettingsExe;
+  }
   if (!snapshot.settingsExeFound || snapshot.installRoot.empty()) return std::nullopt;
   const std::filesystem::path& root = snapshot.scope == Scope::kMachine ? snapshot.paths.machineRoot
                                       : snapshot.scope == Scope::kUser  ? snapshot.paths.userRoot
@@ -159,12 +193,16 @@ std::optional<std::filesystem::path> InstalledSettingsExe(const Snapshot& snapsh
 }
 
 std::optional<std::filesystem::path> ChooseUserBuildDll(const Snapshot& snapshot) {
+  return ChooseBuildDll(snapshot.userBuilds, snapshot.context.osArch);
+}
+
+std::optional<std::filesystem::path> ChooseBuildDll(std::span<const BuildInfo> builds,
+                                                    Arch osArch) {
   const BuildInfo* best = nullptr;
   std::wstring bestId;
-  for (const BuildInfo& build : snapshot.userBuilds) {
+  for (const BuildInfo& build : builds) {
     if (!IsComplete2xBuild(build.folder) || !build.dllMachine ||
-        MachineToArch(*build.dllMachine) != snapshot.context.osArch ||
-        snapshot.context.osArch == Arch::kOther) {
+        MachineToArch(*build.dllMachine) != osArch || osArch == Arch::kOther) {
       continue;
     }
     const std::optional<BuildFolderNameParts> parts = ParseBuildFolderName(build.folder.name);
@@ -199,6 +237,10 @@ HRESULT GatherSnapshot(const RegistryRoots& roots, const GatherOptions& options,
   RETURN_IF_FAILED(ReadOsBuild(roots, &s.osBuild));
   RETURN_IF_FAILED(ListBuilds(s.paths.userRoot / kBuildsFolderName, &s.userBuilds));
   RETURN_IF_FAILED(ListBuilds(s.paths.machineRoot / kBuildsFolderName, &s.machineBuilds));
+  if (const HRESULT hr = ListPendingTrash(s.paths.machineRoot, &s.pendingTrash); FAILED(hr)) {
+    s.pendingTrash.clear();
+    AddIssue(&s, L"trash", hr);
+  }
 
   // Both classes, both slots (and the machine-wide ones, for information), then the scope.
   RETURN_IF_FAILED(ReadClass(roots, Scope::kMachine, &s.machineClass));
@@ -213,6 +255,12 @@ HRESULT GatherSnapshot(const RegistryRoots& roots, const GatherOptions& options,
   if (!s.installRoot.empty()) {
     const DWORD attributes = GetFileAttributesW((s.installRoot / kSettingsExe).c_str());
     s.settingsExeFound =
+        attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+  }
+  if (s.scope == Scope::kMachine &&
+      UserInstallOverV1Machine(s.machineClass, s.userClass, s.paths)) {
+    const DWORD attributes = GetFileAttributesW((s.paths.userRoot / kSettingsExe).c_str());
+    s.userSettingsExeFound =
         attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
   }
 

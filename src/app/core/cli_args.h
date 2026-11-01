@@ -131,6 +131,7 @@ struct CliArgs {
   bool full = false;
   // --install
   Scope scope = Scope::kMachine;
+  bool force = false;  // a per-user install over a machine-wide 1.x install
   // --uninstall
   bool rebuildThumbnails = false;
   // --diagnostics

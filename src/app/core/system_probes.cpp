@@ -1,5 +1,10 @@
 #include "system_probes.h"
 
+#include <wil/result_macros.h>
+
+#include <string>
+#include <string_view>
+
 namespace pdft {
 namespace {
 
@@ -38,6 +43,18 @@ class RealProbes final : public SystemProbes {
     return pdft::RunLiveTest(size, file, timeoutMs, result);
   }
   void Wait(DWORD ms) const noexcept override { Sleep(ms); }
+  HRESULT DeleteLegacyTask() const noexcept override { return pdft::DeleteLegacyTask(); }
+  HRESULT FindHolders(std::span<const std::filesystem::path> files,
+                      std::vector<Holder>* holders) const noexcept override {
+    return pdft::FindHolders(files, holders);
+  }
+  HRESULT EndHolder(const Holder& holder) const noexcept override try {
+    std::wstring surrogate;
+    RETURN_IF_FAILED(SurrogateImagePath(&surrogate));
+    const std::wstring_view allowed[] = {surrogate};
+    return TerminateOwnSessionHolder(holder, allowed);
+  }
+  CATCH_RETURN();
 };
 
 }  // namespace

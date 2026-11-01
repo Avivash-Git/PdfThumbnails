@@ -123,4 +123,7 @@ struct CheckRecord {
 // Whether the 1.x clean-up has run for this user (State\MigratedFromV1 is a non-zero DWORD).
 [[nodiscard]] HRESULT ReadMigratedFromV1(const RegistryRoots& roots, bool* migrated) noexcept;
 
+// Records that the 1.x clean-up has run for this user (State\MigratedFromV1 = 1).
+[[nodiscard]] HRESULT WriteMigratedFromV1(const RegistryRoots& roots) noexcept;
+
 }  // namespace pdft

@@ -35,7 +35,7 @@ constexpr VerbInfo kVerbs[] = {
      L"handler (asks first, or --yes). The part for all users needs administrator rights."},
     {Verb::kZoom, L"--zoom", kOptional, L"<100-200>", Writes::kWithValue, false, false, false,
      false,
-     L"Show the thumbnail zoom, or set it and refresh the thumbnails (100 shows the whole page)."},
+     L"Show the thumbnail zoom and where it comes from, or set it (100 shows the whole page)."},
     {Verb::kChecks, L"--checks", kRequired, L"<list>", Writes::kYes, false, false, false, false,
      L"Choose when the scheduled checks run: after {pdfcraft} updates, at sign-in, both or never."},
     {Verb::kRefresh, L"--refresh", kNone, L"", Writes::kYes, false, false, false, false,
@@ -85,6 +85,7 @@ enum class Option {
   kUser,
   kChecks,
   kZoom,
+  kForce,
   kRebuildThumbnails,
   kYes,
   kCopy,
@@ -127,6 +128,7 @@ constexpr OptionInfo kOptions[] = {
      Bit(Verb::kInstall) | Bit(Verb::kSetupUser)},
     {Option::kZoom, L"--zoom", kRequired, L"<100-200>", false, 0, false, false,
      Bit(Verb::kInstall) | Bit(Verb::kSetupUser)},
+    {Option::kForce, L"--force", kNone, L"", false, 0, false, false, Bit(Verb::kInstall)},
     {Option::kRebuildThumbnails, L"--rebuild-thumbnails", kNone, L"", false, 0, false, false,
      Bit(Verb::kUninstall)},
     {Option::kYes, L"--yes", kNone, L"", false, 0, false, false,
@@ -265,6 +267,9 @@ std::optional<std::wstring> ApplyOption(Option option, std::wstring_view value, 
     case Option::kZoom:
       args->zoom = ParseZoomValue(value);
       if (!args->zoom) return L"--zoom must be a whole number from 100 to 200";
+      break;
+    case Option::kForce:
+      args->force = true;
       break;
     case Option::kRebuildThumbnails:
       args->rebuildThumbnails = true;

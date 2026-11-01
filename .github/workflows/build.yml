@@ -7,6 +7,11 @@
 #                     requests, unless called by another workflow)
 #   test-arm64        the ARM64 test bundle, run natively on an ARM64 runner (not on pull
 #                     requests, unless called; also when another build leg failed)
+#   system-x64        informational, never blocks: the x64 system tests (ctest label "system")
+#                     from the x64 test bundle against the staged runtime artifact: the real
+#                     install for all users through UAC, the commands that use it, 1.1's state
+#                     replaced, the uninstall, and nothing left (not on pull requests, unless
+#                     called)
 #
 # Repository variables (Settings > Secrets and variables > Actions > Variables), all optional:
 #   PDFT_WIN_X64_RUNNER  x64 runner label. Default windows-2025, which serves Visual Studio 2026
@@ -117,8 +122,10 @@ jobs:
       # gate.planting must have run the executables' elevated-only command too (its own line,
       # "<exe> --status --no-live-test -> exit 0x...", which no other test prints). The task
       # tests that only an elevated runner can run (the protected task folder, a standard user's
-      # task in it, --checks refused elevated and run at Medium where nothing is installed) skip
-      # quietly elsewhere, so each must have printed its own line here.
+      # task in it, --checks refused elevated and run at Medium where nothing is installed, the
+      # writing commands --setup-user, --migrate-v1, --install and --uninstall refused elevated,
+      # --setup-machine in test places) skip quietly elsewhere, so each must have printed its own
+      # line here.
       - name: Check the elevated test paths
         if: env.PDFT_ARCH == 'x64'
         run: |
@@ -136,6 +143,12 @@ jobs:
           findstr /l /c:"[ tasks ] every user's task removed with the folder: yes" "%LOG%" || (echo ::error::DeleteTaskFolderAllUsers did not remove a standard user's task with the folder& exit /b 1)
           findstr /l /c:"--checks default (elevated) -> exit 8" "%LOG%" || (echo ::error::--checks was not refused elevated& exit /b 1)
           findstr /l /c:"--checks default (not installed) -> exit " "%LOG%" || (echo ::error::--checks did not run at Medium integrity where nothing is installed& exit /b 1)
+          findstr /l /c:" --setup-user (elevated) -> exit 8" "%LOG%" || (echo ::error::--setup-user was not refused elevated& exit /b 1)
+          findstr /l /c:" --migrate-v1 (elevated) -> exit 8" "%LOG%" || (echo ::error::--migrate-v1 was not refused elevated& exit /b 1)
+          findstr /l /c:" --install (elevated) -> exit 8" "%LOG%" || (echo ::error::--install was not refused elevated& exit /b 1)
+          findstr /l /c:" --uninstall --yes (elevated) -> exit 8" "%LOG%" || (echo ::error::--uninstall was not refused elevated& exit /b 1)
+          findstr /l /c:"[ setup ] --setup-machine in test places (elevated) -> exit " "%LOG%" || (echo ::error::--setup-machine did not run elevated in test places& exit /b 1)
+          findstr /l /c:"[ install ] --uninstall-cleanup machine part in test places (elevated): removed" "%LOG%" || (echo ::error::--uninstall-cleanup did not remove the part for all users elevated in test places& exit /b 1)
 
       # CTest counts a test case that GoogleTest skipped as passed: list every skipped test, with
       # its reason, in the log and in one notice on the run's summary page.
@@ -263,6 +276,12 @@ jobs:
           findstr /l /c:"[ tasks ] every user's task removed with the folder: yes" t\Testing\Temporary\LastTest.log || (echo ::error::DeleteTaskFolderAllUsers did not remove a standard user's task with the folder& exit /b 1)
           findstr /l /c:"--checks default (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--checks was not refused elevated& exit /b 1)
           findstr /l /c:"--checks default (not installed) -> exit " t\Testing\Temporary\LastTest.log || (echo ::error::--checks did not run at Medium integrity where nothing is installed& exit /b 1)
+          findstr /l /c:" --setup-user (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--setup-user was not refused elevated& exit /b 1)
+          findstr /l /c:" --migrate-v1 (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--migrate-v1 was not refused elevated& exit /b 1)
+          findstr /l /c:" --install (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--install was not refused elevated& exit /b 1)
+          findstr /l /c:" --uninstall --yes (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--uninstall was not refused elevated& exit /b 1)
+          findstr /l /c:"[ setup ] --setup-machine in test places (elevated) -> exit " t\Testing\Temporary\LastTest.log || (echo ::error::--setup-machine did not run elevated in test places& exit /b 1)
+          findstr /l /c:"[ install ] --uninstall-cleanup machine part in test places (elevated): removed" t\Testing\Temporary\LastTest.log || (echo ::error::--uninstall-cleanup did not remove the part for all users elevated in test places& exit /b 1)
 
       # The same list as in build: see there.
       - name: List the skipped tests
@@ -301,6 +320,73 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: logs-test-arm64
+          path: t/Testing/Temporary/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Informational (continue-on-error: it never fails the run): installs for real on the runner,
+  # which is thrown away afterwards. It builds nothing: the system tests come in build
+  # (ci-x64)'s x64 test bundle, and they install from its staged runtime artifact (cmake
+  # --install with the runtime component), exactly what ships. The runner is elevated with UAC
+  # on (EnableLUA=1) and ConsentPromptBehaviorAdmin=0, so the tests' unelevated commands (Medium
+  # integrity, a standard user's token) have their administrator steps done through UAC without
+  # a prompt. The program refuses to run without PDFT_SYSTEM_TESTS=1, unelevated, or where 1.x
+  # or 2.x is installed.
+  system-x64:
+    needs: build
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || inputs.called) }}
+    runs-on: ${{ vars.PDFT_WIN_X64_RUNNER || 'windows-2025' }}
+    timeout-minutes: 45
+    continue-on-error: true
+    permissions: {}
+    steps:
+      - name: Download tests-x64
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tests-x64
+          path: t
+
+      - name: Download PdfThumbnails-x64-unsigned
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: PdfThumbnails-x64-unsigned
+          path: runtime
+
+      - name: Runner image, UAC and token
+        run: |
+          echo Runner image: %ImageOS% %ImageVersion%
+          type runtime\BUILDINFO.txt
+          reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLUA
+          reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v ConsentPromptBehaviorAdmin
+          whoami /groups | findstr /i /c:"Mandatory Label" /c:"S-1-5-32-544"
+          t\pdft-run-medium.exe -- t\pdft-run-medium.exe --check-token
+          exit /b 0
+
+      # Every command and its output is in the log, each line of the tests' own starting with
+      # "[ system ]".
+      - name: System tests (install, use, 1.1 replaced, uninstall)
+        env:
+          PDFT_SYSTEM_TESTS: "1"
+        run: |
+          set "PDFT_SYSTEM_RUNTIME=%GITHUB_WORKSPACE%\runtime"
+          ctest --test-dir t -L system -V --output-junit Testing/Temporary/junit.xml --no-tests=error --timeout 2400
+
+      # A skipped program (exit 77) counts as passed in CTest: the tests must have reached their
+      # end. The elevated steps report back through a pipe of the unelevated process, which
+      # accepts only its own child: this shows whether UAC makes the asking process the parent.
+      - name: Check that the system tests ran
+        if: ${{ !cancelled() }}
+        run: |
+          set "LOG=t\Testing\Temporary\LastTest.log"
+          findstr /l /c:"[ system ]" "%LOG%"
+          findstr /l /c:"[ system ] nothing left" "%LOG%" >nul || (echo ::error::The system tests did not run to the end& exit /b 1)
+          findstr /l /c:"[ system ] machine-install reported through the asking process's pipe: yes" "%LOG%" >nul || (echo ::error::The elevated step's report did not come back through the asking process's pipe& exit /b 1)
+
+      - name: Upload logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: logs-system-x64
           path: t/Testing/Temporary/
           if-no-files-found: ignore
           retention-days: 7

@@ -24,6 +24,7 @@
 
 #include "check_schedule.h"
 #include "child_process.h"
+#include "fake_probes.h"
 #include "log.h"
 #include "pe_info.h"
 #include "project_config.h"
@@ -45,121 +46,8 @@ constexpr Arch kNativeArch = Arch::kArm64;
 constexpr Arch kNativeArch = Arch::kX64;
 #endif
 
-class FakeQueries final : public AssociationQueries {
- public:
-  HRESULT ThumbnailHandler(std::optional<std::wstring>* clsid) const noexcept override {
-    ++calls;
-    *clsid = handler;
-    return S_OK;
-  }
-  HRESULT ProgId(std::optional<std::wstring>* id) const noexcept override {
-    ++calls;
-    *id = progId;
-    return S_OK;
-  }
-  std::optional<std::wstring> handler = kOurs;
-  std::optional<std::wstring> progId;
-  mutable int calls = 0;
-};
-
-// Windows as the tests want it: by default a Medium process whose registry is Explorer's,
-// Windows resolving our handler, the Explorer test passing, Smart App Control off, PdfCraft
-// 0.14.0, no tasks.
-class FakeProbes final : public SystemProbes {
- public:
-  FakeProbes() {
-    context.userSid = L"S-1-12-1-1-2-3-4";
-    context.userAccount = L"PC\\someone";
-    context.integrityRid = SECURITY_MANDATORY_MEDIUM_RID;
-    context.probe = ContextProbe::kWrite;
-    context.virtualization = Virtualization::kNo;
-    context.processArch = kNativeArch;
-    context.osArch = kNativeArch;
-    sac.state = SacState::kOff;
-    pdfcraft = {true, L"0.14.0", L"", PdfCraftSource::kUpgradeCode};
-  }
-  HRESULT GetProcessContext(ContextProbe, ProcessContext* out) const noexcept override {
-    *out = context;
-    return S_OK;
-  }
-  const AssociationQueries& Associations() const noexcept override { return queries; }
-  HRESULT ReadSacState(const RegistryRoots&, SacReading* reading) const noexcept override {
-    *reading = sac;
-    return S_OK;
-  }
-  BlockCount CountCiBlocks(std::wstring_view leaf, int days) const noexcept override {
-    countedLeaf = leaf;
-    countedDays = days;
-    const size_t call = countCalls++;
-    return call < counts.size() ? counts[call] : BlockCount{true, 0, S_OK};
-  }
-  HRESULT DetectPdfCraft(PdfCraftInfo* info) const noexcept override {
-    *info = pdfcraft;
-    return S_OK;
-  }
-  HRESULT ReadTask(const TaskLocation&, TaskState* state) const noexcept override {
-    *state = task;
-    return S_OK;
-  }
-  HRESULT LegacyTaskExists(bool* exists) const noexcept override {
-    *exists = legacyTask;
-    return S_OK;
-  }
-  // Records the change and makes the task look like Task Scheduler would afterwards.
-  HRESULT ApplyTaskOptions(const TaskLocation& location, const TaskOptions& options,
-                           const std::filesystem::path& program,
-                           const ProcessContext& used) const noexcept override {
-    applied.push_back(Applied{location, options, program, used.elevated});
-    if (FAILED(applyError)) return applyError;
-    if (HasNoTriggers(options)) {
-      task = {};
-      return S_OK;
-    }
-    task.exists = true;
-    task.enabled = options.enabled;
-    task.afterPdfCraft = options.afterPdfCraft == TriggerSetting::kEnabled;
-    task.atSignIn = options.atSignIn == TriggerSetting::kEnabled;
-    task.path = location.folder + L"\\" + location.name;
-    task.actionPath = program.native();
-    task.actionArgs = kCheckTaskArguments;
-    task.options = options;
-    return S_OK;
-  }
-  HRESULT RunLiveTest(UINT size, const std::filesystem::path* file, DWORD,
-                      LiveTest* result) const noexcept override {
-    ++liveRuns;
-    liveSize = size;
-    if (file && FAILED(testFileError)) return testFileError;
-    *result = live;
-    return S_OK;
-  }
-  void Wait(DWORD ms) const noexcept override { waits.push_back(ms); }
-
-  ProcessContext context;
-  FakeQueries queries;
-  SacReading sac;
-  std::vector<BlockCount> counts;
-  PdfCraftInfo pdfcraft;
-  mutable TaskState task;  // ApplyTaskOptions changes it
-  bool legacyTask = false;
-  HRESULT applyError = S_OK;  // what ApplyTaskOptions returns instead of changing the task
-  LiveTest live{S_OK, {96, 96}, 150};
-  HRESULT testFileError = S_OK;  // a test file's run cannot start (no probe thread, ...)
-
-  mutable size_t countCalls = 0;
-  mutable std::wstring countedLeaf;
-  mutable int countedDays = 0;
-  mutable int liveRuns = 0;
-  mutable UINT liveSize = 0;
-  mutable std::vector<DWORD> waits;
-  struct Applied {
-    TaskLocation location;
-    TaskOptions options;
-    std::filesystem::path program;
-    bool elevated = false;
-  };
-  mutable std::vector<Applied> applied;
-};
+using test::FakeProbes;
+using test::FakeQueries;
 
 std::wstring BuiltFile(const wchar_t* name) { return test::SelfFolder() + L"\\" + name; }
 

@@ -27,8 +27,9 @@ struct CapturedRun {
 // Runs |exe| with |arguments| (already quoted), standard output and error each into a pipe, no
 // standard input and no console window, and waits up to |timeoutMs|; after that it is ended and
 // hr is HRESULT_FROM_WIN32(ERROR_TIMEOUT). The child inherits these two pipe ends and no other
-// handle.
-CapturedRun RunCaptured(const std::wstring& exe, const std::wstring& arguments, DWORD timeoutMs);
+// handle. With |token| (a primary token), the child runs as that token instead of this process's.
+CapturedRun RunCaptured(const std::wstring& exe, const std::wstring& arguments, DWORD timeoutMs,
+                        HANDLE token = nullptr);
 
 // A child whose standard input and output are pipes held by this process (standard error goes
 // to the same pipe as standard output).
@@ -48,6 +49,9 @@ class PipedChild {
   void CloseInput();
   // Waits for it to end and returns its exit code; MAXDWORD on timeout.
   DWORD Wait(DWORD timeoutMs);
+  // Its process id and process handle (owned by this object); 0 and nullptr before Start.
+  DWORD Pid() const { return process_ ? GetProcessId(process_) : 0; }
+  HANDLE Process() const { return process_; }
 
  private:
   HANDLE process_ = nullptr;

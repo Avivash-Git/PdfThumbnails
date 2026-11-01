@@ -167,8 +167,32 @@ HRESULT RunCheck(const CheckOptions& options, const RegistryRoots& roots,
   result->plan = PlanRepairs(before, result->before, options.repair);
   RETURN_IF_FAILED(ApplyUserRepairs(roots, probes, before, result->plan, &result->repairs));
   const int fixed = CountDone(result->repairs);
-  const bool slotOrClassChanged = ChangedSlotOrClass(result->repairs);
-  if (fixed > 0) {
+  bool slotOrClassChanged = ChangedSlotOrClass(result->repairs);
+
+  // --fix: the administrator step, run by the settings executable installed for all users (the
+  // only one the elevated side accepts), while this process still holds the lock.
+  bool machineRepaired = false;
+  if (result->plan.machine && options.launcher && !options.quiet) {
+    const std::filesystem::path exe = before.paths.machineRoot / kSettingsExe;
+    const DWORD attributes = GetFileAttributesW(exe.c_str());
+    if (*result->plan.machine != ElevatedVerb::kMachineRepairClass ||
+        attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+      result->adminStepUnavailable = true;
+    } else {
+      ElevatedRun run;
+      RETURN_IF_FAILED(
+          RunElevated(*result->plan.machine, exe, options.owner, options.launcher, &run));
+      machineRepaired =
+          run.outcome == ElevatedOutcome::kDone || run.outcome == ElevatedOutcome::kRestartPending;
+      result->elevated = std::move(run);
+    }
+  } else if (result->plan.machine && !options.quiet) {
+    const std::filesystem::path exe = before.paths.machineRoot / kSettingsExe;
+    result->adminStepUnavailable = GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES;
+  }
+  if (machineRepaired) slotOrClassChanged = true;
+
+  if (fixed > 0 || machineRepaired) {
     RETURN_IF_FAILED(
         GatherAgain(roots, gather, probes, before, slotOrClassChanged, &result->after));
     result->findings = Evaluate(result->after);
@@ -177,9 +201,14 @@ HRESULT RunCheck(const CheckOptions& options, const RegistryRoots& roots,
     result->findings = result->before;
   }
 
-  result->adminStepNeeded = result->plan.machine.has_value();
+  result->adminStepNeeded = result->plan.machine.has_value() && !machineRepaired;
   result->code = CheckExitCode(result->findings, AnyFailed(result->repairs),
                                result->adminStepNeeded, options.quiet);
+  if (result->elevated && result->elevated->outcome == ElevatedOutcome::kCancelled) {
+    result->code = ExitCode::kCancelled;
+  } else if (result->elevated && result->elevated->outcome == ElevatedOutcome::kFailed) {
+    result->code = ExitCode::kFailed;
+  }
   result->summary = CheckSummary(result->code, fixed, CountBreaking(result->findings));
 
   CheckRecord record;

@@ -281,6 +281,12 @@ TEST(CliArgs, InstallValues) {
   EXPECT_EQ(args.scope, Scope::kUser);
   EXPECT_EQ(args.checks, (ChecksSelection{false, true}));
   EXPECT_EQ(args.zoom, 200);
+  EXPECT_FALSE(args.force);
+  EXPECT_TRUE(ParseOk(kCli, {L"--install", L"--user", L"--force"}).force);
+  // --force belongs to --install alone.
+  EXPECT_TRUE(std::holds_alternative<ParseError>(Parse(kCli, {L"--uninstall", L"--force"})));
+  EXPECT_TRUE(std::holds_alternative<ParseError>(Parse(kCli, {L"--install", L"--force=1"})));
+  EXPECT_TRUE(std::holds_alternative<ParseError>(Parse(kCliRelease, {L"--install", L"--force"})));
 }
 
 TEST(CliArgs, UninstallDiagnosticsMigrateValues) {

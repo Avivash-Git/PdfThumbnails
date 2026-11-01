@@ -198,9 +198,12 @@ std::vector<Finding> Evaluate(const Snapshot& s) {
     }
     if (s.userClass && !s.windowsChecksSkipped) {
       // 1.x counted this against health; it removed the per-user class only once the
-      // machine-wide one was sound, and so does this.
+      // machine-wide one was sound, and so does this. A per-user class of this version over a
+      // machine-wide 1.x class (a per-user install forced over it) stays until this version is
+      // installed for all users.
+      const bool forcedOverV1 = s.legacy.machineClassInV1 && !s.legacy.userClassInV1;
       add(Make(FindingId::kUserClassShadowsMachine, Severity::kWarning, true,
-               machineOk ? FixKind::kAuto : FixKind::kNone));
+               machineOk && !forcedOverV1 ? FixKind::kAuto : FixKind::kNone));
     }
   }
 
@@ -355,14 +358,25 @@ std::vector<Finding> Evaluate(const Snapshot& s) {
   }
 
   // ---- Leftovers and settings ----
-  if (installed && s.legacy.runOnce) {
-    // While installed, 1.x's pending clean-up would delete the per-user folder at the next
-    // sign-in, a per-user install included.
+  if (installed && (s.legacy.runOnce || s.legacy.runOnceOthers)) {
+    // While installed, a pending sign-in clean-up (1.x's, or one an uninstall left) would delete
+    // a folder of the install at the next sign-in, a per-user install included; the check itself
+    // removes what is left over while the program is there.
     add(Make(FindingId::kCleanupPending, Severity::kWarning, false, FixKind::kAuto));
+  } else if (installed && !s.pendingTrash.empty()) {
+    // Files an install or clean-up for all users could not delete because they were in use wait
+    // in trash folders for the next restart. Nothing to repair and nothing broken: information.
+    Finding& finding =
+        add(Make(FindingId::kCleanupPending, Severity::kInfo, false, FixKind::kNone));
+    finding.count = static_cast<int>(s.pendingTrash.size());
   }
   if (HasV1Leftovers(s.legacy)) {
-    // Reported only: removing them belongs to the 1.x clean-up.
-    add(Make(FindingId::kV1Leftovers, Severity::kInfo, false, FixKind::kNone));
+    // Removing them belongs to the 1.x clean-up (--migrate-v1, or installing). Once it has run for
+    // this user, with this version installed, the check finishes what it left: files that were
+    // in use then. It never starts the clean-up on its own.
+    const bool finish = s.migratedFromV1 && !s.legacy.files.empty() && InstalledSettingsExe(s);
+    add(Make(FindingId::kV1Leftovers, Severity::kInfo, false,
+             finish ? FixKind::kAuto : FixKind::kNone));
   }
   if (installed) {
     std::vector<std::filesystem::path> old = OldUserBuilds(s, registerTarget);

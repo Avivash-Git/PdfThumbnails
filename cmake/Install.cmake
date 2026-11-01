@@ -13,7 +13,8 @@
 #            start), with the same notices, because the bundle redistributes them too, plus
 #            licenses/googletest-LICENSE.txt (the test programs link GoogleTest), and a
 #            CTestTestfile.cmake with relative paths (tests/CMakeLists.txt), so
-#            `ctest --test-dir <dir>` runs the bundle on another machine (CI: the ARM64 runner).
+#            `ctest --test-dir <dir>` runs the bundle on another machine (CI: the ARM64 runner;
+#            the system tests, with their 1.x fixture files in system-fixture, on system-x64).
 #            A new test program joins the bundle through PDFT_TEST_BUNDLE_PROGRAMS below (and
 #            registers its tests with pdft_add_program_test in tests/CMakeLists.txt).
 # pdft-run-outside (tools/run-outside) is for developer PCs and in no component.
@@ -61,7 +62,7 @@ endforeach()
 # Test programs and tools in the bundle, if they are built. The integration tests start the
 # app's executables, which come with the runtime below.
 set(PDFT_TEST_BUNDLE_PROGRAMS thumbtest pdft_run_medium pdft_unit_tests pdft_handler_tests
-                              pdft_refuses_elevated pdft_integration_tests)
+                              pdft_refuses_elevated pdft_integration_tests pdft_system_tests)
 set(_pdft_test_programs "")
 foreach(_pdft_target IN LISTS PDFT_TEST_BUNDLE_PROGRAMS)
   if(TARGET ${_pdft_target})

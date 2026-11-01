@@ -7,6 +7,7 @@
 #include <cwchar>
 #include <iterator>
 
+#include "build_folder.h"
 #include "pe_info.h"
 #include "project_config.h"
 #include "strings.h"
@@ -173,6 +174,48 @@ HRESULT DeleteClass(const RegistryRoots& roots, Scope scope) noexcept try {
 }
 CATCH_RETURN();
 
+bool IsMachineClassPath(const std::filesystem::path& machineRoot,
+                        const std::filesystem::path& dll) noexcept {
+  try {
+    if (!IsPlainAbsolutePath(dll) || !IsPlainAbsolutePath(machineRoot)) return false;
+    if (!IEquals(dll.filename().native(), kHandlerDll)) return false;
+    const std::filesystem::path build = dll.parent_path();
+    const std::filesystem::path app = build.parent_path();
+    std::filesystem::path root = machineRoot;
+    while (root.has_relative_path() && !root.has_filename()) root = root.parent_path();
+    if (!IEquals(app.filename().native(), L"app") ||
+        !IEquals(app.parent_path().native(), root.native())) {
+      return false;
+    }
+    const std::optional<BuildFolderNameParts> parts =
+        ParseBuildFolderName(build.filename().native());
+    return parts && CompareFileVersions(parts->version, L"2") >= 0;
+  } catch (...) {
+    return false;
+  }
+}
+
+HRESULT WriteMachineClass(const RegistryRoots& roots, const std::filesystem::path& machineRoot,
+                          const std::filesystem::path& dll) noexcept try {
+  RETURN_HR_IF(E_INVALIDARG, roots.machine == nullptr || !IsMachineClassPath(machineRoot, dll));
+  RETURN_HR_IF(E_INVALIDARG, !IsFile(dll) || !IsFile(dll.parent_path() / kPdfiumDll));
+  // 1.x's order: the class name, then the server and its threading model.
+  RETURN_IF_FAILED(WriteRegistryString(roots.machine, ClassKeyPath(), L"", kHandlerClassName));
+  const std::wstring inproc = InprocKeyPath();
+  RETURN_IF_FAILED(WriteRegistryString(roots.machine, inproc, L"", dll.native()));
+  RETURN_IF_FAILED(
+      WriteRegistryString(roots.machine, inproc, kThreadingModel, kApartmentThreading));
+  return S_OK;
+}
+CATCH_RETURN();
+
+HRESULT DeleteMachineClass(const RegistryRoots& roots, bool* deleted) noexcept try {
+  if (deleted) *deleted = false;
+  RETURN_HR_IF(E_INVALIDARG, roots.machine == nullptr);
+  return DeleteRegistryTree(roots.machine, ClassKeyPath(), deleted);
+}
+CATCH_RETURN();
+
 std::wstring SlotKeyPath(size_t slot) {
   if (slot >= kSlotCount) return {};
   return std::wstring(kSlotTypeKeys[slot]) + L"\\ShellEx\\" + kThumbSlotIidString;
@@ -245,6 +288,30 @@ HRESULT RemoveSlotsIfOurs(const RegistryRoots& roots,
   for (const wchar_t* parent : kSlotParentKeys) {
     RETURN_IF_FAILED(DeleteRegistryKeyIfEmpty(roots.user, parent));
   }
+  return S_OK;
+}
+CATCH_RETURN();
+
+HRESULT RemoveFromClassesHive(HKEY classes, ClassesHiveRemoval* removal) noexcept try {
+  *removal = ClassesHiveRemoval{};
+  RETURN_HR_IF(E_INVALIDARG, classes == nullptr);
+  const size_t prefix = std::size(kClassesPrefix) - 1;
+  for (size_t slot = 0; slot < kSlotCount; ++slot) {
+    const std::wstring path = SlotKeyPath(slot).substr(prefix);
+    std::optional<std::wstring> current;
+    RETURN_IF_FAILED(ReadStringOrNothing(classes, path, L"", &current));
+    if (!current || !IsOurClsid(*current)) continue;  // someone else's: theirs to remove
+    bool deleted = false;
+    RETURN_IF_FAILED(DeleteRegistryTree(classes, path, &deleted));
+    removal->slots[slot] = deleted;
+  }
+  for (const wchar_t* parent : kSlotParentKeys) {
+    const std::wstring_view key(parent);
+    if (key.size() <= prefix) continue;  // "Software\Classes" is this hive's root
+    RETURN_IF_FAILED(DeleteRegistryKeyIfEmpty(classes, key.substr(prefix)));
+  }
+  RETURN_IF_FAILED(
+      DeleteRegistryTree(classes, ClassKeyPath().substr(prefix), &removal->classDeleted));
   return S_OK;
 }
 CATCH_RETURN();

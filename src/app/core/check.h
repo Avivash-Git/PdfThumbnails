@@ -7,7 +7,9 @@
 //      the wrong one).
 //   2. Take the operation lock (at most 30 s; exit 4 when another check or change keeps it).
 //   3. Gather (snapshot.h), evaluate (evaluate.h); not installed: exit 6, nothing written.
-//   4. Plan and apply the per-user repairs (repair.h); the administrator step is only named.
+//   4. Plan and apply the per-user repairs (repair.h). The administrator step the plan names runs
+//      only for --fix (a launcher is given and the check is not quiet): through UAC, with the
+//      settings executable installed for all users (elevation.h); declined: exit 3, failed: 5.
 //   5. When something changed, gather and evaluate again.
 //   6. Record the check under HKCU State, tell Explorer when a slot or class changed (only for the
 //      real registry roots), and write one log line.
@@ -23,6 +25,7 @@
 #include <string>
 #include <vector>
 
+#include "elevation.h"
 #include "evaluate.h"
 #include "exit_code.h"
 #include "registry_roots.h"
@@ -53,6 +56,10 @@ struct CheckOptions {
   std::optional<ProcessContext> context;
   std::optional<EnginePaths> paths;     // when absent, GetEnginePaths
   DWORD lockWaitMs = kCheckLockWaitMs;  // never more than kCheckLockWaitMs
+  // --fix: starts the administrator step the plan names (never for a quiet check). Empty: the
+  // step is only named. Tests pass a fake, so no test ever starts a real elevation.
+  ElevationLauncher launcher;
+  HWND owner = nullptr;  // the window that asks, if any
 };
 
 struct CheckResult {
@@ -67,8 +74,12 @@ struct CheckResult {
   std::vector<RepairOutcome> repairs;
   Snapshot after;                 // the state after the repairs (the first one if none ran)
   std::vector<Finding> findings;  // ... and what it shows
-  // The machine-wide part needs the administrator step plan.machine, which this build cannot run.
+  // The machine-wide part needs the administrator step plan.machine, which did not run (or did
+  // not succeed).
   bool adminStepNeeded = false;
+  // ... and could not have run here: no settings executable is installed for all users to run it.
+  bool adminStepUnavailable = false;
+  std::optional<ElevatedRun> elevated;  // the administrator step, when it was started
   bool recorded = false;
   HRESULT recordError = S_OK;
   bool notified = false;  // Explorer was told that associations changed

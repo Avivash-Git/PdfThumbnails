@@ -64,6 +64,25 @@ struct ClassReg {
 // Only Scope::kUser, like WriteClass.
 [[nodiscard]] HRESULT DeleteClass(const RegistryRoots& roots, Scope scope) noexcept;
 
+// Whether |dll| may be written as the machine-wide class for the install root |machineRoot|
+// (pure, lexical): exactly <machineRoot>\app\<build folder name of version 2 or later>\<handler
+// DLL>, absolute, without "." or "..".
+bool IsMachineClassPath(const std::filesystem::path& machineRoot,
+                        const std::filesystem::path& dll) noexcept;
+
+// The machine-wide class, written only by the elevated steps, which compute |dll| from the files
+// they put under |machineRoot| and never take it from anyone else: it must pass
+// IsMachineClassPath, and the DLL and PDFium next to it must be files (E_INVALIDARG otherwise).
+// Written like WriteClass, under roots.machine.
+[[nodiscard]] HRESULT WriteMachineClass(const RegistryRoots& roots,
+                                        const std::filesystem::path& machineRoot,
+                                        const std::filesystem::path& dll) noexcept;
+
+// Deletes the machine-wide class key with everything below it (elevated steps only); nothing
+// there is not an error. |deleted| (optional) says whether there was one.
+[[nodiscard]] HRESULT DeleteMachineClass(const RegistryRoots& roots,
+                                         bool* deleted = nullptr) noexcept;
+
 // The slots: [0] .pdf, [1] SystemFileAssociations\.pdf. Each holds the default value of its key,
 // or std::nullopt when the key or the value is missing or is not a string (1.x read those as
 // empty, and Windows cannot use them either).
@@ -118,6 +137,18 @@ inline constexpr const wchar_t* kSlotParentKeys[] = {
 // holding only a default value is not empty. |removed| (optional) says which slots went.
 [[nodiscard]] HRESULT RemoveSlotsIfOurs(const RegistryRoots& roots,
                                         std::array<bool, kSlotCount>* removed = nullptr) noexcept;
+
+// What RemoveFromClassesHive removed.
+struct ClassesHiveRemoval {
+  std::array<bool, kSlotCount> slots = {};  // the slot keys that named the handler
+  bool classDeleted = false;                // the handler's class key was there
+};
+
+// The same clean-up in a user's classes hive loaded on its own (HKEY_USERS\<SID>_Classes, whose
+// keys have no "Software\Classes" in front): each slot key that names the handler (one naming
+// something else stays), the parent keys left empty, in RemoveSlotsIfOurs' order, and the
+// handler's class key.
+[[nodiscard]] HRESULT RemoveFromClassesHive(HKEY classes, ClassesHiveRemoval* removal) noexcept;
 
 // "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}" with hex digits of either case (pure). Values read
 // from slots and ProgIDs are checked with it before they become part of a registry path.

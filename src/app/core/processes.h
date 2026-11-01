@@ -1,0 +1,81 @@
+// Other processes: which ones have a file open or loaded (Restart Manager), ending one of them
+// when it is safe, and this process's parent.
+//
+// Windows' thumbnail process (dllhost.exe, the COM surrogate) keeps a thumbnail handler's DLLs
+// loaded for as long as it lives. Before an install replaces a build, the processes of the
+// user's own session that hold the OLD build's DLLs are ended, so the new build is loaded the
+// next time Explorer asks for a thumbnail. Only processes that pass every check are ended: the
+// image on an allow list (normally just %SystemRoot%\System32\dllhost.exe), the same session,
+// the same user, and still the very process that was found (same process id and start time).
+
+#pragma once
+
+#include <windows.h>
+
+#include <RestartManager.h>
+
+#include <filesystem>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace pdft {
+
+// A process that has one of the files open or loaded.
+struct Holder {
+  DWORD pid = 0;
+  FILETIME start = {};  // when it started, to tell it from a later process with the same id
+  DWORD session = 0;    // its Terminal Services session
+  RM_APP_TYPE type = RmUnknownApp;
+  std::wstring app;    // Restart Manager's name for it (a service name, a window title, ...)
+  std::wstring image;  // its executable's full path; empty when it cannot be read (another
+                       // user's or an elevated process)
+};
+
+// Every process that has one of |files| open or loaded, from Restart Manager. A process found
+// but gone, or replaced by another one with the same id, by the time it is looked at is left out.
+// An empty list of files gives no holders.
+[[nodiscard]] HRESULT FindHolders(std::span<const std::filesystem::path> files,
+                                  std::vector<Holder>* holders) noexcept;
+
+// The image an install may end a holder of: <System folder>\dllhost.exe, the thumbnail process.
+[[nodiscard]] HRESULT SurrogateImagePath(std::wstring* image) noexcept;
+
+// What TerminateOwnSessionHolder knows about a process when it decides.
+struct HolderFacts {
+  DWORD ownPid = 0;
+  DWORD ownSession = 0;
+  DWORD session = 0;      // the process's session now
+  FILETIME start = {};    // its start time now
+  std::wstring image;     // its image now
+  bool sameUser = false;  // its token's user is this process's user
+};
+
+// Why a holder is not ended.
+enum class HolderRefusal {
+  kNone,          // it may be ended
+  kSelf,          // it is this process
+  kReplaced,      // its start time changed: the process found is gone, the id reused
+  kOtherSession,  // another session (another signed-in user, or a service)
+  kOtherUser,     // another account's process, or its user cannot be read
+  kNotAllowed,    // its image is not on the allow list (or was not read)
+};
+
+// The decision for |found| (pure): the checks in the order of the enum. Images compare as whole
+// paths, ignoring case, after "." and ".." are resolved.
+HolderRefusal JudgeHolder(const Holder& found, const HolderFacts& now,
+                          std::span<const std::wstring_view> allowedImages) noexcept;
+
+// Ends the process |holder| (FindHolders) after reading its facts again and judging them
+// (JudgeHolder), and waits up to 5 s for it to go. S_FALSE when it is gone already (or replaced
+// by another process with its id); E_ACCESSDENIED when a check refuses it, and it is left alone.
+[[nodiscard]] HRESULT TerminateOwnSessionHolder(
+    const Holder& holder, std::span<const std::wstring_view> allowedImages) noexcept;
+
+// This process's parent: the process id its creator had, provided that process still exists
+// and was created before this one (so the id was not reused). Fails with
+// HRESULT_FROM_WIN32(ERROR_NOT_FOUND) otherwise.
+[[nodiscard]] HRESULT GetParentProcessId(DWORD* parent) noexcept;
+
+}  // namespace pdft

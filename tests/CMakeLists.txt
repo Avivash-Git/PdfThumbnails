@@ -16,8 +16,19 @@
 #                             findings, repair plans and exit codes; the reports: the status
 #                             text line by line, the JSON status (escaping, schema 1, checked by
 #                             a strict JSON reader) and the diagnostics' masking; the --fix
-#                             confirmation rules; pdft-run-outside's pure parts (its request
-#                             file, command lines, exit codes)
+#                             confirmation rules; the install side's pure parts (RunOnce
+#                             clean-up names and command lines, the broad-group permission
+#                             check on SDDL descriptors, the elevated steps and their one
+#                             command line, the elevated side's entry checks, exit codes, the
+#                             report lines, the installer's records, which DLL holders may be
+#                             ended); the 1.x clean-up's pure parts (the table of 1.x files, the
+#                             plan for 1.x's per-user folder on fake trees of both layouts, the
+#                             plans for build folders for all users) and the installer step's
+#                             task options; the install and uninstall side (a build's files and
+#                             versions, the class path for all users, the user hives cleaned,
+#                             the per-user files removed, trash folder names, exit codes, the
+#                             texts of --install, --uninstall and --zoom); pdft-run-outside's
+#                             pure parts (its request file, command lines, exit codes)
 #   unit.samples              src/app/res/sample-*.pdf == `thumbtest makesamples` output
 #   integration.tests         pdft_integration_tests: the app's core against the real system
 #                             (COM under the app's security, WMI, Task Scheduler, named objects
@@ -40,7 +51,30 @@
 #                             task); --status (text and JSON) and --diagnostics of both
 #                             executables against the real state, read-only, without the
 #                             Explorer test; --checks of both only where a guard refuses it (8,
-#                             or 6 where nothing is installed); never extracts a thumbnail;
+#                             or 6 where nothing is installed); the install side's file
+#                             operations under %TEMP% (reparse point checks, the verified copy,
+#                             removal without following links, files held open or mapped as an
+#                             image, the trash folder, the build-folder permission check on
+#                             folders it gives known permissions) and its RunOnce values in
+#                             private keys; deleting at restart only checked to be refused
+#                             unelevated; Restart Manager and ending a holder only on its own
+#                             children; the elevation report pipe between itself and its
+#                             children through fake launchers (never a real elevation); the
+#                             settings executable's --elevated step refused outside the install
+#                             folder; deleting files by their contents, the 1.x clean-up (user
+#                             part, file part, machine part), --setup-user, --migrate-v1 (with a
+#                             fake launcher) and the check's RunOnce clean-up against folders under
+#                             %TEMP%, private keys and the fake probes (elevated, --setup-machine
+#                             in a test task folder); --setup-user and --migrate-v1 of both
+#                             executables only where a guard refuses them (8), --setup-machine
+#                             only unelevated (7); --install, --uninstall and --uninstall-cleanup
+#                             (copying a build into an install root under %TEMP%, the steps for
+#                             all users run in this process through fake launchers, the
+#                             uninstall's clean-up of made-up user hives in a private key, the
+#                             installer's uninstaller through a fake), --fix's administrator
+#                             step through a fake launcher; --install, --uninstall and --zoom <n>
+#                             of both executables only where a guard refuses them (8) or the
+#                             command line is wrong (2); never extracts a thumbnail;
 #                             writes nothing to the real profile but the canary's volatile probe
 #                             key, those private keys (HKCU\Software\<product>-Test\<GUID>,
 #                             deleted afterwards) and, unelevated, the start and end lines that
@@ -52,6 +86,15 @@
 #                             8-thread stress
 #   handler.refuses_elevated  pdft_refuses_elevated: elevated, the DLL must refuse to render;
 #                             skipped (exit 77) when not elevated
+#   system.tests              pdft_system_tests (label system, never in the test presets): the
+#                             install for all users, --status, --checks, --zoom, --setup-user,
+#                             --setup-machine, --fix's administrator step, --uninstall and
+#                             --uninstall-cleanup for real from a staged runtime, 1.1's state
+#                             (for all users and per user) replaced by the install and by
+#                             --migrate-v1, the administrator steps through UAC and their report
+#                             through the asking process's pipe, and nothing left afterwards;
+#                             runs only with PDFT_SYSTEM_TESTS=1, elevated, where nothing of 1.x
+#                             or 2.x is installed (the CI job system-x64), else skipped (exit 77)
 # Also built here: pdft-planting-check and its canary DLL, for the gate gate.planting.
 # Test support (tests/support) is added by the top-level CMakeLists.txt: thumbtest uses it too.
 #
@@ -121,12 +164,16 @@ if(TARGET pdft_appcore)
     unit/cli_args_test.cpp
     unit/context_decision_test.cpp
     unit/diagnostics_test.cpp
+    unit/elevation_test.cpp
     unit/evaluate_test.cpp
     unit/explorer_settings_test.cpp
+    unit/file_ops_test.cpp
+    unit/install_test.cpp
     unit/json_test.cpp
     unit/legacy_test.cpp
     unit/live_test_test.cpp
     unit/log_test.cpp
+    unit/migrate_v1_test.cpp
     unit/output_test.cpp
     unit/paths_test.cpp
     unit/pe_info_test.cpp
@@ -225,12 +272,18 @@ if(TARGET pdft_appcore)
     integration/com_security_test.cpp
     integration/context_test.cpp
     integration/diagnostics_files_test.cpp
+    integration/elevation_test.cpp
     integration/exes_test.cpp
+    integration/fake_probes.h
+    integration/file_ops_test.cpp
+    integration/install_test.cpp
     integration/instance_test.cpp
     integration/live_test_files_test.cpp
     integration/probes_test.cpp
+    integration/processes_test.cpp
     integration/registration_test.cpp
     integration/settings_test.cpp
+    integration/setup_test.cpp
     integration/tasks_test.cpp)
   pdft_harden(pdft_integration_tests TEST)
   target_link_libraries(pdft_integration_tests PRIVATE pdft_appcore pdft_testsupport GTest::gtest
@@ -247,6 +300,35 @@ if(TARGET pdft_appcore)
     set_tests_properties(integration.tests PROPERTIES ENVIRONMENT
       "PDFT_TEST_CMAKE=${CMAKE_COMMAND};PDFT_TEST_BUILDID_SCRIPT=${PROJECT_SOURCE_DIR}/cmake/BuildId.cmake")
   endif()
+endif()
+
+# ---- system --------------------------------------------------------------------------------
+# Installs, uses and uninstalls the app for real (HKLM, HKCU, Program Files, Task Scheduler, UAC)
+# from a staged runtime: only on a throw-away PC (the CI job system-x64). The program itself
+# refuses to run unless PDFT_SYSTEM_TESTS=1, it is elevated and nothing of 1.x or 2.x is
+# installed; the test presets leave the label out. 1.x's shipped files for its migration fixture
+# are copied next to it (system-fixture), in the build folder and in the test bundle.
+if(TARGET pdft_appcore)
+  add_executable(pdft_system_tests
+    system/main.cpp
+    system/system_env.cpp system/system_env.h
+    system/system_test.cpp
+    integration/child_process.cpp integration/child_process.h)
+  target_include_directories(pdft_system_tests PRIVATE integration)
+  pdft_harden(pdft_system_tests TEST)
+  target_link_libraries(pdft_system_tests PRIVATE pdft_appcore pdft_testsupport GTest::gtest
+                                                  ole32 oleaut32 advapi32)
+  set(_pdft_v1_fixture "${PROJECT_SOURCE_DIR}/PdfThumbnails.ps1"
+                       "${PROJECT_SOURCE_DIR}/PdfThumbnails.cmd" "${PROJECT_SOURCE_DIR}/LICENSE")
+  add_custom_command(TARGET pdft_system_tests POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:pdft_system_tests>/system-fixture"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${_pdft_v1_fixture}
+            "$<TARGET_FILE_DIR:pdft_system_tests>/system-fixture"
+    VERBATIM)
+  install(FILES ${_pdft_v1_fixture} DESTINATION system-fixture COMPONENT tests)
+  unset(_pdft_v1_fixture)
+  pdft_add_program_test(system.tests pdft_system_tests LABELS system RUN_SERIAL TRUE
+                        SKIP_RETURN_CODE 77 TIMEOUT 2400)
 endif()
 
 # ---- DLL planting (gate.planting, registered in cmake/Gates.cmake) --------------------------

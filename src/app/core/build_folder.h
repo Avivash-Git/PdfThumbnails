@@ -26,6 +26,23 @@ namespace pdft {
 inline constexpr size_t kSha256Bytes = 32;
 using Sha256Digest = std::array<BYTE, kSha256Bytes>;
 
+// A SHA-256 computed piece by piece, for data that streams past (a file being copied). Start
+// once, Add any number of times, Finish once.
+class Sha256Stream {
+ public:
+  Sha256Stream() = default;
+  Sha256Stream(const Sha256Stream&) = delete;
+  Sha256Stream& operator=(const Sha256Stream&) = delete;
+  ~Sha256Stream();
+
+  [[nodiscard]] HRESULT Start() noexcept;
+  [[nodiscard]] HRESULT Add(const BYTE* bytes, size_t size) noexcept;
+  [[nodiscard]] HRESULT Finish(Sha256Digest* digest) noexcept;
+
+ private:
+  void* hash_ = nullptr;  // BCRYPT_HASH_HANDLE
+};
+
 // SHA-256 of |bytes| and of a whole file (read in chunks; a pipe or device is refused like in
 // OpenFileForReading, pe_info.h).
 [[nodiscard]] HRESULT Sha256Bytes(std::span<const BYTE> bytes, Sha256Digest* digest) noexcept;

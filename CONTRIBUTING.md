@@ -69,6 +69,29 @@ compares them with the exact text.
 - The log never gets PDF paths or names, or anything else the user typed (a `--test-file` or
   `--out` path is shown on the console only).
 
+### Tests and commands that change the PC
+
+The install side (`--install`, `--uninstall`, `--migrate-v1`, the installer's steps, `--fix`'s
+administrator step) changes Program Files, HKLM, every user's settings and Task Scheduler. On a
+PC you use:
+
+- `unit` and `integration` tests run those commands' code only against private places: folders
+  under `%TEMP%\pdft-tests`, registry keys through `RegistryRoots` (`ScopedRegistrySandbox`,
+  RunOnce included), Task Scheduler folders and names of the test's own. The administrator steps
+  run in the test process through a fake `ElevationLauncher`: no test may start a real UAC
+  elevation, queue a deletion at the restart (other than checking that it is refused
+  unelevated) or end a process it did not start.
+- The executables' writing commands are started by tests only where they must be refused (exit 8)
+  or the command line is wrong (exit 2).
+- A test that only an elevated runner can run prints a line of its own, and CI's
+  "Check the elevated test paths" step looks for it, because a skipped test counts as passed.
+- The `system` tests do it all for real. They run on CI's `system-x64` job, or on a throw-away
+  virtual machine (docs/BUILDING.md), and refuse anywhere else.
+- Don't run `--install`, `--uninstall`, `--migrate-v1`, `--setup-*`, `--uninstall-cleanup` or
+  `--elevated` on your own PC to try a change. The one exception is the documented manual check
+  of replacing 1.1 (docs/BUILDING.md, "Manual check: replacing 1.1 on your own PC"), after its
+  backup step.
+
 ### Tests that start freshly built programs
 
 Windows may refuse to start a program that was just built and is not signed: Smart App Control or

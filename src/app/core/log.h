@@ -31,6 +31,10 @@ inline constexpr ULONGLONG kLogRotateBytes = 256 * 1024;
 // once they are sure to run (--version and --help never do).
 void EnableLog() noexcept;
 
+// Turns the log off again: the uninstall does so before it deletes the log's folder, which a
+// later line would only make again.
+void DisableLog() noexcept;
+
 // Appends one line. |component| is one word ("check", "zoom", "wil"); line breaks and other
 // control characters in |message| become spaces, so an entry is always one line.
 void Log(LogLevel level, std::wstring_view component, std::wstring_view message) noexcept;

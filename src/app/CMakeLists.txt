@@ -8,7 +8,14 @@
 #                                   Explorer test); the check itself (gathering, findings,
 #                                   repairs, the operation lock around them); when the checks
 #                                   run (the user's check task); its reports (the
-#                                   status text, the JSON status, the masked diagnostics)
+#                                   status text, the JSON status, the masked diagnostics); the
+#                                   install side (copying and removing builds, the sign-in
+#                                   clean-up, build-folder permissions, processes holding DLLs,
+#                                   the elevation boundary and its report pipe, the installer's
+#                                   records); the 1.x clean-up (with the table of the files 1.x
+#                                   shipped, cmake/scripts/V1FileTable.cmake) and the installer's
+#                                   per-user and machine-wide steps; installing from a build's
+#                                   folder and uninstalling, with their administrator steps
 #   PdfThumbnailsSettings  WIN32    ${PDFT_SETTINGS_EXE}: the window, scheduled checks, elevated
 #                                   steps; shows no console window
 #   PdfThumbnailsCli       console  ${PDFT_CLI_EXE}: terminals and scripts (a shell waits for it
@@ -28,30 +35,38 @@ add_library(pdft_appcore STATIC
   core/context.cpp core/context.h
   core/delay_load.cpp core/delay_load.h
   core/diagnostics.cpp core/diagnostics.h
+  core/elevation.cpp core/elevation.h
   core/evaluate.cpp core/evaluate.h
   core/exit_code.h
   core/explorer_settings.cpp core/explorer_settings.h
+  core/file_ops.cpp core/file_ops.h
+  core/inno.cpp core/inno.h
+  core/install.cpp core/install.h
   core/instance.cpp core/instance.h
   core/json.cpp core/json.h
   core/legacy.cpp core/legacy.h
   core/live_test.cpp core/live_test.h
   core/log.cpp core/log.h
+  core/migrate_v1.cpp core/migrate_v1.h core/v1_files.inc
   core/mode.h
   core/output.cpp core/output.h
   core/paths.cpp core/paths.h
   core/pdfcraft.cpp core/pdfcraft.h
   core/pe_info.cpp core/pe_info.h
+  core/processes.cpp core/processes.h
   core/registration.cpp core/registration.h
   core/registry_roots.cpp core/registry_roots.h
   core/repair.cpp core/repair.h
   core/sac.cpp core/sac.h
   core/settings.cpp core/settings.h
+  core/setup.cpp core/setup.h
   core/snapshot.cpp core/snapshot.h
   core/startup.cpp core/startup.h
   core/status_format.cpp core/status_format.h
   core/strings.cpp core/strings.h
   core/system_probes.cpp core/system_probes.h
   core/tasks.cpp core/tasks.h
+  core/uninstall.cpp core/uninstall.h
   core/wmi_registry.cpp core/wmi_registry.h
   res/resource_ids.h)
 target_include_directories(pdft_appcore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/core"
@@ -61,10 +76,11 @@ pdft_harden(pdft_appcore LIB)
 # a DLL.
 target_link_libraries(pdft_appcore PUBLIC pdft_config pdft_common pdft_wil
                                    PRIVATE ole32 oleaut32 advapi32 shell32 shlwapi user32 uuid)
-# Not KnownDLLs: CNG (build ids hash the DLLs), the event log (Code Integrity blocks) and
-# Windows Installer (finding PdfCraft). The event-log and Windows Installer code checks that its
-# DLL loads before the first call (delay_load.h), so a missing one is an answer, not a crash.
-pdft_delay_load(pdft_appcore bcrypt.dll wevtapi.dll msi.dll)
+# Not KnownDLLs: CNG (build ids and copies hash files), the event log (Code Integrity blocks),
+# Windows Installer (finding PdfCraft) and Restart Manager (which processes hold a build's DLLs).
+# The event-log, Windows Installer and Restart Manager code checks that its DLL loads before the
+# first call (delay_load.h), so a missing one is an answer, not a crash.
+pdft_delay_load(pdft_appcore bcrypt.dll wevtapi.dll msi.dll rstrtmgr.dll)
 
 # pdft_add_app_exe(<target> <WIN32|CONSOLE> <file name> <manifest template> <description>
 #                  <source>...)

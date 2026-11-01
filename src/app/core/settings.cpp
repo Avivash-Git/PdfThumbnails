@@ -239,4 +239,10 @@ HRESULT ReadMigratedFromV1(const RegistryRoots& roots, bool* migrated) noexcept 
 }
 CATCH_RETURN();
 
+HRESULT WriteMigratedFromV1(const RegistryRoots& roots) noexcept try {
+  RETURN_HR_IF(E_INVALIDARG, roots.user == nullptr);
+  return WriteRegistryDword(roots.user, StateKeyPath(), kMigratedFromV1, 1);
+}
+CATCH_RETURN();
+
 }  // namespace pdft
