@@ -21,7 +21,8 @@
 //   3. this session's thumbnail processes that hold an old build's DLLs are ended (only Windows'
 //      own dllhost.exe of this user), so the old builds can go and the new one loads;
 //   4. the administrator step machine-install through UAC (declined: 3; started without
-//      administrator rights, it refuses: 7): it checks the folder again and holds it open, so
+//      administrator rights, it refuses: 7; below an app package where its test writes do not
+//      come back, it refuses: 8): it checks the folder again and holds it open, so
 //      that nothing in it or above it can be renamed, replaced or written until the copy is done,
 //      copies the build from what it holds into <Program Files>\<Product>, writes the class for
 //      all users, makes the shared task folder, then removes 1.x's and the old 2.x build folders
@@ -273,8 +274,9 @@ struct InstallResult {
 
 // The exit code of the administrator step for --install (pure): std::nullopt when it is done (a
 // restart pending included), 3 when the prompt was declined, 8 when the step found the build's
-// folder unsafe, 7 when it did not get administrator rights (kNoAdministratorRightsHr), else 5.
-std::optional<ExitCode> InstallStepExitCode(ElevatedOutcome outcome, HRESULT failure) noexcept;
+// folder unsafe or refused to run below an app package, 7 when it did not get administrator
+// rights, else 5; the step's own codes count only from a step that was launched.
+std::optional<ExitCode> InstallStepExitCode(const ElevatedRun& run) noexcept;
 
 // Runs --install. S_OK when it came to a verdict (*result's code); a failure when the state
 // could not be read. Never throws.

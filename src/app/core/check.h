@@ -11,8 +11,8 @@
 //   4. Plan and apply the per-user repairs (repair.h). The administrator step the plan names runs
 //      only for --fix (a launcher is given and the check is not quiet): through UAC, with the
 //      settings executable installed for all users (elevation.h); declined: exit 3, started
-//      without administrator rights: 7, failed: 5. A part of it that it reports as not done is a
-//      repair that did not complete (CheckResult::machineNotDone).
+//      without administrator rights: 7, refused below an app package: 8, failed: 5. A part of it
+//      that it reports as not done is a repair that did not complete (CheckResult::machineNotDone).
 //   5. When something changed, gather and evaluate again.
 //   6. Record the check under HKCU State, tell Explorer when a slot or class changed (only for the
 //      real registry roots), and write one log line, with the Explorer test's outcome

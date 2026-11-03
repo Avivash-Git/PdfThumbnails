@@ -266,17 +266,23 @@ CATCH_RETURN();
 HRESULT SetupMachine(const SetupMachineOptions& options, const RegistryRoots& roots,
                      SetupMachineResult* result) noexcept try {
   *result = SetupMachineResult{};
-  bool elevated = false;
-  RETURN_IF_FAILED(GetTokenElevation(&elevated));
-  if (!elevated) {
+  // The rights the elevated side requires of its own token, first: an elevated token alone does
+  // not prove them.
+  bool rights = false;
+  RETURN_IF_FAILED(ReadAdministratorRights(&rights));
+  if (!rights) {
     result->refusal = SetupRefusal::kNotElevated;
     result->code = ExitCode::kNeedsAdmin;
     return S_OK;
   }
-  // Inside or below a package, files and registry may be private copies: a walk that fails
-  // counts as packaged.
-  std::optional<std::wstring> package;
-  if (FAILED(FindPackagedAncestor(&package)) || package) {
+  // Below an app package, or where the processes above it cannot be read, files and the registry
+  // may be private copies: the step goes on only where its own test writes reach Windows.
+  if (options.machineWrites) {
+    result->machineWrites = *options.machineWrites;
+  } else {
+    CheckMachineWrites(&result->machineWrites);
+  }
+  if (RefusesMachineWrites(result->machineWrites)) {
     result->refusal = SetupRefusal::kPackaged;
     result->code = ExitCode::kWrongContext;
     return S_OK;
@@ -384,8 +390,9 @@ HRESULT MigrateV1(const MigrateOptions& options, const RegistryRoots& roots,
             FAILED(hr)) {
           Failed(&failures, L"machine", hr);
         } else {
-          // A step that did not get administrator rights has an exit code of its own. One that
-          // names its parts lists them instead of the HRESULT it ended with.
+          // A step that did not get administrator rights, or refused below an app package, has
+          // an exit code of its own. One that names its parts lists them instead of the HRESULT
+          // it ended with.
           if (NeedsStepFailure(run)) Failed(&failures, L"machine", run.failure);
           for (std::wstring& failure : NotDoneFailures(run, L"machine")) {
             failures.push_back(std::move(failure));
@@ -402,6 +409,8 @@ HRESULT MigrateV1(const MigrateOptions& options, const RegistryRoots& roots,
     result->code = ExitCode::kFailed;
   } else if (result->run && LackedAdministratorRights(*result->run)) {
     result->code = ExitCode::kNeedsAdmin;
+  } else if (result->run && RefusedBelowPackage(*result->run)) {
+    result->code = ExitCode::kWrongContext;
   } else if ((result->userPart && result->user.Incomplete()) || result->machineNoInstall ||
              (result->run && result->run->outcome == ElevatedOutcome::kRestartPending)) {
     result->code = ExitCode::kProblems;

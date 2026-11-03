@@ -22,10 +22,14 @@
 //   8. Explorer is told that associations changed.
 //   Exit 0, or 5 when a step failed (the others still ran).
 //
-// --setup-machine (the installer's step for all users; run elevated): refused unless elevated
-// (7) and inside or below an app package (8); no operation lock (see SetupMachine); then the
-// shared task folder (EnsureTaskFolder), the machine part of the 1.x clean-up and the old 2.x
-// builds. Exit 0, 1 when files wait for a restart, 5 when a step failed.
+// --setup-machine (the installer's step for all users; run elevated): refused without the
+// administrator rights the elevated side requires of its own token (7: elevated, the
+// Administrators group enabled, an integrity level of High; ReadAdministratorRights), and below
+// an app package (or where the processes above it cannot be read) unless test values it writes
+// under HKEY_LOCAL_MACHINE\Software\Classes and in its own user's registry come back through WMI
+// (8, context.h); no operation lock (see SetupMachine); then the shared task folder
+// (EnsureTaskFolder), the machine part of the 1.x clean-up and the old 2.x builds. Exit 0, 1 when
+// files wait for a restart, 5 when a step failed.
 //
 // --migrate-v1 [--user-only | --machine-only]: refused like --setup-user; needs an installed
 // program (6), and leaves 1.x as it is without one. The user part runs here; the machine part, when
@@ -34,7 +38,7 @@
 // for all users that failed is listed as "machine <part>: <HRESULT>". Exit 0, 1 when something
 // waits (for a restart, for a process to let go, or for an install for all users), 5 when a step
 // failed, 7 when nothing else failed but the administrator step did not get administrator
-// rights.
+// rights, 8 when nothing else failed but it refused to run below an app package.
 
 #pragma once
 
@@ -65,8 +69,10 @@ enum class SetupRefusal {
   kNone,
   kWrongContext,  // 8: the registry may be virtualized, or the context is not the canary's
   kElevated,      // 8: the per-user steps refuse an elevated process
-  kNotElevated,   // 7: --setup-machine needs an administrator
-  kPackaged,      // 8: --setup-machine inside or below an app package
+  kNotElevated,   // 7: --setup-machine needs administrator rights (ReadAdministratorRights)
+  // 8: --setup-machine below an app package (or with the processes above it unreadable) where
+  // its test writes did not come back
+  kPackaged,
   kNotInstalled,  // 6
 };
 
@@ -129,14 +135,18 @@ struct SetupMachineOptions {
   std::wstring taskFolder = kTaskFolder;
   // Where in-use files go; when empty, the folder that holds the install folder.
   std::filesystem::path trashParent;
+  // Whether a package is above it and what its test writes showed; when absent,
+  // CheckMachineWrites. Tests pass one.
+  std::optional<MachineWriteCheck> machineWrites;
 };
 
 struct SetupMachineResult {
   ExitCode code = ExitCode::kFailed;
   SetupRefusal refusal = SetupRefusal::kNone;
-  HRESULT taskFolder = S_OK;  // EnsureTaskFolder's answer
-  MachineRemoval v1;          // 1.x's build folders
-  MachineRemoval old;         // old 2.x builds
+  MachineWriteCheck machineWrites;  // what it judged its context by (with kPackaged, why)
+  HRESULT taskFolder = S_OK;        // EnsureTaskFolder's answer
+  MachineRemoval v1;                // 1.x's build folders
+  MachineRemoval old;               // old 2.x builds
   std::vector<std::wstring> failures;
 };
 

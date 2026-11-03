@@ -521,6 +521,13 @@ TEST_F(Setup, MigrateV1AsksForTheMachinePartOnlyWhenNeeded) {
   ASSERT_TRUE(result.run);
   EXPECT_TRUE(LackedAdministratorRights(*result.run));
   EXPECT_TRUE(result.failures.empty());
+  // Refused below an app package: exit 8, not listed as a failure either.
+  exitCode = static_cast<DWORD>(kBelowPackageHr);
+  ASSERT_HRESULT_SUCCEEDED(MigrateV1(options, roots_, probes_, &result));
+  EXPECT_EQ(result.code, ExitCode::kWrongContext);
+  ASSERT_TRUE(result.run);
+  EXPECT_TRUE(RefusedBelowPackage(*result.run));
+  EXPECT_TRUE(result.failures.empty());
   // --user-only never asks.
   requests.clear();
   options.scope = MigrateScope::kUserOnly;
@@ -787,6 +794,17 @@ TEST_F(Setup, TheCheckDeletesTheWholeRunOnceFamily) {
   EXPECT_TRUE(HasValue(L"OtherApp"));
 }
 
+// A context check that refuses: below an app package, where the test write under
+// HKEY_LOCAL_MACHINE came back virtualized.
+MachineWriteCheck WritesNotShown() {
+  MachineWriteCheck check;
+  check.packageAbove = true;
+  check.probed = true;
+  check.machine = Virtualization::kYes;
+  check.user = Virtualization::kNo;
+  return check;
+}
+
 TEST_F(Setup, SetupMachineNeedsAnAdministrator) {
   if (Elevated()) GTEST_SKIP() << "elevated: SetupMachineInTestPlaces covers it";
   const path unused = MakeBuild(paths_.machineRoot, L"1.0.0.0-0badf00d");
@@ -798,6 +816,41 @@ TEST_F(Setup, SetupMachineNeedsAnAdministrator) {
   EXPECT_EQ(result.code, ExitCode::kNeedsAdmin);
   EXPECT_EQ(result.refusal, SetupRefusal::kNotElevated);
   EXPECT_TRUE(Exists(unused));
+  // The token's refusal comes first, whatever is above.
+  options.machineWrites = WritesNotShown();
+  ASSERT_HRESULT_SUCCEEDED(SetupMachine(options, roots_, &result));
+  EXPECT_EQ(result.code, ExitCode::kNeedsAdmin);
+  EXPECT_EQ(result.refusal, SetupRefusal::kNotElevated);
+  EXPECT_TRUE(Exists(unused));
+}
+
+// Elevated (CI): below an app package whose test writes did not come back, the step changes
+// nothing: no task folder, no build folder removed, exit 8.
+TEST_F(Setup, SetupMachineRefusedWhereItsWritesWereNotShown) {
+  if (!Elevated()) GTEST_SKIP() << "needs elevation; runs on CI";
+  const path unused = MakeBuild(paths_.machineRoot, L"1.0.0.0-0badf00d");
+  GUID guid = {};
+  ASSERT_HRESULT_SUCCEEDED(CoCreateGuid(&guid));
+  wchar_t id[40] = {};
+  StringFromGUID2(guid, id, ARRAYSIZE(id));
+  const std::wstring tail =
+      std::to_wstring(GetCurrentProcessId()) + L"-" + std::wstring(id + 1, 36);
+  SetupMachineOptions options;
+  options.paths = paths_;
+  options.taskFolder = L"\\" + std::wstring(kProductName) + L"-Test-" + tail;
+  options.trashParent = temp_.path();
+  options.machineWrites = WritesNotShown();
+  SetupMachineResult result;
+  ASSERT_HRESULT_SUCCEEDED(SetupMachine(options, roots_, &result));
+  EXPECT_EQ(result.refusal, SetupRefusal::kPackaged);
+  EXPECT_EQ(result.code, ExitCode::kWrongContext);
+  EXPECT_TRUE(RefusesMachineWrites(result.machineWrites));
+  EXPECT_TRUE(result.failures.empty());
+  EXPECT_TRUE(Exists(unused));
+  // Nothing to delete: the folder was never made.
+  EXPECT_EQ(DeleteTaskFolderAllUsers(options.taskFolder,
+                                     std::wstring(kProductName) + L"-Test-" + tail + L" "),
+            S_FALSE);
 }
 
 // Elevated (CI): the whole step against a test task folder, folders under %TEMP% and the sandbox,
@@ -807,8 +860,12 @@ TEST_F(Setup, SetupMachineNeedsAnAdministrator) {
 // a trash folder or waits for a restart.
 TEST_F(Setup, SetupMachineInTestPlaces) {
   if (!Elevated()) GTEST_SKIP() << "needs elevation; runs on CI";
-  std::optional<std::wstring> package;
-  if (FAILED(FindPackagedAncestor(&package)) || package) GTEST_SKIP() << "inside a package";
+  MachineWriteCheck writes;
+  CheckMachineWrites(&writes);
+  if (RefusesMachineWrites(writes)) {
+    GTEST_SKIP() << "the step would refuse here: "
+                 << WideToUtf8Lossy(MachineWriteCheckText(writes));
+  }
   const path unused = MakeBuild(paths_.machineRoot, L"1.0.0.0-0badf00d");
   const path old = MakeBuild(paths_.machineRoot, L"2.0.0.0-00000001");
   const path current = InstallForAllUsers();

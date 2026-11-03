@@ -251,6 +251,8 @@ void PrintElevatedRun(const ElevatedRun& run, std::wstring_view what, Output& ou
   }
   if (LackedAdministratorRights(run)) {
     out.Error(NoAdministratorRightsMessage());
+  } else if (RefusedBelowPackage(run)) {
+    out.Error(BelowPackageRefusalMessage());
   } else {
     out.Error(std::wstring(what) + L" failed: " + HResultText(run.failure));
   }
@@ -399,8 +401,10 @@ int ReportSetupRefusal(SetupRefusal refusal, std::wstring_view command,
       return Code(ExitCode::kNeedsAdmin);
     case SetupRefusal::kPackaged:
       out.Error(
-          L"Cannot run here: started inside or below an app package, where files and the "
-          L"registry may be private copies.");
+          L"Cannot run here: started below an app package (or unable to read the processes above "
+          L"it), and the test values it wrote under HKEY_LOCAL_MACHINE and in this account's "
+          L"registry did not come back through WMI, so its changes might not reach Windows. Run "
+          L"the installer from File Explorer.");
       return Code(ExitCode::kWrongContext);
     case SetupRefusal::kNone:
       break;
@@ -436,7 +440,12 @@ int RunSetupMachineCommand(const CliArgs& args, const ProcessContext& context, O
     return Code(ExitCode::kFailed);
   }
   if (result.refusal != SetupRefusal::kNone) {
-    return ReportSetupRefusal(result.refusal, Describe(args.verb).name, context, out);
+    const int code = ReportSetupRefusal(result.refusal, Describe(args.verb).name, context, out);
+    // What the step found above it and what its test writes showed: elevated, it logs nothing.
+    if (result.refusal == SetupRefusal::kPackaged) {
+      out.Error(L"  " + MachineWriteCheckText(result.machineWrites));
+    }
+    return code;
   }
   PrintFailures(result.failures, out);
   if (result.v1.restartPending || result.old.restartPending) {
@@ -543,6 +552,10 @@ int RunMigrateV1Command(const CliArgs& args, const ProcessContext& context, Outp
           out.Error(NoAdministratorRightsMessage());
           PrintReport(*result.run, out);
           out.Line(L"1.x's files for all users stay.");
+        } else if (RefusedBelowPackage(*result.run)) {
+          out.Error(BelowPackageRefusalMessage());
+          PrintReport(*result.run, out);
+          out.Line(L"1.x's files for all users stay.");
         } else {
           out.Error(L"The administrator step failed: " + HResultText(result.run->failure));
           PrintReport(*result.run, out);
@@ -602,7 +615,7 @@ int RunInstallCommand(const CliArgs& args, const ProcessContext& context, Output
   }
   if (result.run) PrintElevatedRun(*result.run, L"The part for all users", out);
   if (result.run && (result.run->outcome == ElevatedOutcome::kCancelled ||
-                     LackedAdministratorRights(*result.run))) {
+                     LackedAdministratorRights(*result.run) || RefusedBelowPackage(*result.run))) {
     out.Line(L"Nothing was installed.");
     return Code(result.code);
   }
@@ -694,7 +707,9 @@ int RunUninstallCleanupCommand(Output& out) {
       L"uninstall-cleanup hr=" + HResultText(hr) + L" machine=" +
           (result.machinePart ? L"yes" : L"no") + L" user=" + (result.userPart ? L"yes" : L"no") +
           L" failures=" + std::to_wstring(result.failures.size()));
-  (void)out;
+  // Elevated, nothing is logged: what it left out goes to its error output, which an installer
+  // can keep in its own log.
+  for (const std::wstring& line : UninstallCleanupErrors(hr, result)) out.Error(line);
   return Code(ExitCode::kOk);
 }
 
@@ -987,6 +1002,15 @@ std::wstring NoAdministratorRightsMessage() {
          L"them), so it changed nothing.";
 }
 
+std::wstring BelowPackageRefusalMessage() {
+  // True of a step of either build: an earlier one refuses below any package, this one where its
+  // test writes did not come back.
+  return L"The step for all users changed nothing: started below an app package (or unable to "
+         L"read the processes above it), it could not show that its changes would reach Windows. "
+         L"Run the command from a Command Prompt opened with Win+R (type cmd), which no app "
+         L"package starts.";
+}
+
 std::wstring ElevatedDoneText(std::wstring_view what, const ElevatedRun& run) {
   // Without the restart's clause: a part not done may be a file in use that could not be queued
   // for deletion at the restart.
@@ -1048,6 +1072,10 @@ std::vector<std::wstring> UninstallReport(const UninstallResult& result) {
         if (LackedAdministratorRights(*result.run)) {
           lines.push_back(NoAdministratorRightsMessage() +
                           L" The part for all users (its class and its install folder) stays.");
+        } else if (RefusedBelowPackage(*result.run)) {
+          lines.push_back(BelowPackageRefusalMessage() +
+                          L" The part for all users (its class and its install folder) stays; run "
+                          L"--uninstall again from such a prompt to remove it.");
         } else if (result.run->failure == kRegistryTreeLeftHr && !result.machineLeft) {
           // Only keys in other users' hives stayed: the class and the install folders are gone.
           lines.push_back(
@@ -1089,6 +1117,30 @@ std::vector<std::wstring> UninstallReport(const UninstallResult& result) {
         L"PDF thumbnails are off for you, but the part for all users is still "
         L"installed.");
   }
+  return lines;
+}
+
+std::vector<std::wstring> UninstallCleanupErrors(HRESULT hr, const UninstallCleanupResult& result) {
+  std::vector<std::wstring> lines;
+  if (FAILED(hr)) lines.push_back(L"The clean-up stopped early: " + HResultText(hr));
+  if (result.machineRefused) {
+    lines.push_back(
+        L"The part for all users was left out: started below an app package (or unable to read "
+        L"the processes above it), its test writes did not come back through WMI (" +
+        MachineWriteCheckText(result.machineWrites) + L").");
+  }
+  // Only from a clean-up that went to its end: one that stopped early may not have reached the
+  // per-user part at all.
+  if (SUCCEEDED(hr) && !result.userPart) {
+    std::wstring line =
+        L"The part for this account was left out: the registry check (a test value written here "
+        L"and read back through WMI) did not show that changes made from here would reach "
+        L"Windows (virtualized=";
+    line += VirtualizationName(result.userWrites);
+    if (FAILED(result.userProbeError)) line += L", probe-hr=" + HResultText(result.userProbeError);
+    lines.push_back(line + L").");
+  }
+  for (const std::wstring& failure : result.failures) lines.push_back(L"Not done: " + failure);
   return lines;
 }
 

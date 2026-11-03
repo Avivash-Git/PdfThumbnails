@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <unordered_map>
 
+#include "instance.h"
 #include "paths.h"
 #include "pe_info.h"
 #include "project_config.h"
@@ -256,8 +257,14 @@ HRESULT FindPackagedAncestor(std::optional<std::wstring>* packageFullName) noexc
 }
 CATCH_RETURN();
 
-HRESULT ProbeRegistryVirtualization(const std::wstring& userSid, Virtualization* result,
-                                    HRESULT* failure, std::wstring* probeKey) noexcept try {
+namespace {
+
+// A canary under |root| (opened in the registry view |view|): the volatile key
+// <|keyPrefix|>.probe-<GUID> holding a random value, read back through WMI from |wmiRoot| at
+// |wmiPrefix| + the key's name, and deleted again on every path (ProbeRegistryVirtualization).
+HRESULT RunCanary(HKEY root, REGSAM view, DWORD wmiRoot, std::wstring_view wmiPrefix,
+                  std::wstring_view keyPrefix, Virtualization* result, HRESULT* failure,
+                  std::wstring* probeKey) noexcept try {
   *result = Virtualization::kUnknown;
   if (failure) *failure = S_OK;
   if (probeKey) probeKey->clear();
@@ -265,17 +272,16 @@ HRESULT ProbeRegistryVirtualization(const std::wstring& userSid, Virtualization*
   std::wstring written;
   RETURN_IF_FAILED(NewGuidString(&guid));
   RETURN_IF_FAILED(NewGuidString(&written));
-  const std::wstring keyName = std::wstring(kRegKey) + L".probe-" + guid;
+  const std::wstring keyName = std::wstring(keyPrefix) + L".probe-" + guid;
   if (probeKey) *probeKey = keyName;
 
   wil::unique_hkey key;
-  const LSTATUS created =
-      RegCreateKeyExW(HKEY_CURRENT_USER, keyName.c_str(), 0, nullptr, REG_OPTION_VOLATILE,
-                      KEY_SET_VALUE, nullptr, key.put(), nullptr);
+  const LSTATUS created = RegCreateKeyExW(root, keyName.c_str(), 0, nullptr, REG_OPTION_VOLATILE,
+                                          KEY_SET_VALUE | view, nullptr, key.put(), nullptr);
   // From here on the key goes away on every path, whatever happened.
   const auto remove = wil::scope_exit([&]() noexcept {
     key.reset();
-    RegDeleteKeyW(HKEY_CURRENT_USER, keyName.c_str());
+    RegDeleteKeyExW(root, keyName.c_str(), view, 0);
   });
   // The first failure, kept for when the verdict is "unknown": the log is not on yet while the
   // context is read, so WIL's own reports of these failures go nowhere.
@@ -295,7 +301,7 @@ HRESULT ProbeRegistryVirtualization(const std::wstring& userSid, Virtualization*
     RegistryThroughWmi wmi;
     HRESULT hr = wmi.Connect();
     if (SUCCEEDED(hr)) {
-      hr = wmi.GetString(RegistryThroughWmi::kUsers, userSid + L"\\" + keyName, kProbeValue, &seen);
+      hr = wmi.GetString(wmiRoot, std::wstring(wmiPrefix) + keyName, kProbeValue, &seen);
     }
     wmiAnswered = SUCCEEDED(hr);
     if (FAILED(hr)) firstFailure = hr;
@@ -305,6 +311,98 @@ HRESULT ProbeRegistryVirtualization(const std::wstring& userSid, Virtualization*
   return S_OK;
 }
 CATCH_RETURN();
+
+const wchar_t* VerdictName(Virtualization virtualization) noexcept {
+  switch (virtualization) {
+    case Virtualization::kNo:
+      return L"real";
+    case Virtualization::kYes:
+      return L"virtualized";
+    case Virtualization::kUnknown:
+      break;
+  }
+  return L"unknown";
+}
+
+}  // namespace
+
+HRESULT ProbeRegistryVirtualization(const std::wstring& userSid, Virtualization* result,
+                                    HRESULT* failure, std::wstring* probeKey) noexcept try {
+  *result = Virtualization::kUnknown;
+  return RunCanary(HKEY_CURRENT_USER, 0, RegistryThroughWmi::kUsers, userSid + L"\\", kRegKey,
+                   result, failure, probeKey);
+}
+CATCH_RETURN();
+
+HRESULT ProbeMachineRegistryVirtualization(Virtualization* result, HRESULT* failure,
+                                           std::wstring* probeKey) noexcept try {
+  *result = Virtualization::kUnknown;
+  // Where the class for all users is written, so that the test write goes through the same
+  // redirection as the step's own writes would.
+  return RunCanary(HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY, RegistryThroughWmi::kLocalMachine, L"",
+                   std::wstring(L"Software\\Classes\\") + kProductName, result, failure, probeKey);
+}
+CATCH_RETURN();
+
+bool BelowPackage(const MachineWriteCheck& check) noexcept {
+  return check.packageAbove || FAILED(check.walk);
+}
+
+bool RefusesMachineWrites(const MachineWriteCheck& check) noexcept {
+  return BelowPackage(check) &&
+         (!check.probed || RefusesWrites(check.machine) || RefusesWrites(check.user));
+}
+
+std::wstring MachineWriteCheckText(const MachineWriteCheck& check) {
+  if (!BelowPackage(check)) return L"no app package above";
+  std::wstring text = check.packageAbove
+                          ? std::wstring(L"app package above")
+                          : L"processes above unreadable, walk-hr=" + HResultText(check.walk);
+  if (!check.probed) {
+    text += L"; not checked";
+  } else {
+    text += std::wstring(L"; HKLM ") + VerdictName(check.machine) + L", HKCU " +
+            VerdictName(check.user);
+  }
+  if (FAILED(check.probeError)) text += L", probe-hr=" + HResultText(check.probeError);
+  return text;
+}
+
+void ReadPackageAbove(MachineWriteCheck* check) noexcept {
+  *check = MachineWriteCheck{};
+  std::optional<std::wstring> package;
+  const HRESULT walk = FindPackagedAncestor(&package);
+  if (FAILED(walk)) {
+    check->walk = walk;
+  } else {
+    check->packageAbove = package.has_value();
+  }
+}
+
+void ProbeMachineWrites(MachineWriteCheck* check) noexcept {
+  check->probed = true;
+  check->probeError = S_OK;
+  HRESULT machineFailure = S_OK;
+  if (const HRESULT hr = ProbeMachineRegistryVirtualization(&check->machine, &machineFailure);
+      FAILED(hr)) {
+    check->machine = Virtualization::kUnknown;
+    machineFailure = hr;
+  }
+  HRESULT userFailure = S_OK;
+  std::wstring sid;
+  HRESULT hr = GetCurrentUserSid(&sid);
+  if (SUCCEEDED(hr)) hr = ProbeRegistryVirtualization(sid, &check->user, &userFailure);
+  if (FAILED(hr)) {
+    check->user = Virtualization::kUnknown;
+    userFailure = hr;
+  }
+  check->probeError = FAILED(machineFailure) ? machineFailure : userFailure;
+}
+
+void CheckMachineWrites(MachineWriteCheck* check) noexcept {
+  ReadPackageAbove(check);
+  if (BelowPackage(*check)) ProbeMachineWrites(check);
+}
 
 HRESULT CompareRegistryViews(const std::wstring& userSid, bool packagedAncestor,
                              RegistryViews* result, HRESULT* failure) noexcept try {

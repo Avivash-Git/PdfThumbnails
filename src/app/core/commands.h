@@ -38,7 +38,8 @@ using OpenWindowFn = int (*)() noexcept;
 //     --check        the check with the safe repairs (--no-repair: none); exit 0, 1, 4, 6, 7, 8
 //     --fix          the same, and with --take-back the slots another handler holds (asks
 //                    first); a damaged class for all users is repaired by the administrator
-//                    step machine-repair-class (a prompt; declined: 3, failed: 5)
+//                    step machine-repair-class (a prompt; declined: 3, no administrator rights:
+//                    7, refused below an app package: 8, failed: 5)
 //     --checks       registers the user's check task with the triggers asked for, or deletes it
 //                    (none); exit 0, 4, 5, 6 (not installed, or no settings executable for the
 //                    task to run), 8 (also when elevated)
@@ -129,6 +130,10 @@ std::wstring UninstallElevatedRefusalMessage();
 // (pure). Not the line of a declined prompt (exit 3).
 std::wstring NoAdministratorRightsMessage();
 
+// What --install, --fix, --migrate-v1 and --uninstall say when their administrator step refused
+// to run below an app package (RefusedBelowPackage; exit 8), before its report (pure).
+std::wstring BelowPackageRefusalMessage();
+
 // The line for an administrator step that is done (pure): "<what> is done.", "<what> is done;
 // files that were in use are deleted at the next restart.", or, when it reported parts it did not
 // complete (PartsNotDone), "<what> is done, but some of its parts did not complete; its report:"
@@ -153,6 +158,12 @@ std::wstring WindowNamedObjectsRefusedMessage();
 // installer's uninstaller): the thumbnail rebuild it cannot do, the part for all users, files left
 // for the next sign-in, and the result. May throw std::bad_alloc.
 std::vector<std::wstring> UninstallReport(const UninstallResult& result);
+
+// What --uninstall-cleanup writes to its error output (pure; it exits 0 whatever this says): that
+// it stopped early (|hr| failed), the part for all users it left out below an app package, the
+// part for this account it left out where the registry check did not show real writes, and "Not
+// done: <failure>" per failure. Empty when it did everything. May throw std::bad_alloc.
+std::vector<std::wstring> UninstallCleanupErrors(HRESULT hr, const UninstallCleanupResult& result);
 
 // "Zoom: 130 % (saved setting)", "(1.x's settings.ini)" or "(default)" (pure). May throw
 // std::bad_alloc.

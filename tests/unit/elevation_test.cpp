@@ -1,11 +1,12 @@
 // The pure parts of the elevation boundary (elevation.h): the step names and the one accepted
 // command line, the elevated side's entry checks in their order (administrator rights in every
-// combination of the token's facts), how an elevated run's exit is read, how the report pipe's
-// bytes become lines, which pipe the elevated side writes to, a report channel another process
-// took, and the parts a step did not complete: the lines and the end line it writes, and how the
-// asking side reads them into its failures (this build's report, an older build's, one cut
-// short, malformed or forged lines). Also the installer's records (inno.h) and which holders of
-// a DLL may be ended (processes.h).
+// combination of the token's facts; below an app package, its test writes tested once and last,
+// with a fake probe), how an elevated run's exit is read, how the report pipe's bytes become lines,
+// which pipe the elevated side writes to, a report channel another process took, and the parts a
+// step did not complete: the lines and the end line it writes, and how the asking side reads them
+// into its failures (this build's report, an older build's, one cut short, malformed or forged
+// lines). Also the installer's records (inno.h) and which holders of a DLL may be ended
+// (processes.h).
 
 #include <windows.h>
 
@@ -14,8 +15,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <functional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "inno.h"
@@ -86,7 +89,13 @@ TEST(ElevatedEntry, AllChecksPass) {
 }
 
 TEST(ElevatedEntry, RefusalsInOrder) {
+  // Below an app package, its test writes not run yet: the last check refuses.
   ElevatedEntryFacts facts = Passing();
+  facts.machineWrites.packageAbove = true;
+  EXPECT_EQ(FindElevatedRefusal(facts), ElevatedRefusal::kPackaged);
+  EXPECT_EQ(CheckElevatedEntry(facts), kBelowPackageHr);
+  EXPECT_EQ(CheckElevatedEntry(facts), static_cast<HRESULT>(0x8007109C));
+  // Each earlier check wins over it, in turn.
   facts.reparsePoints = HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK);
   EXPECT_EQ(FindElevatedRefusal(facts), ElevatedRefusal::kReparsePoint);
   EXPECT_EQ(CheckElevatedEntry(facts), HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK));
@@ -96,9 +105,6 @@ TEST(ElevatedEntry, RefusalsInOrder) {
   facts.verb.reset();
   EXPECT_EQ(FindElevatedRefusal(facts), ElevatedRefusal::kNotOneStep);
   EXPECT_EQ(CheckElevatedEntry(facts), E_INVALIDARG);
-  facts.packaged = true;
-  EXPECT_EQ(FindElevatedRefusal(facts), ElevatedRefusal::kPackaged);
-  EXPECT_EQ(CheckElevatedEntry(facts), HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED_IN_APPCONTAINER));
   facts.integrityRid = SECURITY_MANDATORY_MEDIUM_RID;
   EXPECT_EQ(FindElevatedRefusal(facts), ElevatedRefusal::kIntegrityBelowHigh);
   EXPECT_EQ(CheckElevatedEntry(facts), kNoAdministratorRightsHr);
@@ -147,18 +153,145 @@ TEST(ElevatedEntry, AdministratorRightsInEveryCombination) {
         EXPECT_EQ(CheckElevatedEntry(facts),
                   expected == ElevatedRefusal::kNone ? S_OK : kNoAdministratorRightsHr)
             << label;
+        // The steps for all users that run in the installer's own process judge it the same way.
+        EXPECT_EQ(HasAdministratorRights(facts), expected == ElevatedRefusal::kNone) << label;
 
         // Everything else wrong too: the token still answers first.
-        facts.packaged = true;
+        facts.machineWrites.packageAbove = true;
         facts.verb.reset();
         facts.runsFromMachineRoot = false;
         facts.reparsePoints = HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK);
         EXPECT_EQ(FindElevatedRefusal(facts),
-                  expected == ElevatedRefusal::kNone ? ElevatedRefusal::kPackaged : expected)
+                  expected == ElevatedRefusal::kNone ? ElevatedRefusal::kNotOneStep : expected)
             << label;
+        EXPECT_EQ(HasAdministratorRights(facts), expected == ElevatedRefusal::kNone) << label;
       }
     }
   }
+}
+
+// Below an app package (or with the processes above unreadable) a step goes on only when both of
+// its test writes ran and came back real; without a package above, nothing about them matters.
+TEST(ElevatedEntry, BelowAPackageOnlyWithBothWritesShownReal) {
+  const Virtualization verdicts[] = {Virtualization::kNo, Virtualization::kYes,
+                                     Virtualization::kUnknown};
+  for (const int above : {0, 1, 2}) {  // none, a package, a walk that failed
+    for (const bool probed : {false, true}) {
+      for (const Virtualization machine : verdicts) {
+        for (const Virtualization user : verdicts) {
+          ElevatedEntryFacts facts = Passing();
+          facts.machineWrites.packageAbove = above == 1;
+          facts.machineWrites.walk = above == 2 ? E_ACCESSDENIED : S_OK;
+          facts.machineWrites.probed = probed;
+          facts.machineWrites.machine = machine;
+          facts.machineWrites.user = user;
+          const bool shownReal =
+              probed && machine == Virtualization::kNo && user == Virtualization::kNo;
+          const bool refused = above != 0 && !shownReal;
+          const std::string label = "above " + std::to_string(above) + ", probed " +
+                                    std::to_string(probed) + ", machine " +
+                                    std::to_string(static_cast<int>(machine)) + ", user " +
+                                    std::to_string(static_cast<int>(user));
+          EXPECT_EQ(BelowPackage(facts.machineWrites), above != 0) << label;
+          EXPECT_EQ(RefusesMachineWrites(facts.machineWrites), refused) << label;
+          EXPECT_EQ(FindElevatedRefusal(facts),
+                    refused ? ElevatedRefusal::kPackaged : ElevatedRefusal::kNone)
+              << label;
+          EXPECT_EQ(CheckElevatedEntry(facts), refused ? kBelowPackageHr : S_OK) << label;
+        }
+      }
+    }
+  }
+}
+
+// A fake probe: answers |machine| and |user|, and counts its runs in |*runs|.
+std::function<void(MachineWriteCheck*)> CountingProbe(int* runs, Virtualization machine,
+                                                      Virtualization user) {
+  return [runs, machine, user](MachineWriteCheck* check) {
+    ++*runs;
+    check->probed = true;
+    check->machine = machine;
+    check->user = user;
+  };
+}
+
+// The test writes run once, only below a package (or where the walk failed), and only for a step
+// that passed every other check; their answer decides.
+TEST(ElevatedEntry, TheWritesAreTestedOnceAndLast) {
+  constexpr Virtualization kNo = Virtualization::kNo;
+  int runs = 0;
+  ElevatedEntryFacts facts = Passing();
+  facts.machineWrites.packageAbove = true;
+  EXPECT_EQ(DecideElevatedEntry(&facts, CountingProbe(&runs, kNo, kNo)), ElevatedRefusal::kNone);
+  EXPECT_EQ(runs, 1);
+  EXPECT_TRUE(facts.machineWrites.probed);
+  EXPECT_EQ(CheckElevatedEntry(facts), S_OK);
+  // Probed already: not again.
+  EXPECT_EQ(DecideElevatedEntry(&facts, CountingProbe(&runs, kNo, kNo)), ElevatedRefusal::kNone);
+  EXPECT_EQ(runs, 1);
+
+  // A walk that failed, and the developer install's exemption from the place, are tested too.
+  runs = 0;
+  facts = Passing();
+  facts.machineWrites.walk = E_ACCESSDENIED;
+  EXPECT_EQ(DecideElevatedEntry(&facts, CountingProbe(&runs, kNo, kNo)), ElevatedRefusal::kNone);
+  EXPECT_EQ(runs, 1);
+  facts = Passing(ElevatedVerb::kMachineInstall);
+  facts.runsFromMachineRoot = false;
+  facts.devInstall = true;
+  facts.machineWrites.packageAbove = true;
+  EXPECT_EQ(DecideElevatedEntry(&facts, CountingProbe(&runs, kNo, kNo)), ElevatedRefusal::kNone);
+  EXPECT_EQ(runs, 2);
+
+  // An answer other than real, for either half, refuses.
+  const std::pair<Virtualization, Virtualization> answers[] = {
+      {Virtualization::kYes, kNo},
+      {kNo, Virtualization::kYes},
+      {Virtualization::kUnknown, kNo},
+      {kNo, Virtualization::kUnknown},
+  };
+  for (const auto& [machine, user] : answers) {
+    runs = 0;
+    facts = Passing();
+    facts.machineWrites.packageAbove = true;
+    EXPECT_EQ(DecideElevatedEntry(&facts, CountingProbe(&runs, machine, user)),
+              ElevatedRefusal::kPackaged);
+    EXPECT_EQ(runs, 1);
+    EXPECT_EQ(CheckElevatedEntry(facts), kBelowPackageHr);
+  }
+
+  // No package above: never.
+  runs = 0;
+  facts = Passing();
+  EXPECT_EQ(DecideElevatedEntry(&facts, CountingProbe(&runs, kNo, kNo)), ElevatedRefusal::kNone);
+  EXPECT_EQ(runs, 0);
+  EXPECT_FALSE(facts.machineWrites.probed);
+
+  // Another refusal applies: never, whatever is above.
+  const std::vector<std::function<void(ElevatedEntryFacts*)>> refusals = {
+      [](ElevatedEntryFacts* f) { f->tokenElevated = false; },
+      [](ElevatedEntryFacts* f) { f->administratorsEnabled = false; },
+      [](ElevatedEntryFacts* f) { f->integrityRid = SECURITY_MANDATORY_MEDIUM_RID; },
+      [](ElevatedEntryFacts* f) { f->verb.reset(); },
+      [](ElevatedEntryFacts* f) { f->runsFromMachineRoot = false; },
+      [](ElevatedEntryFacts* f) {
+        f->reparsePoints = HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK);
+      },
+  };
+  for (size_t i = 0; i < refusals.size(); ++i) {
+    facts = Passing();
+    facts.machineWrites.packageAbove = true;
+    refusals[i](&facts);
+    const ElevatedRefusal refusal = DecideElevatedEntry(&facts, CountingProbe(&runs, kNo, kNo));
+    EXPECT_NE(refusal, ElevatedRefusal::kNone) << i;
+    EXPECT_NE(refusal, ElevatedRefusal::kPackaged) << i;
+    EXPECT_EQ(runs, 0) << i;
+    EXPECT_FALSE(facts.machineWrites.probed) << i;
+  }
+  // Without a probe, a step below a package is refused.
+  facts = Passing();
+  facts.machineWrites.packageAbove = true;
+  EXPECT_EQ(DecideElevatedEntry(&facts, {}), ElevatedRefusal::kPackaged);
 }
 
 // The exemption of machine-install in developer builds is from the place only: never from the
@@ -202,6 +335,24 @@ TEST(ElevatedEntry, RefusalTexts) {
             std::wstring_view::npos);
   EXPECT_NE(ElevatedRefusalText(ElevatedRefusal::kIntegrityBelowHigh).find(L"High"),
             std::wstring_view::npos);
+
+  // Below a package: what the step found, in brackets after the refusal; nothing for the others.
+  ElevatedEntryFacts facts = Passing();
+  facts.machineWrites.packageAbove = true;
+  facts.machineWrites.probed = true;
+  facts.machineWrites.machine = Virtualization::kUnknown;
+  facts.machineWrites.user = Virtualization::kNo;
+  facts.machineWrites.probeError = static_cast<HRESULT>(0x80041003);
+  EXPECT_EQ(ElevatedRefusalReason(ElevatedRefusal::kPackaged, facts),
+            L"inside or below an app package, or with the processes above it unreadable, and its "
+            L"test writes did not come back (app package above; HKLM unknown, HKCU real, "
+            L"probe-hr=0x80041003)");
+  EXPECT_EQ(ElevatedRefusalReason(ElevatedRefusal::kNotOneStep, facts),
+            ElevatedRefusalText(ElevatedRefusal::kNotOneStep));
+  facts.machineWrites.machine = Virtualization::kNo;
+  facts.machineWrites.probeError = S_OK;
+  EXPECT_EQ(ElevatedWritesCheckedLine(L"machine-install", facts.machineWrites),
+            L"elevated machine-install writes checked: app package above; HKLM real, HKCU real");
 }
 
 TEST(ElevatedEntry, OnlyMachineInstallInDeveloperBuildsMayRunElsewhere) {
@@ -271,6 +422,41 @@ TEST(ElevatedExit, WithoutAdministratorRights) {
   EXPECT_EQ(run.outcome, ElevatedOutcome::kFailed);
   EXPECT_EQ(run.failure, kNoAdministratorRightsHr);
   EXPECT_FALSE(LackedAdministratorRights(run));
+}
+
+// A step that refused to run below an app package, told apart from every other failure: such a
+// step never ran, so it names no parts and needs no failure of its own (its exit code is 8).
+TEST(ElevatedExit, RefusedBelowPackage) {
+  // The code earlier builds refuse with below any package, so both builds' parents read it.
+  EXPECT_EQ(kBelowPackageHr, static_cast<HRESULT>(0x8007109C));
+  EXPECT_EQ(kBelowPackageHr, HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED_IN_APPCONTAINER));
+  ElevatedRun run;
+  run.outcome = ClassifyElevatedExit(S_OK, static_cast<DWORD>(kBelowPackageHr), &run.failure);
+  EXPECT_EQ(run.outcome, ElevatedOutcome::kFailed);
+  EXPECT_TRUE(RefusedBelowPackage(run));
+  EXPECT_FALSE(LackedAdministratorRights(run));
+  run.report = {L"not done: class: 0x8007109C", L"elevated machine-uninstall end hr=0x8007109C"};
+  run.parts = ReadReportParts(ElevatedVerb::kMachineUninstall, run.report);
+  EXPECT_TRUE(NotDoneFailures(run, L"machine").empty());
+  EXPECT_FALSE(NeedsStepFailure(run));
+  EXPECT_EQ(CountPartsNotDone(run), 0u);
+  run.failure = E_ACCESSDENIED;
+  EXPECT_FALSE(RefusedBelowPackage(run));
+  run.failure = kBelowPackageHr;
+  for (const ElevatedOutcome outcome :
+       {ElevatedOutcome::kDone, ElevatedOutcome::kRestartPending, ElevatedOutcome::kCancelled}) {
+    run.outcome = outcome;
+    EXPECT_FALSE(RefusedBelowPackage(run)) << static_cast<int>(outcome);
+  }
+  // Only the elevated process's own exit code says so, never a launch that failed: that one keeps
+  // its failure.
+  run = ElevatedRun{};
+  run.launched = kBelowPackageHr;
+  run.outcome = ClassifyElevatedExit(run.launched, 0, &run.failure);
+  EXPECT_EQ(run.outcome, ElevatedOutcome::kFailed);
+  EXPECT_EQ(run.failure, kBelowPackageHr);
+  EXPECT_FALSE(RefusedBelowPackage(run));
+  EXPECT_TRUE(NeedsStepFailure(run));
 }
 
 TEST(ElevatedReport, PipeName) {

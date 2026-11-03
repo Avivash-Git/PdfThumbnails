@@ -16,6 +16,12 @@
 // report that writes would be swallowed, is for the check engine to decide: the canary's
 // volatile probe key sits next to the product key and never recreates it, so running it would
 // not change what a report looks at.
+//
+// Elevated steps that write for all users judge their own context the same way. Only where an
+// app package is above them, or the walk up their parents fails, they write a volatile test value
+// under HKEY_LOCAL_MACHINE\Software\Classes and another in their own user's hive and read both
+// back through WMI; they go on only when both come back. A package alone proves nothing about
+// where writes land.
 
 #pragma once
 
@@ -104,6 +110,50 @@ struct ProcessContext {
                                                   Virtualization* result,
                                                   HRESULT* failure = nullptr,
                                                   std::wstring* probeKey = nullptr) noexcept;
+
+// Like ProbeRegistryVirtualization, under HKEY_LOCAL_MACHINE: the volatile key
+// Software\Classes\<Product>.probe-<GUID> (64-bit view), read back through WMI from
+// HKEY_LOCAL_MACHINE, deleted on every path. Without administrator rights the key cannot be made:
+// kUnknown with that failure. |probeKey| (optional): the key's path under HKEY_LOCAL_MACHINE.
+[[nodiscard]] HRESULT ProbeMachineRegistryVirtualization(Virtualization* result,
+                                                         HRESULT* failure = nullptr,
+                                                         std::wstring* probeKey = nullptr) noexcept;
+
+// Where an elevated step that writes for all users runs, as far as app packages go.
+struct MachineWriteCheck {
+  bool packageAbove = false;  // FindPackagedAncestor found a foreign package
+  HRESULT walk = S_OK;        // FindPackagedAncestor's failure, if it failed
+  bool probed = false;        // the two canaries ran
+  Virtualization machine = Virtualization::kUnknown;  // HKEY_LOCAL_MACHINE\Software\Classes
+  Virtualization user = Virtualization::kUnknown;     // this process's user's own hive
+  HRESULT probeError = S_OK;                          // the first failure behind a kUnknown
+};
+
+// Below an app package, or with the processes above unreadable: packageAbove or a failed walk
+// (pure).
+bool BelowPackage(const MachineWriteCheck& check) noexcept;
+
+// Whether a step that writes for all users refuses (pure): below a package (BelowPackage) unless
+// both canaries ran and showed that its writes reach the real registry; "unknown" counts as
+// "virtualized".
+bool RefusesMachineWrites(const MachineWriteCheck& check) noexcept;
+
+// What |check| found (pure; never a name or a path): "no app package above"; else "app package
+// above" or "processes above unreadable, walk-hr=<HRESULT>", then "; not checked" or "; HKLM <v>,
+// HKCU <v>" (real, virtualized, unknown), then ", probe-hr=<HRESULT>" when probeError failed.
+// May throw std::bad_alloc.
+std::wstring MachineWriteCheckText(const MachineWriteCheck& check);
+
+// The walk up this process's parents only (FindPackagedAncestor): resets *check first.
+void ReadPackageAbove(MachineWriteCheck* check) noexcept;
+
+// Both canaries: under HKEY_LOCAL_MACHINE (ProbeMachineRegistryVirtualization) and in this
+// process's user's own hive (ProbeRegistryVirtualization), always both, so that the report shows
+// both; sets probed. A canary that fails as a whole gives kUnknown and its failure.
+void ProbeMachineWrites(MachineWriteCheck* check) noexcept;
+
+// ReadPackageAbove, then ProbeMachineWrites when BelowPackage.
+void CheckMachineWrites(MachineWriteCheck* check) noexcept;
 
 // The read-only check, for commands that only report: compares this process's view of two
 // values with WMI's view of the real hive: the .pdf thumbnail slot

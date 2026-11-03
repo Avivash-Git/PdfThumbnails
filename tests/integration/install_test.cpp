@@ -766,6 +766,50 @@ TEST_F(Install, TheStepForAllUsersDeclinedOrFailed) {
   EXPECT_FALSE(MachineClassDll());
   EXPECT_FALSE(StoredZoom());
   EXPECT_TRUE(probes_.applied.empty());
+
+  // A launch that failed with the step's own code ran nothing: a failure, not a refusal.
+  options.launcher = AnsweringLauncher(kUnsafeBuildFolderHr, 0);
+  ASSERT_HRESULT_SUCCEEDED(InstallFromOwnFolder(options, roots_, probes_, &result));
+  EXPECT_EQ(result.code, ExitCode::kFailed);
+  EXPECT_EQ(result.refusal, InstallRefusal::kNone);
+  EXPECT_EQ(result.failures,
+            std::vector<std::wstring>{L"machine-install: " + HResultText(kUnsafeBuildFolderHr)});
+  EXPECT_FALSE(MachineClassDll());
+}
+
+// Below an app package the step refused, as its test writes did not come back (or, from an
+// earlier build, as it refuses below any package): exit 8, no refusal of the build's folder,
+// nothing listed as failed, and nothing installed for anyone.
+TEST_F(Install, TheStepForAllUsersRefusedBelowAPackage) {
+  if (const auto why = StageUnsafe()) GTEST_SKIP() << *why;
+  InstallOptions options = MakeInstallOptions(Scope::kMachine);
+  options.launcher = AnsweringLauncher(S_OK, static_cast<DWORD>(kBelowPackageHr));
+  const path log = path(temp_.path()) / L"install.log";
+  SetLogFileForTesting(log, kLogRotateBytes);
+  InstallResult result;
+  const HRESULT installed = InstallFromOwnFolder(options, roots_, probes_, &result);
+  SetLogFileForTesting({}, 0);
+  ASSERT_HRESULT_SUCCEEDED(installed);
+  EXPECT_EQ(result.code, ExitCode::kWrongContext);
+  EXPECT_EQ(result.refusal, InstallRefusal::kNone);
+  ASSERT_TRUE(result.run);
+  EXPECT_TRUE(RefusedBelowPackage(*result.run));
+  for (const std::wstring& failure : result.failures) ADD_FAILURE() << WideToUtf8Lossy(failure);
+  EXPECT_FALSE(MachineClassDll());
+  EXPECT_FALSE(StoredZoom());
+  EXPECT_TRUE(probes_.applied.empty());
+  const std::string lines = ReadFileText(log);
+  EXPECT_NE(lines.find("install WARN install scope=machine result=refused failures=0"),
+            std::string::npos)
+      << lines;
+
+  // A launch that failed with that code ran nothing: a failure.
+  options.launcher = AnsweringLauncher(kBelowPackageHr, 0);
+  ASSERT_HRESULT_SUCCEEDED(InstallFromOwnFolder(options, roots_, probes_, &result));
+  EXPECT_EQ(result.code, ExitCode::kFailed);
+  ASSERT_TRUE(result.run);
+  EXPECT_FALSE(RefusedBelowPackage(*result.run));
+  EXPECT_EQ(result.failures, std::vector<std::wstring>{L"machine-install: 0x8007109C"});
 }
 
 // Parts of the step for all users after the class that did not complete (the task folder, and
@@ -1083,6 +1127,16 @@ TEST_F(Install, FixRepairsTheClassForAllUsers) {
   EXPECT_TRUE(result.adminStepNeeded);
   EXPECT_TRUE(HasFinding(result.findings, FindingId::kClassDamagedMachine));
 
+  // Refused below an app package: exit 8, no part of it listed, the class still broken.
+  options.launcher = AnsweringLauncher(S_OK, static_cast<DWORD>(kBelowPackageHr));
+  ASSERT_HRESULT_SUCCEEDED(RunCheck(options, roots_, probes_, &result));
+  ASSERT_TRUE(result.elevated);
+  EXPECT_TRUE(RefusedBelowPackage(*result.elevated));
+  EXPECT_EQ(result.code, ExitCode::kWrongContext);
+  EXPECT_TRUE(result.machineNotDone.empty());
+  EXPECT_TRUE(result.adminStepNeeded);
+  EXPECT_TRUE(HasFinding(result.findings, FindingId::kClassDamagedMachine));
+
   options.launcher = [this](const ElevationRequest& request, DWORD* processId, DWORD* exitCode) {
     requests_.push_back(request);
     *processId = 0;
@@ -1275,6 +1329,21 @@ TEST_F(Install, UninstallMachinePartDeclinedOrNotPossible) {
   EXPECT_TRUE(result.machineLeft);
   EXPECT_TRUE(result.failures.empty());
   EXPECT_EQ(result.code, ExitCode::kNeedsAdmin);
+
+  // Refused below an app package: the part stays, exit 8, not listed as a failure; the user's
+  // own part is done all the same.
+  ASSERT_HRESULT_SUCCEEDED(WriteSlots(roots_, SlotWrite::kTakeBack));
+  options.launcher = AnsweringLauncher(S_OK, static_cast<DWORD>(kBelowPackageHr));
+  ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
+  ASSERT_TRUE(result.run);
+  EXPECT_TRUE(RefusedBelowPackage(*result.run));
+  EXPECT_TRUE(result.machineLeft);
+  for (const std::wstring& failure : result.failures) ADD_FAILURE() << WideToUtf8Lossy(failure);
+  EXPECT_EQ(result.code, ExitCode::kWrongContext);
+  SlotValues slots;
+  ASSERT_HRESULT_SUCCEEDED(ReadSlots(roots_, &slots));
+  EXPECT_FALSE(slots[0]);
+  EXPECT_TRUE(Exists(v1));
 }
 
 // The step for all users failed after going on past several parts and ended with the first
@@ -1400,12 +1469,47 @@ TEST_F(Install, UninstallCleanupDoesTheUsersPartUnelevated) {
     EXPECT_TRUE(MachineClassDll());
   }
 
-  // Where writes may not reach the real hive, the per-user part is left out.
+  // Where writes may not reach the real hive, the per-user part is left out, with the verdict that
+  // its error output gives as the reason.
   probes_.context.virtualization = Virtualization::kYes;
   ASSERT_HRESULT_SUCCEEDED(SaveZoom(roots_, 130));
   ASSERT_HRESULT_SUCCEEDED(UninstallCleanup(options, roots_, probes_, &result));
   EXPECT_FALSE(result.userPart);
+  EXPECT_EQ(result.userWrites, Virtualization::kYes);
   EXPECT_EQ(StoredZoom(), 130u);
+}
+
+// Elevated (CI): below an app package whose test writes did not come back, the part for all users
+// is left out, and said so in its failures; the user's own part runs all the same.
+TEST_F(Install, UninstallCleanupLeavesThePartForAllUsersWhereItsWritesWereNotShown) {
+  bool elevated = false;
+  ASSERT_HRESULT_SUCCEEDED(GetTokenElevation(&elevated));
+  if (!elevated) GTEST_SKIP() << "needs elevation; runs on CI";
+  ASSERT_HRESULT_SUCCEEDED(WriteSlots(roots_, SlotWrite::kTakeBack));
+  const path build = MakeBuild(paths_.machineRoot, L"2.0.0.0-1a2b3c4d");
+  RegisterMachineClass(build / kHandlerDll);
+  UninstallCleanupOptions options;
+  options.paths = paths_;
+  options.dataDir = dataDir_;
+  options.machine.taskFolder.clear();
+  options.machine.users = nullptr;
+  MachineWriteCheck writes;
+  writes.packageAbove = true;
+  writes.probed = true;
+  writes.machine = Virtualization::kYes;
+  writes.user = Virtualization::kNo;
+  options.machineWrites = writes;
+  UninstallCleanupResult result;
+  ASSERT_HRESULT_SUCCEEDED(UninstallCleanup(options, roots_, probes_, &result));
+  EXPECT_FALSE(result.machinePart);
+  EXPECT_TRUE(result.machineRefused);
+  EXPECT_EQ(result.failures, std::vector<std::wstring>{L"machine: 0x8007109C"});
+  EXPECT_EQ(MachineClassDll(), (build / kHandlerDll).native());
+  EXPECT_TRUE(Exists(paths_.machineRoot));
+  EXPECT_TRUE(result.userPart);
+  SlotValues slots;
+  ASSERT_HRESULT_SUCCEEDED(ReadSlots(roots_, &slots));
+  EXPECT_FALSE(slots[0]);
 }
 
 // ---- The status after an elevated step left files for the restart ---------------------------

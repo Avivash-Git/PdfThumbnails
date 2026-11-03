@@ -16,7 +16,9 @@
 //      app's data folder (the log). What is in use stays and is removed at the next sign-in
 //      (a RunOnce value per folder, file_ops.h).
 //   Exit 0; 1 when the part for all users is left; 5 when a step failed; 7 when nothing else
-//   failed but the administrator step did not get administrator rights (the part stays).
+//   failed but the administrator step did not get administrator rights (the part stays); 8 when
+//   nothing else failed but the administrator step refused to run below an app package (the part
+//   stays).
 //   --rebuild-thumbnails belongs to the thumbnail refresh, which this build does not have: it is
 //   accepted and said so, and the uninstall goes on.
 //
@@ -32,11 +34,15 @@
 // handlers registered for .pdf for all users.
 //
 // --uninstall-cleanup (the installer's uninstall step): the machine-uninstall steps when it runs
-// elevated, the per-user registry part when the registry check shows that writes reach the real
-// hive, and a RunOnce value for the app's data folder (an elevated process never deletes in the
-// user's profile). Never asks anything, and always exits 0. Elevated, the per-user part gathers
-// nothing first: it deletes fixed key names only, and never reads a path from the user's registry
-// to open it.
+// elevated with the administrator rights the elevated side requires of its own token
+// (ReadAdministratorRights; below an app package, or where the processes above it cannot be read,
+// only when test values it writes under HKEY_LOCAL_MACHINE\Software\Classes and in its own user's
+// registry come back through WMI, context.h), the per-user registry part when the registry check
+// shows that writes reach the real hive, and a RunOnce value for the app's data folder (an
+// elevated process never deletes in the user's profile). Never asks anything, and always exits 0;
+// what it left out or could not do goes to its error output (UninstallCleanupErrors). Elevated,
+// the per-user part gathers nothing first: it deletes fixed key names only, and never reads a path
+// from the user's registry to open it.
 
 #pragma once
 
@@ -228,11 +234,22 @@ struct UninstallCleanupOptions {
   std::filesystem::path dataDir;    // empty: GetDataDir
   MachineUninstallOptions machine;  // its roots filled in from |paths| when empty
   bool runMachinePart = true;       // only ever when elevated
+  // Whether a package is above it and what its test writes showed; when absent,
+  // CheckMachineWrites. Tests pass one.
+  std::optional<MachineWriteCheck> machineWrites;
 };
 
 struct UninstallCleanupResult {
   bool userPart = false;     // the registry check allowed it
   bool machinePart = false;  // elevated: it ran
+  // Elevated, but below an app package (or with the processes above it unreadable) where its
+  // test writes did not come back: the part for all users was left out ("machine: <HRESULT>").
+  bool machineRefused = false;
+  MachineWriteCheck machineWrites;  // what it judged that by (elevated only)
+  // The per-user part's registry check (GetProcessContext's canary), which decides userPart: its
+  // verdict and the failure behind an "unknown".
+  Virtualization userWrites = Virtualization::kUnknown;
+  HRESULT userProbeError = S_OK;
   UserRemoval user;
   MachineUninstallResult machine;
   std::vector<std::filesystem::path> scheduled;

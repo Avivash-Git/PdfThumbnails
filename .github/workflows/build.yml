@@ -156,6 +156,7 @@ jobs:
           findstr /l /c:" --diagnostics --out (elevated) -> exit 8" "%LOG%" || (echo ::error::--diagnostics --out was not refused elevated& exit /b 1)
           findstr /l /c:"[ setup ] --setup-machine in test places (elevated) -> exit " "%LOG%" || (echo ::error::--setup-machine did not run elevated in test places& exit /b 1)
           findstr /l /c:"[ install ] --uninstall-cleanup machine part in test places (elevated): removed" "%LOG%" || (echo ::error::--uninstall-cleanup did not remove the part for all users elevated in test places& exit /b 1)
+          findstr /l /c:"[ context ] machine canary (elevated): real" "%LOG%" || (echo ::error::The canary under HKEY_LOCAL_MACHINE did not run elevated& exit /b 1)
 
       # CTest counts a test case that GoogleTest skipped as passed: list every skipped test, with
       # its reason, in the log and in one notice on the run's summary page.
@@ -294,6 +295,7 @@ jobs:
           findstr /l /c:" --diagnostics --out (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--diagnostics --out was not refused elevated& exit /b 1)
           findstr /l /c:"[ setup ] --setup-machine in test places (elevated) -> exit " t\Testing\Temporary\LastTest.log || (echo ::error::--setup-machine did not run elevated in test places& exit /b 1)
           findstr /l /c:"[ install ] --uninstall-cleanup machine part in test places (elevated): removed" t\Testing\Temporary\LastTest.log || (echo ::error::--uninstall-cleanup did not remove the part for all users elevated in test places& exit /b 1)
+          findstr /l /c:"[ context ] machine canary (elevated): real" t\Testing\Temporary\LastTest.log || (echo ::error::The canary under HKEY_LOCAL_MACHINE did not run elevated& exit /b 1)
 
       # The same list as in build: see there.
       - name: List the skipped tests

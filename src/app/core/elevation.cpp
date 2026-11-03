@@ -84,9 +84,8 @@ HRESULT GatherEntryFacts(ElevatedEntryFacts* facts) noexcept try {
   facts->devInstall = kDevInstall;
   RETURN_IF_FAILED(ReadEntryTokenFacts(nullptr, facts));
 
-  // A walk that fails counts as packaged: the step is refused rather than run unchecked.
-  std::optional<std::wstring> package;
-  facts->packaged = FAILED(FindPackagedAncestor(&package)) || package.has_value();
+  // The canaries run later, only if everything else passes (DecideElevatedEntry).
+  ReadPackageAbove(&facts->machineWrites);
 
   int count = 0;
   LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &count);
@@ -267,6 +266,31 @@ HRESULT ReadEntryTokenFacts(HANDLE token, ElevatedEntryFacts* facts) noexcept {
   return S_OK;
 }
 
+bool HasAdministratorRights(const ElevatedEntryFacts& facts) noexcept {
+  // The token's checks come first in FindElevatedRefusal: any later refusal means they passed.
+  switch (FindElevatedRefusal(facts)) {
+    case ElevatedRefusal::kNotElevated:
+    case ElevatedRefusal::kAdministratorsNotEnabled:
+    case ElevatedRefusal::kIntegrityBelowHigh:
+      return false;
+    case ElevatedRefusal::kNone:
+    case ElevatedRefusal::kNotOneStep:
+    case ElevatedRefusal::kNotFromMachineRoot:
+    case ElevatedRefusal::kReparsePoint:
+    case ElevatedRefusal::kPackaged:
+      break;
+  }
+  return true;
+}
+
+HRESULT ReadAdministratorRights(bool* rights) noexcept {
+  *rights = false;
+  ElevatedEntryFacts facts;
+  RETURN_IF_FAILED(ReadEntryTokenFacts(nullptr, &facts));
+  *rights = HasAdministratorRights(facts);
+  return S_OK;
+}
+
 std::wstring_view ElevatedVerbName(ElevatedVerb verb) noexcept {
   for (const VerbName& entry : kVerbNames) {
     if (entry.verb == verb) return entry.name;
@@ -312,11 +336,13 @@ ElevatedRefusal FindElevatedRefusal(const ElevatedEntryFacts& facts) noexcept {
   if (facts.integrityRid < static_cast<DWORD>(SECURITY_MANDATORY_HIGH_RID)) {
     return ElevatedRefusal::kIntegrityBelowHigh;
   }
-  if (facts.packaged) return ElevatedRefusal::kPackaged;
   if (!facts.verb) return ElevatedRefusal::kNotOneStep;
   const bool exempt = facts.devInstall && *facts.verb == ElevatedVerb::kMachineInstall;
   if (!facts.runsFromMachineRoot && !exempt) return ElevatedRefusal::kNotFromMachineRoot;
   if (FAILED(facts.reparsePoints)) return ElevatedRefusal::kReparsePoint;
+  // Last: the only check that writes (two volatile test keys), so it runs only for a step that
+  // passed everything else.
+  if (RefusesMachineWrites(facts.machineWrites)) return ElevatedRefusal::kPackaged;
   return ElevatedRefusal::kNone;
 }
 
@@ -328,8 +354,6 @@ HRESULT CheckElevatedEntry(const ElevatedEntryFacts& facts) noexcept {
     case ElevatedRefusal::kAdministratorsNotEnabled:
     case ElevatedRefusal::kIntegrityBelowHigh:
       return kNoAdministratorRightsHr;
-    case ElevatedRefusal::kPackaged:
-      return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED_IN_APPCONTAINER);
     case ElevatedRefusal::kNotOneStep:
       return E_INVALIDARG;
     case ElevatedRefusal::kNotFromMachineRoot:
@@ -337,8 +361,22 @@ HRESULT CheckElevatedEntry(const ElevatedEntryFacts& facts) noexcept {
     case ElevatedRefusal::kReparsePoint:
       // A failure, so the step never starts on it (FindElevatedRefusal names it only then).
       return facts.reparsePoints;
+    case ElevatedRefusal::kPackaged:
+      return kBelowPackageHr;
   }
   return E_UNEXPECTED;
+}
+
+ElevatedRefusal DecideElevatedEntry(ElevatedEntryFacts* facts,
+                                    const std::function<void(MachineWriteCheck*)>& probe) noexcept {
+  ElevatedRefusal refusal = FindElevatedRefusal(*facts);
+  // Every other check passed, and only the test writes below a package are missing: they run
+  // now, once, and decide.
+  if (refusal == ElevatedRefusal::kPackaged && !facts->machineWrites.probed && probe) {
+    probe(&facts->machineWrites);
+    refusal = FindElevatedRefusal(*facts);
+  }
+  return refusal;
 }
 
 std::wstring_view ElevatedRefusalText(ElevatedRefusal refusal) noexcept {
@@ -351,16 +389,29 @@ std::wstring_view ElevatedRefusalText(ElevatedRefusal refusal) noexcept {
       return L"no administrator rights (the Administrators group is not enabled)";
     case ElevatedRefusal::kIntegrityBelowHigh:
       return L"no administrator rights (an integrity level below High)";
-    case ElevatedRefusal::kPackaged:
-      return L"inside or below an app package";
     case ElevatedRefusal::kNotOneStep:
       return L"not exactly one known step";
     case ElevatedRefusal::kNotFromMachineRoot:
       return L"not the settings executable installed for all users";
     case ElevatedRefusal::kReparsePoint:
       return L"a link or junction on the way to the install folder";
+    case ElevatedRefusal::kPackaged:
+      return L"inside or below an app package, or with the processes above it unreadable, and its "
+             L"test writes did not come back";
   }
   return {};
+}
+
+std::wstring ElevatedRefusalReason(ElevatedRefusal refusal, const ElevatedEntryFacts& facts) {
+  std::wstring reason(ElevatedRefusalText(refusal));
+  if (refusal == ElevatedRefusal::kPackaged) {
+    reason += L" (" + MachineWriteCheckText(facts.machineWrites) + L")";
+  }
+  return reason;
+}
+
+std::wstring ElevatedWritesCheckedLine(std::wstring_view step, const MachineWriteCheck& check) {
+  return L"elevated " + std::wstring(step) + L" writes checked: " + MachineWriteCheckText(check);
 }
 
 int ElevatedMain() noexcept {
@@ -368,7 +419,9 @@ int ElevatedMain() noexcept {
   HRESULT hr = GatherEntryFacts(&facts);
   ElevatedRefusal refusal = ElevatedRefusal::kNone;
   if (SUCCEEDED(hr)) {
-    refusal = FindElevatedRefusal(facts);
+    // Below an app package, the test writes run here, after every other check passed, and
+    // before anything connects to the parent's pipe.
+    refusal = DecideElevatedEntry(&facts, ProbeMachineWrites);
     hr = CheckElevatedEntry(facts);
   }
   // The report goes only to this process's own parent, so even a refusal may say why.
@@ -384,12 +437,15 @@ int ElevatedMain() noexcept {
     if (FAILED(hr)) {
       const std::wstring why = refusal == ElevatedRefusal::kNone
                                    ? std::wstring(L"its own facts could not be read")
-                                   : std::wstring(ElevatedRefusalText(refusal));
+                                   : ElevatedRefusalReason(refusal, facts);
       report.Line(L"elevated " + std::wstring(name) + L" refused hr=" + HResultText(hr) + L": " +
                   why + L" (" + tokenText + L")");
       return static_cast<int>(hr);
     }
     report.Line(L"elevated " + std::wstring(name) + L" start (" + tokenText + L")");
+    if (facts.machineWrites.probed) {
+      report.Line(ElevatedWritesCheckedLine(name, facts.machineWrites));
+    }
   } catch (...) {
     return static_cast<int>(FAILED(hr) ? hr : E_OUTOFMEMORY);
   }
@@ -779,11 +835,11 @@ bool ParseEndLine(std::wstring_view line, ElevatedVerb verb, std::optional<size_
   return true;
 }
 
-// A step that never ran: declined, not launched, or refused for want of administrator rights.
-// What came back from it is not a part of it.
+// A step that never ran: declined, not launched, or refused for want of administrator rights or
+// below an app package. What came back from it is not a part of it.
 bool StepNeverRan(const ElevatedRun& run) noexcept {
   return run.outcome == ElevatedOutcome::kCancelled || FAILED(run.launched) ||
-         LackedAdministratorRights(run);
+         LackedAdministratorRights(run) || RefusedBelowPackage(run);
 }
 
 }  // namespace
@@ -898,6 +954,11 @@ bool LackedAdministratorRights(const ElevatedRun& run) noexcept {
          run.failure == kNoAdministratorRightsHr;
 }
 
+bool RefusedBelowPackage(const ElevatedRun& run) noexcept {
+  return run.outcome == ElevatedOutcome::kFailed && SUCCEEDED(run.launched) &&
+         run.failure == kBelowPackageHr;
+}
+
 bool ReportChannelTaken(const ElevatedRun& run) noexcept {
   // A first instance fails with ERROR_ACCESS_DENIED where a pipe of the name exists already (so
   // does an instance that pipe's DACL refuses), with ERROR_PIPE_BUSY where it takes no more.
@@ -929,7 +990,12 @@ std::vector<std::wstring> NotDoneFailures(const ElevatedRun& run, std::wstring_v
 }
 
 bool NeedsStepFailure(const ElevatedRun& run) noexcept {
-  if (run.outcome != ElevatedOutcome::kFailed || LackedAdministratorRights(run)) return false;
+  // A step without administrator rights, or refused below an app package, has an exit code of
+  // its own.
+  if (run.outcome != ElevatedOutcome::kFailed || LackedAdministratorRights(run) ||
+      RefusedBelowPackage(run)) {
+    return false;
+  }
   // A launch that failed ran nothing, so nothing it reported is a part of it.
   if (FAILED(run.launched) || run.parts.named.empty()) return true;
   return run.parts.named.front().hr != run.failure;

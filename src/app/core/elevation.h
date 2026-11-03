@@ -8,17 +8,21 @@
 // - it must really have administrator rights: an elevated token (TokenElevation) with the
 //   Administrators group enabled and an integrity level of at least High (a filtered copy of an
 //   administrator's token can count as elevated without being able to write for all users);
-// - it must not run inside an app package or below a packaged process (whose file and registry
-//   views could be private copies);
 // - its command line must be exactly the step;
 // - it must itself be <FOLDERID_ProgramFiles>\<Product>\<settings exe>, where only administrators
 //   can put it (developer builds exempt machine-install, which copies a build from the folder it
 //   runs in; that folder's permissions are checked instead, file_ops.h);
 // - no reparse point may lie on the way to the install folder;
+// - below an app package (it or a parent runs in one, or the walk up its parents fails) it goes
+//   on only when test values it writes under HKEY_LOCAL_MACHINE\Software\Classes and in its own
+//   user's registry come back through WMI (context.h), since a package alone says nothing about
+//   where writes land; this check runs last, so only a step that passed everything else writes
+//   its two volatile test keys;
 // - whatever it writes machine-wide it computes itself from the files under the install folder.
-// It never writes or deletes in the user's profile (%LOCALAPPDATA%, %TEMP%, the thumbnail cache),
-// never loads the thumbnail handler, shows no window and writes no log. Its exit code is its
-// result: 0 done, 1 done but a restart is pending, else the HRESULT that failed.
+// It never writes or deletes in the user's profile (%LOCALAPPDATA%, %TEMP%, the thumbnail cache)
+// except that test key in its own registry, which it deletes again; it never loads the thumbnail
+// handler, shows no window and writes no log. Its exit code is its result: 0 done, 1 done but a
+// restart is pending, else the HRESULT that failed.
 //
 // A step that goes on after a part of it failed (the class for all users written, then the task
 // folder not made or an old build folder not removed) reports each such part as "not done:
@@ -55,6 +59,7 @@
 #include <vector>
 
 #include "cli_args.h"
+#include "context.h"
 #include "repair.h"
 
 namespace pdft {
@@ -116,12 +121,13 @@ struct ElevatedEntryFacts {
   // deny-only or disabled does not count. Program Files and HKLM let only it write.
   bool administratorsEnabled = false;
   DWORD integrityRid = 0;            // the token's mandatory level, SECURITY_MANDATORY_*_RID
-  bool packaged = false;             // this process or a parent runs in an app package
   std::optional<ElevatedVerb> verb;  // ParseElevatedArguments' answer
   bool devInstall = false;           // kDevInstall
   // This executable is <machine root>\<settings exe> (both canonicalized).
   bool runsFromMachineRoot = false;
   HRESULT reparsePoints = S_OK;  // CheckNoReparsePoints on the machine root
+  // The walk from GatherEntryFacts; the canaries only from DecideElevatedEntry.
+  MachineWriteCheck machineWrites;
 };
 
 // Reads the token part of |facts| (tokenElevated, administratorsEnabled, integrityRid) from
@@ -129,16 +135,29 @@ struct ElevatedEntryFacts {
 // opened with TOKEN_QUERY | TOKEN_DUPLICATE. The other members are left as they are.
 [[nodiscard]] HRESULT ReadEntryTokenFacts(HANDLE token, ElevatedEntryFacts* facts) noexcept;
 
+// Whether the token part of |facts| has administrator rights as the elevated side judges its own
+// token (pure): elevated, the Administrators group enabled and an integrity level of High or
+// more, the first three checks of FindElevatedRefusal.
+bool HasAdministratorRights(const ElevatedEntryFacts& facts) noexcept;
+
+// HasAdministratorRights of this thread's current token (ReadEntryTokenFacts). The steps for all
+// users that run in the installer's own process (--setup-machine, --uninstall-cleanup) check it
+// before anything else, since an elevated token alone (GetTokenElevation) does not prove these
+// rights.
+[[nodiscard]] HRESULT ReadAdministratorRights(bool* rights) noexcept;
+
 // Why the elevated side refuses a step, in the order it checks.
 enum class ElevatedRefusal {
   kNone,
   kNotElevated,               // TokenElevation says no
   kAdministratorsNotEnabled,  // the Administrators group is absent, deny-only or disabled
   kIntegrityBelowHigh,        // a mandatory integrity level below High
-  kPackaged,                  // in or below an app package
   kNotOneStep,                // not exactly one known step
   kNotFromMachineRoot,        // not the settings executable of the install for all users
   kReparsePoint,              // a link or junction on the way to the install folder
+  // below an app package (or with the processes above unreadable) where its test writes did not
+  // come back
+  kPackaged,
 };
 
 // What the elevated side refuses with when its token cannot write for all users (not elevated,
@@ -150,30 +169,54 @@ enum class ElevatedRefusal {
 inline constexpr HRESULT kNoAdministratorRightsHr =
     MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x2E4);
 
+// The elevated side's refusal below an app package (or where it cannot read the processes above
+// it) when its test writes did not come back: HRESULT_FROM_WIN32(
+// ERROR_NOT_SUPPORTED_IN_APPCONTAINER), the code earlier builds refused every step below a package
+// with, so that parents of either build tell it apart. The commands exit 8.
+inline constexpr HRESULT kBelowPackageHr =
+    MAKE_HRESULT(SEVERITY_ERROR, FACILITY_WIN32, ERROR_NOT_SUPPORTED_IN_APPCONTAINER);
+
 // The refusal for |facts| (pure), checked in this order:
 //   not elevated                       kNoAdministratorRightsHr
 //   Administrators not enabled         kNoAdministratorRightsHr
 //   integrity below High               kNoAdministratorRightsHr
-//   in or below an app package         HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED_IN_APPCONTAINER)
 //   not exactly one known step         E_INVALIDARG
 //   not run from the machine root      E_ACCESSDENIED (machine-install in developer builds is
 //                                      exempt)
 //   a reparse point on the way         facts.reparsePoints
+//   below an app package whose test    kBelowPackageHr (RefusesMachineWrites: below a package,
+//   writes did not come back           unless both canaries ran and came back)
 // FindElevatedRefusal names it (kNone when it may go ahead); CheckElevatedEntry gives its
 // HRESULT (S_OK when it may go ahead).
 ElevatedRefusal FindElevatedRefusal(const ElevatedEntryFacts& facts) noexcept;
 HRESULT CheckElevatedEntry(const ElevatedEntryFacts& facts) noexcept;
 
+// FindElevatedRefusal; where the only refusal left is kPackaged not yet probed, runs |probe| on
+// facts->machineWrites once and decides again. Pure but for |probe| (ElevatedMain passes
+// ProbeMachineWrites).
+ElevatedRefusal DecideElevatedEntry(ElevatedEntryFacts* facts,
+                                    const std::function<void(MachineWriteCheck*)>& probe) noexcept;
+
 // What the report's refusal line says about |refusal| (pure; never a path): "no administrator
 // rights (not elevated)", "no administrator rights (the Administrators group is not enabled)",
-// ..., "inside or below an app package", ...; empty for kNone.
+// ..., "inside or below an app package, or with the processes above it unreadable, and its test
+// writes did not come back", ...; empty for kNone.
 std::wstring_view ElevatedRefusalText(ElevatedRefusal refusal) noexcept;
 
+// ElevatedRefusalText, with MachineWriteCheckText of |facts| in brackets for kPackaged (pure).
+// May throw std::bad_alloc.
+std::wstring ElevatedRefusalReason(ElevatedRefusal refusal, const ElevatedEntryFacts& facts);
+
+// "elevated <step> writes checked: <MachineWriteCheckText>" (pure): the report line of a step
+// that ran its canaries and went on. May throw std::bad_alloc.
+std::wstring ElevatedWritesCheckedLine(std::wstring_view step, const MachineWriteCheck& check);
+
 // The elevated process (--elevated <step>): reads its own command line and context, checks them
-// (CheckElevatedEntry), reports through the parent's pipe if there is one, and runs the step.
-// Returns the process exit code: 0, 1 (done, restart pending) or the failing HRESULT. The
-// report's first line ("elevated <step> start", or "... refused hr=<HRESULT>: <why>" with
-// ElevatedRefusalText) ends with its token's facts (TokenFactsText). After the step's own lines
+// (DecideElevatedEntry, CheckElevatedEntry), reports through the parent's pipe if there is one,
+// and runs the step. Returns the process exit code: 0, 1 (done, restart pending) or the failing
+// HRESULT. The report's first line ("elevated <step> start", or "... refused hr=<HRESULT>: <why>"
+// with ElevatedRefusalReason) ends with its token's facts (TokenFactsText); a step that tested
+// its writes and went on says so next (ElevatedWritesCheckedLine). After the step's own lines
 // come one NotDoneLine per part it did not complete, then, for a step that fails, where its
 // failure started ("elevated <step> failed in <part> at <file>:<line> <function> hr=<HRESULT>",
 // failure_trace.h, with " (end hr differs)" when the step returned another HRESULT), and last
@@ -374,6 +417,11 @@ struct ElevatedRun {
 // (pure).
 bool LackedAdministratorRights(const ElevatedRun& run) noexcept;
 
+// Whether |run| failed because the step refused to run below an app package: it was launched and
+// the elevated process itself exited with kBelowPackageHr (pure). A step of an earlier build
+// refuses so below any package, one of this build where its test writes did not come back.
+bool RefusedBelowPackage(const ElevatedRun& run) noexcept;
+
 // Whether |run| had no report channel because another process had made a pipe of its name
 // first: making it failed with HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED) or ERROR_PIPE_BUSY
 // (pure). The step ran all the same and its exit code still tells how it ended; only its own
@@ -383,7 +431,7 @@ bool ReportChannelTaken(const ElevatedRun& run) noexcept;
 
 // How many parts |run|'s report says the step did not complete (pure): its count, or the parts
 // it names when they are more; 0 for a step that never ran (declined, not launched, no
-// administrator rights).
+// administrator rights, refused below an app package).
 size_t CountPartsNotDone(const ElevatedRun& run) noexcept;
 // CountPartsNotDone(|run|) > 0 (pure).
 bool PartsNotDone(const ElevatedRun& run) noexcept;
@@ -391,14 +439,14 @@ bool PartsNotDone(const ElevatedRun& run) noexcept;
 // The failures of the command for the parts |run|'s step did not complete, whatever its exit code
 // says (pure): "<step> <part>: <HRESULT>" per named part, then "<step> unnamed parts: <n> (see the
 // step's report)" for parts counted but not named; none for a step that never ran (declined, not
-// launched, no administrator rights). May throw std::bad_alloc.
+// launched, no administrator rights, refused below an app package). May throw std::bad_alloc.
 std::vector<std::wstring> NotDoneFailures(const ElevatedRun& run, std::wstring_view step);
 
 // For the steps that exit with their first part's HRESULT (machine-uninstall,
 // machine-migrate-v1): whether the command still needs the failure "<step>: <HRESULT>" (pure).
-// True for a failed run (a failed launch included) unless it lacked administrator rights or its
-// first named part has the HRESULT it exited with. A failed step always keeps one entry: this
-// one or its parts.
+// True for a failed run (a failed launch included) unless it lacked administrator rights, refused
+// below an app package (both have exit codes of their own) or its first named part has the
+// HRESULT it exited with. Any other failed step always keeps one entry: this one or its parts.
 bool NeedsStepFailure(const ElevatedRun& run) noexcept;
 
 // Done (kDone, kRestartPending) without its end line as the report's last line (pure): no

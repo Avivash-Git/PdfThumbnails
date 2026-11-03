@@ -416,8 +416,7 @@ TEST_P(Exes, ElevatedStepRefusedOutsideTheInstallFolder) {
   }
   ElevatedEntryFacts facts;
   ASSERT_HRESULT_SUCCEEDED(ReadEntryTokenFacts(nullptr, &facts));
-  std::optional<std::wstring> package;
-  facts.packaged = FAILED(FindPackagedAncestor(&package)) || package.has_value();
+  ReadPackageAbove(&facts.machineWrites);
   facts.verb = ElevatedVerb::kMachineRepairClass;
   facts.runsFromMachineRoot = false;
   const ElevatedRefusal refusal = FindElevatedRefusal(facts);
@@ -426,6 +425,10 @@ TEST_P(Exes, ElevatedStepRefusedOutsideTheInstallFolder) {
               refusal == ElevatedRefusal::kNone ? L"none" : ElevatedRefusalText(refusal).data(),
               run.exitCode);
   EXPECT_NE(refusal, ElevatedRefusal::kNone);
+  // The refusal these facts give comes before the package check, which is the last one, and the
+  // exit code below shows that the child refused with it too. That a step refused this early
+  // makes no test writes is DecideElevatedEntry's order (unit-tested): this test cannot see them.
+  EXPECT_NE(refusal, ElevatedRefusal::kPackaged);
   EXPECT_EQ(run.exitCode, static_cast<DWORD>(CheckElevatedEntry(facts)));
   EXPECT_EQ(run.out, "");
   EXPECT_EQ(run.err, "");

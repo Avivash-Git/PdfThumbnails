@@ -15,7 +15,9 @@ enum class ExitCode : int {
   kFailed = 5,        // failed; the log has the HRESULT
   kNotInstalled = 6,  // the product is not installed
   kNeedsAdmin = 7,    // needs administrator rights, and nobody can be asked (or UAC gave none)
-  kWrongContext = 8,  // cannot run here (a virtualized container, or elevated where refused)
+  // cannot run here (a virtualized container, a step for all users whose test writes did not
+  // reach Windows, or elevated where refused)
+  kWrongContext = 8,
 };
 
 // One row of the exit-code table that --help prints.
@@ -38,7 +40,8 @@ inline constexpr ExitCodeInfo kExitCodes[] = {
      L"needs administrator rights, and nobody can be asked (or the step for all users did not "
      L"get them)"},
     {ExitCode::kWrongContext,
-     L"cannot run here (an app container that virtualizes the registry, or elevated where that is "
+     L"cannot run here (an app container that virtualizes the registry, a step for all users "
+     L"below an app package whose test writes did not reach Windows, or elevated where that is "
      L"refused)"},
 };
 

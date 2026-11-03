@@ -1,8 +1,9 @@
 // The install and uninstall side's pure parts: the files of a build and what of them is held for
-// the copy, the versions it installs, how the administrator step's outcome becomes --install's
-// exit code (a step without administrator rights included), the class path the elevated side may
-// write for all users, the user hives it cleans, the per-user files the uninstall removes, the
-// trash folders the status reports, and the texts of --install, --uninstall and --zoom.
+// the copy, the versions it installs, how the administrator step's outcome becomes --install's exit
+// code (a step without administrator rights, or refused below an app package, included), the class
+// path the elevated side may write for all users, the user hives it cleans, the per-user files the
+// uninstall removes, the trash folders the status reports, and the texts of --install, --uninstall,
+// --uninstall-cleanup and --zoom.
 
 #include <windows.h>
 
@@ -66,18 +67,36 @@ TEST(Install, InstallableVersions) {
   EXPECT_FALSE(IsInstallableVersion(L"2.0.0.0.0"));
 }
 
+// A run that was launched (|launched| S_OK) or not, and ended with |exitCode|, read the way
+// RunElevated reads it.
+ElevatedRun StepRun(DWORD exitCode, HRESULT launched = S_OK) {
+  ElevatedRun run;
+  run.launched = launched;
+  run.exitCode = exitCode;
+  run.outcome = ClassifyElevatedExit(launched, exitCode, &run.failure);
+  return run;
+}
+
 TEST(Install, StepExitCodes) {
-  EXPECT_FALSE(InstallStepExitCode(ElevatedOutcome::kDone, S_OK));
+  EXPECT_FALSE(InstallStepExitCode(StepRun(0)));
   // A restart pending is no exit code of its own: the status reports it.
-  EXPECT_FALSE(InstallStepExitCode(ElevatedOutcome::kRestartPending, S_OK));
-  EXPECT_EQ(InstallStepExitCode(ElevatedOutcome::kCancelled, S_OK), ExitCode::kCancelled);
-  EXPECT_EQ(InstallStepExitCode(ElevatedOutcome::kFailed, kUnsafeBuildFolderHr),
+  EXPECT_FALSE(InstallStepExitCode(StepRun(1)));
+  EXPECT_EQ(InstallStepExitCode(StepRun(0, HRESULT_FROM_WIN32(ERROR_CANCELLED))),
+            ExitCode::kCancelled);
+  EXPECT_EQ(InstallStepExitCode(StepRun(static_cast<DWORD>(kUnsafeBuildFolderHr))),
             ExitCode::kWrongContext);
-  EXPECT_EQ(InstallStepExitCode(ElevatedOutcome::kFailed, E_ACCESSDENIED), ExitCode::kFailed);
-  EXPECT_EQ(InstallStepExitCode(ElevatedOutcome::kFailed, E_UNEXPECTED), ExitCode::kFailed);
+  EXPECT_EQ(InstallStepExitCode(StepRun(static_cast<DWORD>(E_ACCESSDENIED))), ExitCode::kFailed);
+  EXPECT_EQ(InstallStepExitCode(StepRun(static_cast<DWORD>(E_UNEXPECTED))), ExitCode::kFailed);
   // Started without administrator rights: neither a declined prompt nor an unsafe folder.
-  EXPECT_EQ(InstallStepExitCode(ElevatedOutcome::kFailed, kNoAdministratorRightsHr),
+  EXPECT_EQ(InstallStepExitCode(StepRun(static_cast<DWORD>(kNoAdministratorRightsHr))),
             ExitCode::kNeedsAdmin);
+  // Refused below an app package: cannot run here, like an unsafe folder.
+  EXPECT_EQ(InstallStepExitCode(StepRun(static_cast<DWORD>(kBelowPackageHr))),
+            ExitCode::kWrongContext);
+  // The step's own codes count only from a step that was launched: a launch that failed with one
+  // of them ran nothing and failed.
+  EXPECT_EQ(InstallStepExitCode(StepRun(0, kUnsafeBuildFolderHr)), ExitCode::kFailed);
+  EXPECT_EQ(InstallStepExitCode(StepRun(0, kBelowPackageHr)), ExitCode::kFailed);
 }
 
 // What a command says for an administrator step that is done: with a restart pending, and with
@@ -110,6 +129,15 @@ TEST(Install, NoAdministratorRightsMessage) {
   const std::wstring text = NoAdministratorRightsMessage();
   EXPECT_EQ(text.rfind(L"The step for all users did not get administrator rights", 0), 0u);
   EXPECT_EQ(text.find(L"declined"), std::wstring::npos);
+}
+
+// Says that nothing changed and where to run the command instead; true of a step of an earlier
+// build (refused below any package) and of this one (its test writes did not come back).
+TEST(Install, BelowPackageRefusalMessage) {
+  const std::wstring text = BelowPackageRefusalMessage();
+  EXPECT_NE(text.find(L"changed nothing"), std::wstring::npos) << WideToUtf8Lossy(text);
+  EXPECT_NE(text.find(L"Win+R"), std::wstring::npos) << WideToUtf8Lossy(text);
+  EXPECT_NE(text.find(L"app package"), std::wstring::npos) << WideToUtf8Lossy(text);
 }
 
 TEST(Install, MachineClassPath) {
@@ -301,6 +329,23 @@ TEST(UninstallTexts, Report) {
   EXPECT_EQ(lines[1], L"  " + result.run->report[0]);
   EXPECT_NE(lines[2].find(L"still installed"), std::wstring::npos);
 
+  // Refused below an app package: said so, with where to run it again, then the step's own
+  // refusal line.
+  result = UninstallResult{};
+  result.run = ElevatedRun{};
+  result.run->outcome = ElevatedOutcome::kFailed;
+  result.run->failure = kBelowPackageHr;
+  result.run->report = {
+      L"elevated machine-uninstall refused hr=0x8007109C: inside or below an app package"};
+  result.machineLeft = true;
+  lines = UninstallReport(result);
+  ASSERT_EQ(lines.size(), 3u);
+  EXPECT_EQ(lines[0].rfind(BelowPackageRefusalMessage(), 0), 0u) << WideToUtf8Lossy(lines[0]);
+  EXPECT_NE(lines[0].find(L"stays"), std::wstring::npos);
+  EXPECT_NE(lines[0].find(L"--uninstall again"), std::wstring::npos);
+  EXPECT_EQ(lines[1], L"  " + result.run->report[0]);
+  EXPECT_NE(lines[2].find(L"still installed"), std::wstring::npos);
+
   result = UninstallResult{};
   result.machineNoProgram = true;
   result.machineLeft = true;
@@ -370,6 +415,55 @@ TEST(UninstallTexts, AReportChannelTakenByAnotherProcess) {
   for (const std::wstring& line : UninstallReport(result)) {
     EXPECT_NE(line, ReportChannelTakenMessage());
   }
+}
+
+// --uninstall-cleanup says nothing when it did everything; otherwise its error output says what
+// it left out and why, each failure, and that it stopped early.
+TEST(UninstallTexts, CleanupSaysWhatItLeftOut) {
+  UninstallCleanupResult result;
+  result.userPart = true;
+  result.machinePart = true;
+  EXPECT_TRUE(UninstallCleanupErrors(S_OK, result).empty());
+
+  // Below an app package where its test writes did not come back: the part for all users is left
+  // out, and so is this account's, whose registry check found its writes virtualized.
+  result = UninstallCleanupResult{};
+  result.machineRefused = true;
+  result.machineWrites.packageAbove = true;
+  result.machineWrites.probed = true;
+  result.machineWrites.machine = Virtualization::kYes;
+  result.machineWrites.user = Virtualization::kYes;
+  result.userWrites = Virtualization::kYes;
+  result.failures = {L"machine: " + HResultText(kBelowPackageHr)};
+  std::vector<std::wstring> lines = UninstallCleanupErrors(S_OK, result);
+  ASSERT_EQ(lines.size(), 3u);
+  EXPECT_EQ(lines[0],
+            L"The part for all users was left out: started below an app package (or unable to "
+            L"read the processes above it), its test writes did not come back through WMI (app "
+            L"package above; HKLM virtualized, HKCU virtualized).");
+  EXPECT_EQ(lines[1],
+            L"The part for this account was left out: the registry check (a test value written "
+            L"here and read back through WMI) did not show that changes made from here would "
+            L"reach Windows (virtualized=yes).");
+  EXPECT_EQ(lines[2], L"Not done: machine: 0x8007109C");
+
+  // A registry check that failed as a whole names its failure.
+  result = UninstallCleanupResult{};
+  result.userProbeError = static_cast<HRESULT>(0x80041003);
+  lines = UninstallCleanupErrors(S_OK, result);
+  ASSERT_EQ(lines.size(), 1u);
+  EXPECT_NE(lines[0].find(L"(virtualized=unknown, probe-hr=0x80041003)."), std::wstring::npos)
+      << WideToUtf8Lossy(lines[0]);
+
+  // Stopped early: said with its HRESULT, before the failures; a per-user part it may never have
+  // reached is not put down to the registry check.
+  result = UninstallCleanupResult{};
+  result.machinePart = true;
+  result.failures = {L"machine class: 0x80070005"};
+  lines = UninstallCleanupErrors(E_OUTOFMEMORY, result);
+  ASSERT_EQ(lines.size(), 2u);
+  EXPECT_EQ(lines[0], L"The clean-up stopped early: 0x8007000E");
+  EXPECT_EQ(lines[1], L"Not done: machine class: 0x80070005");
 }
 
 TEST(ZoomTexts, OriginAndSaved) {

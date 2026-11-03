@@ -1,6 +1,7 @@
-// The process context against the real system (context.h). Writes only the canary's volatile
-// probe key under HKCU\Software, and checks that the key it used is gone afterwards in both
-// registry views.
+// The process context against the real system (context.h). Writes only the canaries' volatile
+// probe keys: under HKCU\Software, and elevated also under HKEY_LOCAL_MACHINE\Software\Classes
+// (unelevated that key cannot be made); and checks that each key it used is gone afterwards in
+// both registry views.
 //
 // Whether this process runs in an app container depends on where the tests run: on CI it does
 // not; started from a terminal inside a packaged app it may. The tests therefore check that the
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "child_process.h"
+#include "elevation.h"
 #include "instance.h"
 #include "medium_il.h"
 #include "project_config.h"
@@ -79,6 +81,34 @@ void ExpectProbeKeyGone(const std::wstring& sid, const std::wstring& key) {
   for (const std::wstring& name : names) {
     EXPECT_FALSE(IEquals(name, leaf)) << WideToUtf8Lossy(name);
   }
+}
+
+// The same for the probe key |key| under HKEY_LOCAL_MACHINE (its 64-bit view).
+void ExpectMachineProbeKeyGone(const std::wstring& key) {
+  HKEY opened = nullptr;
+  EXPECT_EQ(
+      RegOpenKeyExW(HKEY_LOCAL_MACHINE, key.c_str(), 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &opened),
+      static_cast<LSTATUS>(ERROR_FILE_NOT_FOUND))
+      << WideToUtf8Lossy(key);
+  if (opened) RegCloseKey(opened);
+
+  const size_t slash = key.find_last_of(L'\\');
+  ASSERT_NE(slash, std::wstring::npos);
+  const std::wstring parent = key.substr(0, slash);
+  const std::wstring leaf = key.substr(slash + 1);
+  EXPECT_EQ(parent, L"Software\\Classes");
+  RegistryThroughWmi wmi;
+  ASSERT_HRESULT_SUCCEEDED(wmi.Connect());
+  std::vector<std::wstring> names;
+  ASSERT_HRESULT_SUCCEEDED(wmi.EnumKeys(RegistryThroughWmi::kLocalMachine, parent, &names));
+  for (const std::wstring& name : names) {
+    EXPECT_FALSE(IEquals(name, leaf)) << WideToUtf8Lossy(name);
+  }
+}
+
+bool TokenElevated() {
+  bool elevated = false;
+  return SUCCEEDED(GetTokenElevation(&elevated)) && elevated;
 }
 
 TEST(Context, AncestorWalkAgreesWithAGrandchild) {
@@ -153,6 +183,48 @@ TEST(Context, WriteCanaryLeavesNoProbeKeyAndAgreesWithTheAncestor) {
     // registry), but WMI must have answered.
     EXPECT_NE(virtualization, Virtualization::kUnknown) << WideToUtf8Lossy(HResultText(failure));
   }
+}
+
+// The canary of a step for all users, under HKEY_LOCAL_MACHINE\Software\Classes. Unelevated the
+// key cannot be made, so the verdict cannot be "real"; elevated without a package above (CI) it
+// must be.
+TEST(Context, MachineCanaryLeavesNoProbeKey) {
+  Virtualization virtualization = Virtualization::kNo;
+  HRESULT failure = E_UNEXPECTED;
+  std::wstring probeKey;
+  ASSERT_HRESULT_SUCCEEDED(
+      ProbeMachineRegistryVirtualization(&virtualization, &failure, &probeKey));
+  EXPECT_EQ(probeKey.rfind(L"Software\\Classes\\" + std::wstring(kProductName) + L".probe-", 0), 0u)
+      << WideToUtf8Lossy(probeKey);
+  ExpectMachineProbeKeyGone(probeKey);
+  if (virtualization != Virtualization::kUnknown) EXPECT_EQ(failure, S_OK);
+  const bool elevated = TokenElevated();
+  const std::optional<std::wstring> ancestor = OwnAncestor();
+  std::printf("machine canary (%s): %ls, hr %ls (packaged ancestor: %ls)\n",
+              elevated ? "elevated" : "unelevated", Name(virtualization),
+              HResultText(failure).c_str(), ancestor ? ancestor->c_str() : L"none");
+  if (!elevated) {
+    EXPECT_NE(virtualization, Virtualization::kNo) << WideToUtf8Lossy(HResultText(failure));
+  } else if (!ancestor) {
+    EXPECT_EQ(virtualization, Virtualization::kNo) << WideToUtf8Lossy(HResultText(failure));
+    if (virtualization == Virtualization::kNo) {
+      std::printf("[ context ] machine canary (elevated): real\n");
+    }
+  }
+}
+
+// A step for all users tests its writes only below a package, or where the walk up its parents
+// failed; the walk agrees with the ancestor this process finds.
+TEST(Context, MachineWriteCheckProbesOnlyBelowAPackage) {
+  MachineWriteCheck check;
+  CheckMachineWrites(&check);
+  EXPECT_EQ(check.probed, BelowPackage(check));
+  if (SUCCEEDED(check.walk)) EXPECT_EQ(check.packageAbove, OwnAncestor().has_value());
+  if (!check.probed) {
+    EXPECT_EQ(check.machine, Virtualization::kUnknown);
+    EXPECT_EQ(check.user, Virtualization::kUnknown);
+  }
+  std::printf("machine write check: %ls\n", MachineWriteCheckText(check).c_str());
 }
 
 TEST(Context, ReadOnlyCheckAgreesWithTheAncestor) {

@@ -532,8 +532,9 @@ HRESULT Uninstall(const UninstallOptions& options, const RegistryRoots& roots,
       ElevatedRun run;
       RETURN_IF_FAILED(
           RunElevated(ElevatedVerb::kMachineUninstall, exe, options.owner, options.launcher, &run));
-      // A step that did not get administrator rights has an exit code of its own. One that
-      // names its parts lists them instead of the HRESULT it ended with.
+      // A step that did not get administrator rights, or refused below an app package, has an
+      // exit code of its own. One that names its parts lists them instead of the HRESULT it
+      // ended with.
       if (NeedsStepFailure(run)) Failed(&failures, L"machine", run.failure);
       for (std::wstring& failure : NotDoneFailures(run, L"machine")) {
         failures.push_back(std::move(failure));
@@ -547,10 +548,11 @@ HRESULT Uninstall(const UninstallOptions& options, const RegistryRoots& roots,
 
   Log(failures.empty() ? LogLevel::kInfo : LogLevel::kWarning, kLogComponent,
       std::wstring(L"uninstall machine=") +
-          (!result->machinePart  ? L"none"
-           : result->machineLeft ? L"left"
-           : result->run         ? L"removed"
-                                 : L"none") +
+          (!result->machinePart                               ? L"none"
+           : result->run && RefusedBelowPackage(*result->run) ? L"refused"
+           : result->machineLeft                              ? L"left"
+           : result->run                                      ? L"removed"
+                                                              : L"none") +
           L" failures=" + std::to_wstring(failures.size()));
 
   // 3. This user's files, the log's folder included: nothing is logged after this.
@@ -562,6 +564,8 @@ HRESULT Uninstall(const UninstallOptions& options, const RegistryRoots& roots,
     result->code = ExitCode::kFailed;
   } else if (result->run && LackedAdministratorRights(*result->run)) {
     result->code = ExitCode::kNeedsAdmin;
+  } else if (result->run && RefusedBelowPackage(*result->run)) {
+    result->code = ExitCode::kWrongContext;
   } else if (result->machineLeft) {
     result->code = ExitCode::kProblems;
   } else {
@@ -586,26 +590,46 @@ HRESULT UninstallCleanup(const UninstallCleanupOptions& options, const RegistryR
   std::filesystem::path dataDir = options.dataDir;
   if (dataDir.empty()) RETURN_IF_FAILED(GetDataDir(&dataDir));
 
-  // The part for all users: only elevated, and never inside or below an app package, whose file
-  // and registry views could be private copies (a walk that fails counts as packaged).
+  // The part for all users: only elevated, with the administrator rights the elevated side
+  // requires of its own token; below an app package, or where the processes above it cannot be
+  // read, whose file and registry views could be private copies, only where its own test writes
+  // reach Windows.
   bool elevated = false;
   RETURN_IF_FAILED(GetTokenElevation(&elevated));
-  std::optional<std::wstring> package;
-  if (options.runMachinePart && elevated && SUCCEEDED(FindPackagedAncestor(&package)) && !package) {
-    MachineUninstallOptions machine = options.machine;
-    if (machine.machineRoot.empty()) machine.machineRoot = paths.machineRoot;
-    if (machine.legacyMachineRoot.empty()) machine.legacyMachineRoot = paths.legacyMachineRoot;
-    if (const HRESULT hr = UninstallForAllUsers(machine, roots, &result->machine); FAILED(hr)) {
-      Failed(&failures, L"machine", hr);
+  if (options.runMachinePart && elevated) {
+    bool rights = false;
+    const HRESULT read = ReadAdministratorRights(&rights);
+    if (FAILED(read) || !rights) {
+      // An elevated token alone does not prove these rights; nothing is tested or written then.
+      Failed(&failures, L"machine", FAILED(read) ? read : kNoAdministratorRightsHr);
+    } else {
+      if (options.machineWrites) {
+        result->machineWrites = *options.machineWrites;
+      } else {
+        CheckMachineWrites(&result->machineWrites);
+      }
+      if (RefusesMachineWrites(result->machineWrites)) {
+        result->machineRefused = true;
+        Failed(&failures, L"machine", kBelowPackageHr);
+      } else {
+        MachineUninstallOptions machine = options.machine;
+        if (machine.machineRoot.empty()) machine.machineRoot = paths.machineRoot;
+        if (machine.legacyMachineRoot.empty()) machine.legacyMachineRoot = paths.legacyMachineRoot;
+        if (const HRESULT hr = UninstallForAllUsers(machine, roots, &result->machine); FAILED(hr)) {
+          Failed(&failures, L"machine", hr);
+        }
+        failures.insert(failures.end(), result->machine.failures.begin(),
+                        result->machine.failures.end());
+        result->machinePart = true;
+      }
     }
-    failures.insert(failures.end(), result->machine.failures.begin(),
-                    result->machine.failures.end());
-    result->machinePart = true;
   }
 
   // The per-user part, only where this process's registry writes reach the real hive.
   ProcessContext context;
   RETURN_IF_FAILED(probes.GetProcessContext(ContextProbe::kWrite, &context));
+  result->userWrites = context.virtualization;
+  result->userProbeError = context.probeError;
   if (context.probe == ContextProbe::kWrite && !RefusesWrites(context.virtualization)) {
     Snapshot snapshot;
     if (context.elevated || elevated) {

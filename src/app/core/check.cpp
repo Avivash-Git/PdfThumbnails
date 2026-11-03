@@ -247,6 +247,8 @@ HRESULT RunCheck(const CheckOptions& options, const RegistryRoots& roots,
     result->code = ExitCode::kCancelled;
   } else if (result->elevated && LackedAdministratorRights(*result->elevated)) {
     result->code = ExitCode::kNeedsAdmin;
+  } else if (result->elevated && RefusedBelowPackage(*result->elevated)) {
+    result->code = ExitCode::kWrongContext;
   } else if (result->elevated && result->elevated->outcome == ElevatedOutcome::kFailed) {
     result->code = ExitCode::kFailed;
   }

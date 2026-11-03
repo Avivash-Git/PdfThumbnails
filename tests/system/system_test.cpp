@@ -221,12 +221,15 @@ struct Status {
 
 // What the asking process's log says about the last run of an administrator step: its report's
 // first line ("elevated <step> start (token: ...)", or "... refused hr=<HRESULT>: <why> (token:
-// ...)"), its end line ("elevated <step> end hr=<HRESULT>[ restart-pending] not-done=<n>") and
-// the line RunElevated logs after the report ("<step> launch=<HRESULT> exit=<HRESULT>", with
-// " no-report" when nothing came through the pipe, " report-incomplete" when its end did not,
-// and " not-done=<n>" when it did not complete some of its parts). Empty when missing.
+// ...)"), the line of a step that tested its writes below an app package ("elevated <step> writes
+// checked: ..."), its end line ("elevated <step> end hr=<HRESULT>[ restart-pending]
+// not-done=<n>") and the line RunElevated logs after the report ("<step> launch=<HRESULT>
+// exit=<HRESULT>", with " no-report" when nothing came through the pipe, " report-incomplete"
+// when its end did not, and " not-done=<n>" when it did not complete some of its parts). Empty
+// when missing.
 struct StepLog {
   std::string first;
+  std::string writesChecked;
   std::string end;
   std::string summary;
 };
@@ -418,6 +421,8 @@ class System : public ::testing::Test {
       }
     }
     if (first != std::string::npos) step.first = LineAt(text, first);
+    const size_t checked = text.rfind("elevated " + name + " writes checked: ", summary);
+    if (checked != std::string::npos && checked >= from) step.writesChecked = LineAt(text, checked);
     const size_t end = text.rfind("elevated " + name + " end hr=", summary);
     if (end != std::string::npos && end >= from) step.end = LineAt(text, end);
     return step;
@@ -617,11 +622,15 @@ class System : public ::testing::Test {
   // pipe's server, so this proves that UAC makes the asking process the parent. The first line
   // is printed too: it tells what token UAC gave the step. Its report came back whole, with every
   // part done: the end line counts none ("not-done=0"), which the elevated step writes itself,
-  // and the summary says neither "not-done=" nor "report-incomplete".
+  // and the summary says neither "not-done=" nor "report-incomplete". Nothing above the step is
+  // packaged here, so it tested no writes of its own (no "writes checked" line).
   void ExpectReportThroughThePipe(std::wstring_view verb) {
     ASSERT_TRUE(Exists(UserLog())) << Text(UserLog().native());
     const StepLog step = ReadStepLog(verb);
     if (!step.first.empty()) std::printf("[ system ] log: %s\n", step.first.c_str());
+    if (!step.writesChecked.empty()) {
+      std::printf("[ system ] log: %s\n", step.writesChecked.c_str());
+    }
     if (!step.end.empty()) std::printf("[ system ] log: %s\n", step.end.c_str());
     if (!step.summary.empty()) std::printf("[ system ] log: %s\n", step.summary.c_str());
     const bool reported = !step.first.empty() && !step.summary.empty() &&
@@ -636,6 +645,7 @@ class System : public ::testing::Test {
         << "the step's end line: " << (step.end.empty() ? "(none)" : step.end);
     EXPECT_EQ(step.summary.find(" not-done="), std::string::npos) << step.summary;
     EXPECT_EQ(step.summary.find(" report-incomplete"), std::string::npos) << step.summary;
+    EXPECT_TRUE(step.writesChecked.empty()) << step.writesChecked;
   }
 
   // Nothing of the product is left; trash folders only where they are queued for deletion at the
@@ -893,14 +903,16 @@ TEST_F(System, MigrateV1RemovesWhat11Left) {
 
 // --uninstall-cleanup, as an installer's uninstaller runs it (elevated, here as this process,
 // another account than the user's): the part for all users and the loaded user hives (the test
-// account's among them), exit 0; the data folder is the signed-in user's, left to their own
-// uninstall or a sign-in clean-up.
+// account's among them), exit 0, with nothing left out or failed on its error output; the data
+// folder is the signed-in user's, left to their own uninstall or a sign-in clean-up.
 TEST_F(System, UninstallCleanupAsTheInstallersUninstaller) {
   const Outcome install = User(Cli(), L"--install --machine");
   ASSERT_NO_FATAL_FAILURE(ExpectAdministratorRights(L"machine-install", install));
   ExpectInstalledForAllUsers();
 
-  EXPECT_EQ(Admin(InstalledCli(), L"--uninstall-cleanup").exitCode, 0u);
+  const Outcome cleanup = Admin(InstalledCli(), L"--uninstall-cleanup");
+  EXPECT_EQ(cleanup.exitCode, 0u);
+  EXPECT_EQ(cleanup.Output(), "");
   EXPECT_FALSE(ClassDll(Scope::kMachine).has_value());
   EXPECT_EQ(TaskFolderExists(kTaskFolder), std::optional<bool>(false));
   EXPECT_FALSE(UserTask().exists);

@@ -1,6 +1,7 @@
 // The pure decisions behind the process context and the commands (context.h, commands.h,
-// instance.h): registry virtualization verdicts, the refusal message, named-object descriptors
-// and names, and what a refused creation of a named mutex means.
+// instance.h): registry virtualization verdicts (the elevated side's below an app package too),
+// the refusal message, named-object descriptors and names, and what a refused creation of a
+// named mutex means.
 
 #include <windows.h>
 
@@ -35,6 +36,62 @@ TEST(Virtualization, UnknownCountsAsYesForWrites) {
   EXPECT_FALSE(RefusesWrites(kNo));
   EXPECT_TRUE(RefusesWrites(kYes));
   EXPECT_TRUE(RefusesWrites(kUnknown));
+}
+
+MachineWriteCheck Above(bool packageAbove, HRESULT walk) {
+  MachineWriteCheck check;
+  check.packageAbove = packageAbove;
+  check.walk = walk;
+  return check;
+}
+
+MachineWriteCheck Probed(MachineWriteCheck check, Virtualization machine, Virtualization user,
+                         HRESULT probeError = S_OK) {
+  check.probed = true;
+  check.machine = machine;
+  check.user = user;
+  check.probeError = probeError;
+  return check;
+}
+
+// A step for all users refuses below a package (or where the walk failed) unless both of its test
+// writes came back real; without one, whatever the canaries would say.
+TEST(Virtualization, MachineWrites) {
+  struct Row {
+    const char* name;
+    MachineWriteCheck check;
+    bool below;
+    bool refuses;
+  };
+  const Row rows[] = {
+      {"NoPackage", Above(false, S_OK), false, false},
+      {"NoPackageVirtualized", Probed(Above(false, S_OK), kYes, kYes), false, false},
+      {"PackageNotChecked", Above(true, S_OK), true, true},
+      {"WalkFailedNotChecked", Above(false, E_ACCESSDENIED), true, true},
+      {"PackageBothReal", Probed(Above(true, S_OK), kNo, kNo), true, false},
+      {"WalkFailedBothReal", Probed(Above(false, E_ACCESSDENIED), kNo, kNo), true, false},
+      {"PackageMachineVirtualized", Probed(Above(true, S_OK), kYes, kNo), true, true},
+      {"PackageUserVirtualized", Probed(Above(true, S_OK), kNo, kYes), true, true},
+      {"PackageMachineUnknown", Probed(Above(true, S_OK), kUnknown, kNo), true, true},
+      {"PackageUserUnknown", Probed(Above(true, S_OK), kNo, kUnknown), true, true},
+  };
+  for (const Row& row : rows) {
+    EXPECT_EQ(BelowPackage(row.check), row.below) << row.name;
+    EXPECT_EQ(RefusesMachineWrites(row.check), row.refuses) << row.name;
+  }
+}
+
+// What a step reports about its context: never a package name or a path.
+TEST(Virtualization, MachineWriteCheckText) {
+  EXPECT_EQ(MachineWriteCheckText(Above(false, S_OK)), L"no app package above");
+  EXPECT_EQ(MachineWriteCheckText(Above(true, S_OK)), L"app package above; not checked");
+  EXPECT_EQ(MachineWriteCheckText(Probed(Above(true, S_OK), kNo, kNo)),
+            L"app package above; HKLM real, HKCU real");
+  EXPECT_EQ(MachineWriteCheckText(
+                Probed(Above(true, S_OK), kUnknown, kNo, static_cast<HRESULT>(0x80041003))),
+            L"app package above; HKLM unknown, HKCU real, probe-hr=0x80041003");
+  EXPECT_EQ(MachineWriteCheckText(Probed(Above(false, E_ACCESSDENIED), kNo, kYes)),
+            L"processes above unreadable, walk-hr=0x80070005; HKLM real, HKCU virtualized");
 }
 
 ValueView Missing() { return {ValueState::kMissing, {}}; }

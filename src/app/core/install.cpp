@@ -582,8 +582,8 @@ HRESULT RunMachineRepairClass(ElevatedReporter& report) noexcept try {
 }
 CATCH_RETURN();
 
-std::optional<ExitCode> InstallStepExitCode(ElevatedOutcome outcome, HRESULT failure) noexcept {
-  switch (outcome) {
+std::optional<ExitCode> InstallStepExitCode(const ElevatedRun& run) noexcept {
+  switch (run.outcome) {
     case ElevatedOutcome::kDone:
     case ElevatedOutcome::kRestartPending:
       return std::nullopt;
@@ -592,8 +592,12 @@ std::optional<ExitCode> InstallStepExitCode(ElevatedOutcome outcome, HRESULT fai
     case ElevatedOutcome::kFailed:
       break;
   }
-  if (failure == kUnsafeBuildFolderHr) return ExitCode::kWrongContext;
-  if (failure == kNoAdministratorRightsHr) return ExitCode::kNeedsAdmin;
+  if (LackedAdministratorRights(run)) return ExitCode::kNeedsAdmin;
+  // The step's own refusals; a launch that failed with the same code ran nothing.
+  if (RefusedBelowPackage(run) ||
+      (SUCCEEDED(run.launched) && run.failure == kUnsafeBuildFolderHr)) {
+    return ExitCode::kWrongContext;
+  }
   return ExitCode::kFailed;
 }
 
@@ -709,7 +713,7 @@ HRESULT InstallFromOwnFolder(const InstallOptions& options, const RegistryRoots&
     ElevatedRun run;
     RETURN_IF_FAILED(RunElevated(ElevatedVerb::kMachineInstall, result->source.dir / kSettingsExe,
                                  options.owner, options.launcher, &run));
-    const std::optional<ExitCode> stop = InstallStepExitCode(run.outcome, run.failure);
+    const std::optional<ExitCode> stop = InstallStepExitCode(run);
     result->restartPending = run.outcome == ElevatedOutcome::kRestartPending;
     if (stop == ExitCode::kFailed) Failed(&failures, L"machine-install", run.failure);
     // The parts of the step that did not complete are this install's failures, also when the
@@ -725,7 +729,11 @@ HRESULT InstallFromOwnFolder(const InstallOptions& options, const RegistryRoots&
     }
     result->run = std::move(run);
     if (stop) {
-      if (*stop == ExitCode::kWrongContext) result->refusal = InstallRefusal::kUnsafeFolder;
+      // A refusal below an app package is no refusal of the folder: the output names it
+      // (RefusedBelowPackage).
+      if (*stop == ExitCode::kWrongContext && result->run->failure == kUnsafeBuildFolderHr) {
+        result->refusal = InstallRefusal::kUnsafeFolder;
+      }
       result->code = *stop;
       Log(LogLevel::kWarning, kLogComponent,
           L"install scope=machine result=" + std::wstring(CheckResultName(*stop)) + L" failures=" +
