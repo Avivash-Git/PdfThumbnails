@@ -19,8 +19,9 @@ class RealProbes final : public SystemProbes {
   HRESULT ReadSacState(const RegistryRoots& roots, SacReading* reading) const noexcept override {
     return pdft::ReadSacState(roots, reading);
   }
-  BlockCount CountCiBlocks(std::wstring_view leaf, int days) const noexcept override {
-    return pdft::CountCiBlocks(leaf, days);
+  BlockCount CountCiBlocks(const std::filesystem::path& buildFolder,
+                           int days) const noexcept override {
+    return pdft::CountCiBlocks(buildFolder, days);
   }
   HRESULT DetectPdfCraft(PdfCraftInfo* info) const noexcept override {
     return pdft::DetectPdfCraft(info);
@@ -38,7 +39,9 @@ class RealProbes final : public SystemProbes {
   }
   HRESULT RunLiveTest(UINT size, const std::filesystem::path* file, DWORD timeoutMs,
                       LiveTest* result) const noexcept override {
-    // Leftovers of runs that crashed or whose surrogate never returned; best effort.
+    // Leftovers of runs that crashed or whose surrogate never returned; best effort. Never
+    // reached in an elevated process: the snapshot skips the Explorer test there
+    // (DecideLiveTestSkip), as SweepsProbes would.
     (void)SweepStaleProbes();
     return pdft::RunLiveTest(size, file, timeoutMs, result);
   }

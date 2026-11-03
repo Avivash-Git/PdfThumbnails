@@ -13,13 +13,14 @@
 // the tests pass ApplyTaskOptions an unelevated copy of the context, which it would refuse
 // otherwise; the shared folder's own tests (EnsureTaskFolder, DeleteTaskFolderAllUsers) need the
 // elevation and skip without it. Some of those start this test program again as a standard user
-// (a filtered Medium token) to make a folder or register a task as one would, and one registers
-// a task without triggers that runs as SYSTEM, which nothing starts. One test makes Task
-// Scheduler start a program (pdft-run-medium.exe --exit 0); it skips when Application Control
-// blocks that program or when Task Scheduler has no session of this account to run it in (no
-// interactive desktop, an elevated runner, or a prompt started with "runas"). The check's repair
-// of a task that runs another program is tried here too, through the same place; its program is
-// an empty file in a folder under %TEMP% that nothing starts.
+// (a filtered Medium token) to make a folder or register a task as one would, and some register
+// tasks without triggers that run as SYSTEM, which nothing starts, as another account's tasks
+// under the user's names. One test makes Task Scheduler start a program (pdft-run-medium.exe
+// --exit 0); it skips when Application Control blocks that program or when Task Scheduler has no
+// session of this account to run it in (no interactive desktop, an elevated runner, or a prompt
+// started with "runas"). The check's repair of a task that runs another program is tried here
+// too, through the same place; its program is an empty file in a folder under %TEMP% that
+// nothing starts.
 
 #include <windows.h>
 
@@ -376,6 +377,18 @@ std::wstring SddlSid(const std::wstring& sid) {
 bool NeedsXmlEscape(std::wstring_view text) {
   return text.find_first_of(L"&<>'\"") != std::wstring_view::npos;
 }
+
+// |task|'s definition as Task Scheduler holds it; empty when there is no task or it cannot be
+// read. The same text before and after means nobody registered over the task.
+std::wstring TaskXml(IRegisteredTask* task) {
+  wil::unique_bstr xml;
+  if (!task || FAILED(task->get_Xml(xml.put()))) return {};
+  return Bstr(xml);
+}
+
+// The account the system runs services as: a task that runs as it is another account's, and
+// only an administrator can register one.
+constexpr wchar_t kSystemSid[] = L"S-1-5-18";
 
 class TaskWriting : public ::testing::Test {
  protected:
@@ -800,7 +813,8 @@ TEST_F(TaskWriting, ReadTaskReadsTheFallbackNameFirstNextToAnUntrustedFolder) {
 
 // A task under the user's name that runs as another account is not the user's, in either place:
 // someone else put it there. Here the tasks run as this account and the location names a
-// made-up user.
+// made-up user. Under the fallback name, the only place the task can go next to a folder that is
+// missing or not trusted, it takes the name (kTaskTakenHr); in that folder alone it does not.
 TEST_F(TaskWriting, ReadTaskSkipsATaskThatRunsAsSomeoneElse) {
   TaskLocation someoneElse = location_;
   someoneElse.userSid = L"S-1-12-1-1-2-3-4";
@@ -808,12 +822,12 @@ TEST_F(TaskWriting, ReadTaskSkipsATaskThatRunsAsSomeoneElse) {
       RegisterPlain(service_.get(), L"\\", location_.fallbackName, program_, user_.userSid));
   TaskState state;
   state.exists = true;
-  EXPECT_EQ(ReadTask(someoneElse, &state), E_ACCESSDENIED);
+  EXPECT_EQ(ReadTask(someoneElse, &state), kTaskTakenHr);
   EXPECT_FALSE(state.exists);
   MakeUntrustedFolder();
   ASSERT_HRESULT_SUCCEEDED(
       RegisterPlain(service_.get(), location_.folder, location_.name, program_, user_.userSid));
-  EXPECT_EQ(ReadTask(someoneElse, &state), E_ACCESSDENIED);
+  EXPECT_EQ(ReadTask(someoneElse, &state), kTaskTakenHr);
   EXPECT_FALSE(state.exists);
   // For the user they run as, both are theirs, the fallback name first.
   ASSERT_HRESULT_SUCCEEDED(ReadTask(location_, &state));
@@ -826,6 +840,64 @@ TEST_F(TaskWriting, ReadTaskSkipsATaskThatRunsAsSomeoneElse) {
   ASSERT_HRESULT_SUCCEEDED(ReadTask(byPath, &state));
   EXPECT_TRUE(state.exists);
   EXPECT_FALSE(state.atFallback);
+  // With the fallback name free, the copy in the folder is only skipped.
+  const wil::com_ptr_nothrow<ITaskFolder> root = GetFolder(service_.get(), L"\\");
+  ASSERT_TRUE(root);
+  DeleteNamedTask(root.get(), location_.fallbackName);
+  ASSERT_FALSE(AtFallback());
+  EXPECT_EQ(ReadTask(someoneElse, &state), E_ACCESSDENIED);
+  EXPECT_FALSE(state.exists);
+}
+
+// The user's own task is updated where it is, whatever it ran before.
+TEST_F(TaskWriting, TheUsersOwnTaskIsUpdatedWhereItIs) {
+  ASSERT_HRESULT_SUCCEEDED(RegisterPlain(service_.get(), L"\\", location_.fallbackName,
+                                         test::SelfPath(), user_.userSid));
+  const TaskOptions both = OptionsFromCheckboxes(true, true);
+  ASSERT_HRESULT_SUCCEEDED(ApplyTaskOptions(location_, both, program_, user_));
+  ExpectRegistered(both, false);
+  const TaskOptions signIn = OptionsFromCheckboxes(false, true);
+  ASSERT_HRESULT_SUCCEEDED(ApplyTaskOptions(location_, signIn, program_, user_));
+  ExpectRegistered(signIn, false);
+}
+
+// Another account's task at every name the user's task may have is never registered over or
+// deleted: ApplyTaskOptions answers kTaskTakenHr and changes nothing, and ReadTask gives the same
+// answer. Here the tasks run as this account and the context names a made-up user, so no
+// administrator is needed (the protected folder's tests show it with another account's tasks).
+TEST_F(TaskWriting, AnotherAccountsTaskIsNeverRegisteredOver) {
+  ProcessContext madeUpUser = user_;
+  madeUpUser.userSid = L"S-1-12-1-1-2-3-4";
+  TaskLocation madeUp = location_;
+  madeUp.userSid = madeUpUser.userSid;
+  const TaskOptions both = OptionsFromCheckboxes(true, true);
+  ASSERT_HRESULT_SUCCEEDED(RegisterPlain(service_.get(), L"\\", location_.fallbackName,
+                                         test::SelfPath(), user_.userSid));
+  const std::wstring atFallback = TaskXml(AtFallback().get());
+  ASSERT_FALSE(atFallback.empty());
+
+  // No folder: the fallback name is the only place, and another account has it.
+  EXPECT_EQ(ApplyTaskOptions(madeUp, both, program_, madeUpUser), kTaskTakenHr);
+  EXPECT_EQ(TaskXml(AtFallback().get()), atFallback);
+  TaskState state;
+  state.exists = true;
+  EXPECT_EQ(ReadTask(madeUp, &state), kTaskTakenHr);
+  EXPECT_FALSE(state.exists);
+
+  // A folder that is not trusted is no place for the task either, and nothing changes in it.
+  MakeUntrustedFolder();
+  ASSERT_HRESULT_SUCCEEDED(RegisterPlain(service_.get(), location_.folder, location_.name,
+                                         test::SelfPath(), user_.userSid));
+  const std::wstring inFolder = TaskXml(InFolder().get());
+  ASSERT_FALSE(inFolder.empty());
+  EXPECT_EQ(ApplyTaskOptions(madeUp, both, program_, madeUpUser), kTaskTakenHr);
+  EXPECT_EQ(TaskXml(AtFallback().get()), atFallback);
+  EXPECT_EQ(TaskXml(InFolder().get()), inFolder);
+
+  // For the account they run as, both are its own: updated under the fallback name, and the copy
+  // in the folder goes.
+  ASSERT_HRESULT_SUCCEEDED(ApplyTaskOptions(location_, both, program_, user_));
+  ExpectRegistered(both, false);
 }
 
 TEST_F(TaskWriting, DeleteTaskTakesBothCopiesAndNothingElse) {
@@ -1116,6 +1188,106 @@ TEST_F(TaskFolderElevated, ReadTaskSkipsSomeoneElsesTaskInTheProtectedFolder) {
   EXPECT_EQ(state.actionPath, test::SelfPath());
   std::printf("[ tasks ] someone else's task in the folder skipped: %s\n",
               state.atFallback ? "yes" : "no");
+}
+
+// Another account's task under the user's name in the protected folder (SYSTEM's here, which only
+// an administrator can register) is neither registered over nor deleted: the user's task goes
+// under the fallback name, registered there anew and then updated where it is.
+TEST_F(TaskFolderElevated, AnotherAccountsTaskInTheFolderStaysAndTheFallbackNameIsUsed) {
+  ASSERT_EQ(EnsureTaskFolder(location_.folder), S_OK);
+  ASSERT_HRESULT_SUCCEEDED(RegisterPlain(service_.get(), location_.folder, location_.name,
+                                         test::SelfPath(), kSystemSid, TASK_LOGON_SERVICE_ACCOUNT));
+  const std::wstring theirs = TaskXml(InFolder().get());
+  ASSERT_FALSE(theirs.empty());
+  ASSERT_FALSE(IEquals(TaskPrincipalUserId(theirs), user_.userSid)) << Narrow(theirs);
+  for (const bool atSignIn : {true, false}) {
+    SCOPED_TRACE(testing::Message() << "atSignIn " << atSignIn);
+    ASSERT_HRESULT_SUCCEEDED(
+        ApplyTaskOptions(location_, OptionsFromCheckboxes(true, atSignIn), program_, user_));
+    TaskState state;
+    ASSERT_HRESULT_SUCCEEDED(ReadTask(location_, &state));
+    ASSERT_TRUE(state.exists);
+    EXPECT_TRUE(state.atFallback);
+    EXPECT_EQ(state.atSignIn, atSignIn);
+    EXPECT_EQ(state.actionPath, program_);
+    EXPECT_EQ(TaskXml(InFolder().get()), theirs);
+  }
+  const bool kept = TaskXml(InFolder().get()) == theirs && AtFallback();
+  std::printf("[ tasks ] another account's task in the folder kept, the fallback name used: %s\n",
+              kept ? "yes" : "no");
+}
+
+// Another account's task under the user's fallback name (SYSTEM's here) is not the user's other
+// copy: the user's task goes into the protected folder, and that task stays as it is.
+TEST_F(TaskFolderElevated, AnotherAccountsTaskUnderTheFallbackNameStaysWhenTheFolderIsUsed) {
+  ASSERT_EQ(EnsureTaskFolder(location_.folder), S_OK);
+  ASSERT_HRESULT_SUCCEEDED(RegisterPlain(service_.get(), L"\\", location_.fallbackName,
+                                         test::SelfPath(), kSystemSid, TASK_LOGON_SERVICE_ACCOUNT));
+  const std::wstring theirs = TaskXml(AtFallback().get());
+  ASSERT_FALSE(theirs.empty());
+  ASSERT_FALSE(IEquals(TaskPrincipalUserId(theirs), user_.userSid)) << Narrow(theirs);
+  ASSERT_HRESULT_SUCCEEDED(
+      ApplyTaskOptions(location_, OptionsFromCheckboxes(true, true), program_, user_));
+  ASSERT_TRUE(InFolder());
+  TaskState state;
+  ASSERT_HRESULT_SUCCEEDED(ReadTask(location_, &state));
+  ASSERT_TRUE(state.exists);
+  EXPECT_FALSE(state.atFallback);
+  EXPECT_EQ(state.actionPath, program_);
+  EXPECT_EQ(TaskXml(AtFallback().get()), theirs);
+  const bool kept = InFolder() && TaskXml(AtFallback().get()) == theirs;
+  std::printf(
+      "[ tasks ] another account's task under the fallback name kept, the folder used: %s\n",
+      kept ? "yes" : "no");
+}
+
+// The user's own task in the protected folder is updated where it is.
+TEST_F(TaskFolderElevated, TheUsersOwnTaskInTheFolderIsUpdatedThere) {
+  ASSERT_EQ(EnsureTaskFolder(location_.folder), S_OK);
+  ASSERT_HRESULT_SUCCEEDED(RegisterPlain(service_.get(), location_.folder, location_.name,
+                                         test::SelfPath(), user_.userSid));
+  const TaskOptions both = OptionsFromCheckboxes(true, true);
+  ASSERT_HRESULT_SUCCEEDED(ApplyTaskOptions(location_, both, program_, user_));
+  ExpectRegistered(both, true);
+}
+
+// Another account's tasks under both of the user's names: the user's task is registered nowhere
+// and both stay as they are, and the answer says why (kTaskTakenHr), for a standard user too,
+// whom Task Scheduler does not even let open those tasks.
+TEST_F(TaskFolderElevated, AnotherAccountsTasksAtBothNamesLeaveTheUserNone) {
+  ASSERT_EQ(EnsureTaskFolder(location_.folder), S_OK);
+  ASSERT_HRESULT_SUCCEEDED(RegisterPlain(service_.get(), location_.folder, location_.name,
+                                         test::SelfPath(), kSystemSid, TASK_LOGON_SERVICE_ACCOUNT));
+  ASSERT_HRESULT_SUCCEEDED(RegisterPlain(service_.get(), L"\\", location_.fallbackName,
+                                         test::SelfPath(), kSystemSid, TASK_LOGON_SERVICE_ACCOUNT));
+  const std::wstring inFolder = TaskXml(InFolder().get());
+  const std::wstring atFallback = TaskXml(AtFallback().get());
+  for (const std::wstring* xml : {&inFolder, &atFallback}) {
+    ASSERT_FALSE(xml->empty());
+    ASSERT_FALSE(IEquals(TaskPrincipalUserId(*xml), user_.userSid)) << Narrow(*xml);
+  }
+  const auto unchanged = [&] {
+    EXPECT_EQ(TaskXml(InFolder().get()), inFolder);
+    EXPECT_EQ(TaskXml(AtFallback().get()), atFallback);
+  };
+
+  EXPECT_EQ(ApplyTaskOptions(location_, OptionsFromCheckboxes(true, true), program_, user_),
+            kTaskTakenHr);
+  unchanged();
+  TaskState state;
+  state.exists = true;
+  EXPECT_EQ(ReadTask(location_, &state), kTaskTakenHr);
+  EXPECT_FALSE(state.exists);
+
+  std::string line;
+  const HRESULT started = RunAsStandardUser(ApplyTaskArguments(), &line);
+  if (test::IsApplicationControlBlock(started)) {
+    GTEST_SKIP() << "Application Control blocked the test program at Medium integrity";
+  }
+  ASSERT_HRESULT_SUCCEEDED(started);
+  std::printf("[ tasks ] standard user with both names taken: %s\n", line.c_str());
+  EXPECT_EQ(line, "apply-task hr=" + Hex(kTaskTakenHr) + " elevated=0");
+  unchanged();
 }
 
 // Once the folder is there, the task moves into it and the copy under the fallback name goes.

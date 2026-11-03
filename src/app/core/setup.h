@@ -13,7 +13,9 @@
 //   4. a per-user class goes while the install is machine-wide (it would hide the machine-wide
 //      one), but not a 2.x one over a machine-wide 1.x class (a per-user install forced over it);
 //   5. the check task: the triggers --checks asks for; else the ones the user's task has; else
-//      both (1.x's task is replaced the same way);
+//      both (1.x's task is replaced the same way); never over another account's task, and when
+//      such tasks hold every name the task may have, the failure says so and that an
+//      administrator must remove them;
 //   6. this session's thumbnail processes that hold an old build's DLLs are ended (only Windows'
 //      own dllhost.exe of this user), so the new build loads at the next thumbnail;
 //   7. the user part of the 1.x clean-up (migrate_v1.h), with the task already registered;
@@ -21,7 +23,7 @@
 //   Exit 0, or 5 when a step failed (the others still ran).
 //
 // --setup-machine (the installer's step for all users; run elevated): refused unless elevated
-// (7) and inside or below an app package (8); the operation lock (4, or 5 as above); then the
+// (7) and inside or below an app package (8); no operation lock (see SetupMachine); then the
 // shared task folder (EnsureTaskFolder), the machine part of the 1.x clean-up and the old 2.x
 // builds. Exit 0, 1 when files wait for a restart, 5 when a step failed.
 //
@@ -92,11 +94,15 @@ struct SetupUserResult {
   std::array<bool, kSlotCount> slotsWritten = {};
   bool userClassDeleted = false;
   bool taskRegistered = false;
+  // ... could not be: another account's tasks hold every name it may have (kTaskTakenHr)
+  bool taskTaken = false;
   TaskOptions task;  // what it was registered with
   size_t holdersEnded = 0;
   V1UserResult migration;
   bool notified = false;
-  std::vector<std::wstring> failures;  // "<step>: <HRESULT>", no paths
+  // "<step>: <HRESULT>", no paths; for names another account's tasks hold, why in words, the
+  // HRESULT and the way out, which names those tasks
+  std::vector<std::wstring> failures;
 };
 
 // The task options --setup-user registers (pure): the --checks selection when given; else the
@@ -122,15 +128,11 @@ struct SetupMachineOptions {
   std::wstring taskFolder = kTaskFolder;
   // Where in-use files go; when empty, the folder that holds the install folder.
   std::filesystem::path trashParent;
-  DWORD lockWaitMs = kCheckLockWaitMs;
 };
 
 struct SetupMachineResult {
   ExitCode code = ExitCode::kFailed;
   SetupRefusal refusal = SetupRefusal::kNone;
-  bool busy = false;
-  // exit 5: Windows does not let this process make the lock (kNamedObjectsRefusedHr)
-  bool namedObjectsRefused = false;
   HRESULT taskFolder = S_OK;  // EnsureTaskFolder's answer
   MachineRemoval v1;          // 1.x's build folders
   MachineRemoval old;         // old 2.x builds

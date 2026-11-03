@@ -5,6 +5,8 @@
 #include <wil/resource.h>
 #include <wil/result_macros.h>
 
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "delay_load.h"
@@ -12,6 +14,9 @@
 
 namespace pdft {
 namespace {
+
+// Windows paths cannot be longer than this (UNICODE_STRING counts bytes in 16 bits).
+constexpr size_t kMaxPathChars = 32768;
 
 constexpr wchar_t kCiChannel[] = L"Microsoft-Windows-CodeIntegrity/Operational";
 constexpr wchar_t kFileNamePath[] = L"Event/EventData/Data[@Name='File Name']";
@@ -66,9 +71,15 @@ HRESULT RenderFileName(EVT_HANDLE context, EVT_HANDLE event, std::vector<BYTE>* 
   return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
 }
 
-// The body of CountCiBlocks, failing with the reason the log could not be read.
-HRESULT CountMatchingEvents(std::wstring_view leaf, int days, int* count) noexcept try {
+// The body of CountCiBlocks, failing with the reason the folder could not be resolved or the log
+// could not be read.
+HRESULT CountMatchingEvents(const std::filesystem::path& buildFolder, int days, int* count) noexcept
+    try {
   *count = 0;
+  // A build folder that is gone is an answer (the count carries its error), not a failure to log.
+  std::wstring deviceFolder;
+  const HRESULT resolved = DeviceFolderPath(buildFolder, &deviceFolder);
+  if (FAILED(resolved)) return resolved;
   RETURN_IF_FAILED(EnsureDelayLoaded("wevtapi.dll"));
   const std::wstring query = CiBlockQuery(days);
   wil::unique_evt_handle results(
@@ -80,12 +91,15 @@ HRESULT CountMatchingEvents(std::wstring_view leaf, int days, int* count) noexce
 
   std::vector<BYTE> buffer(1024);
   int seen = 0;
+  int rendered = 0;
+  int failed = 0;
+  HRESULT lastFailure = S_OK;
   for (;;) {
     EVT_HANDLE batch[kEventBatch] = {};
     DWORD returned = 0;
     if (!EvtNext(results.get(), kEventBatch, batch, kEventWaitMs, 0, &returned)) {
       const DWORD error = GetLastError();
-      if (error == ERROR_NO_MORE_ITEMS) return S_OK;
+      if (error == ERROR_NO_MORE_ITEMS) return RenderOutcome(rendered, failed, lastFailure);
       return HRESULT_FROM_WIN32(error ? error : ERROR_READ_FAULT);
     }
     // Every handle EvtNext returned is closed, also when rendering one fails.
@@ -93,9 +107,18 @@ HRESULT CountMatchingEvents(std::wstring_view leaf, int days, int* count) noexce
     events.reserve(returned);
     for (DWORD i = 0; i < returned; ++i) events.emplace_back(batch[i]);
     for (const wil::unique_evt_handle& event : events) {
+      // An event that cannot be rendered is passed over: one odd event (a file name too long to
+      // render, say) must not cost the count of all the others. They are counted all the same,
+      // so that a log none of whose events renders is not taken for one without blocks.
       std::wstring_view fileName;
-      RETURN_IF_FAILED(RenderFileName(context.get(), event.get(), &buffer, &fileName));
-      if (FileNameNamesBuild(fileName, leaf)) ++*count;
+      const HRESULT hr = RenderFileName(context.get(), event.get(), &buffer, &fileName);
+      if (FAILED(hr)) {
+        ++failed;
+        lastFailure = hr;
+      } else {
+        ++rendered;
+      }
+      if (EventCountsAsBlock(hr, fileName, deviceFolder)) ++*count;
     }
     seen += static_cast<int>(returned);
     if (seen >= kMaxEvents) return HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
@@ -103,22 +126,14 @@ HRESULT CountMatchingEvents(std::wstring_view leaf, int days, int* count) noexce
 }
 CATCH_RETURN();
 
-bool IsUnreservedLeafChar(wchar_t c) noexcept {
-  if (c < 0x20) return false;
-  switch (c) {
-    case L'\\':
-    case L'/':
-    case L':':
-    case L'*':
-    case L'?':
-    case L'"':
-    case L'<':
-    case L'>':
-    case L'|':
-      return false;
-    default:
-      return true;
-  }
+// "X:\..." below the drive's root. Build folders live on local drives; a share, a device or a
+// \\?\ path is refused before anything opens it.
+bool IsDriveFolder(std::wstring_view path) noexcept {
+  const bool drive = path.size() > 3 &&
+                     ((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z'));
+  // A colon after the drive's would name a stream of a file.
+  return drive && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/') &&
+         path.find(L':', 2) == std::wstring_view::npos;
 }
 
 }  // namespace
@@ -163,28 +178,57 @@ std::wstring SacValueText(const SacReading& reading) {
   return L"type " + std::to_wstring(reading.type);
 }
 
-bool IsBuildLeafName(std::wstring_view leaf) noexcept {
-  if (leaf.empty() || leaf.size() > MAX_PATH || leaf == L"." || leaf == L"..") return false;
-  for (const wchar_t c : leaf) {
-    if (!IsUnreservedLeafChar(c)) return false;
+HRESULT DeviceFolderPath(const std::filesystem::path& folder, std::wstring* out) noexcept try {
+  out->clear();
+  RETURN_HR_IF(E_INVALIDARG, !IsDriveFolder(folder.native()));
+  // Attributes only, sharing everything, links followed: Code Integrity names a file by the path
+  // it was finally opened at. Should a link lead to a pipe after all, its server may identify
+  // this process but not act as it.
+  wil::unique_hfile file(CreateFileW(
+      folder.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      nullptr, OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
+  // A missing folder is an answer for the caller, not a failure worth logging.
+  if (!file) return LastErrorOr(E_FAIL);
+  std::wstring buffer(MAX_PATH, L'\0');
+  for (;;) {
+    const DWORD length =
+        GetFinalPathNameByHandleW(file.get(), buffer.data(), static_cast<DWORD>(buffer.size()),
+                                  FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
+    RETURN_LAST_ERROR_IF(length == 0);
+    if (length < buffer.size()) {
+      buffer.resize(length);
+      break;
+    }
+    // Too small: |length| is the size needed, terminating null included.
+    RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE), length > kMaxPathChars);
+    buffer.resize(length);
   }
-  return true;
+  while (!buffer.empty() && buffer.back() == L'\\') buffer.pop_back();
+  RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_BAD_PATHNAME), buffer.empty() || buffer.front() != L'\\');
+  *out = std::move(buffer);
+  return S_OK;
+}
+CATCH_RETURN();
+
+bool FileNameIsInFolder(std::wstring_view fileName, std::wstring_view deviceFolder) noexcept {
+  while (!deviceFolder.empty() && deviceFolder.back() == L'\\') deviceFolder.remove_suffix(1);
+  // Nothing left would match every name that starts with a separator.
+  if (deviceFolder.empty()) return false;
+  return fileName.size() > deviceFolder.size() + 1 && fileName[deviceFolder.size()] == L'\\' &&
+         IStartsWith(fileName, deviceFolder);
 }
 
-bool FileNameNamesBuild(std::wstring_view fileName, std::wstring_view leaf) noexcept {
-  if (!IsBuildLeafName(leaf)) return false;
-  constexpr std::wstring_view kApp = L"\\app\\";
-  // "\app\<leaf>\" without building the string: the three parts in a row.
-  const size_t needed = kApp.size() + leaf.size() + 1;
-  if (fileName.size() < needed) return false;
-  for (size_t at = 0; at + needed <= fileName.size(); ++at) {
-    if (IEquals(fileName.substr(at, kApp.size()), kApp) &&
-        IEquals(fileName.substr(at + kApp.size(), leaf.size()), leaf) &&
-        fileName[at + kApp.size() + leaf.size()] == L'\\') {
-      return true;
-    }
+bool EventCountsAsBlock(HRESULT rendered, std::wstring_view fileName,
+                        std::wstring_view deviceFolder) noexcept {
+  return SUCCEEDED(rendered) && FileNameIsInFolder(fileName, deviceFolder);
+}
+
+HRESULT RenderOutcome(int rendered, int failed, HRESULT lastFailure) noexcept {
+  if (failed > 0 && rendered == 0) {
+    return FAILED(lastFailure) ? lastFailure : HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
   }
-  return false;
+  return S_OK;
 }
 
 std::wstring CiBlockQuery(int days) {
@@ -193,14 +237,14 @@ std::wstring CiBlockQuery(int days) {
          std::to_wstring(ms) + L"]]]";
 }
 
-BlockCount CountCiBlocks(std::wstring_view leaf, int days) noexcept {
+BlockCount CountCiBlocks(const std::filesystem::path& buildFolder, int days) noexcept {
   BlockCount result;
-  if (!IsBuildLeafName(leaf) || days < 1 || days > 365) {
+  if (days < 1 || days > 365) {
     result.error = E_INVALIDARG;
     return result;
   }
   int count = 0;
-  const HRESULT hr = CountMatchingEvents(leaf, days, &count);
+  const HRESULT hr = CountMatchingEvents(buildFolder, days, &count);
   if (FAILED(hr)) {
     result.error = hr;
     return result;
@@ -219,9 +263,8 @@ bool IsLoadBlockedHresult(HRESULT hr) noexcept {
          (code >= 4556 && code <= 4559) || (code >= 4580 && code <= 4583);
 }
 
-bool ShouldCountBlocks(SacState state, bool classRegistered,
-                       std::optional<HRESULT> probe) noexcept {
-  return state == SacState::kOn && classRegistered && probe != S_OK;
+bool ShouldCountBlocks(SacState state, bool dllRegistered, std::optional<HRESULT> probe) noexcept {
+  return state == SacState::kOn && dllRegistered && probe != S_OK;
 }
 
 bool ShouldRecountBlocks(std::optional<HRESULT> probe, const BlockCount& first) noexcept {

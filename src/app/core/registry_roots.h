@@ -88,14 +88,62 @@ std::optional<ULONGLONG> RegistryQword(const RegistryValue& value) noexcept;
 [[nodiscard]] HRESULT DeleteRegistryValue(HKEY root, std::wstring_view subKey,
                                           std::wstring_view name, bool* deleted = nullptr) noexcept;
 
+// What DeleteRegistryTree fails with when it stopped with part of the tree still there: a key in
+// it is a registry link, which it never follows and never deletes, or the tree is deeper, holds
+// more keys or takes longer than its RegistryTreeLimits allow. What it could delete is gone; the
+// rest stays as it is. Callers report it as "left". A code of this app's own (FACILITY_ITF), not
+// a Windows error, so that no call on the way can return it.
+inline constexpr HRESULT kRegistryTreeLeftHr = MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x2F0);
+
+// The bounds of one DeleteRegistryTree call. The trees it is for are the product's own, a few keys
+// at most two levels deep; a tree far beyond that was made by someone else, and one call stops
+// there (kRegistryTreeLeftHr) instead of spending however long deleting it would take.
+struct RegistryTreeLimits {
+  DWORD maxDepth = 8;   // levels below the key
+  DWORD maxKeys = 256;  // keys opened, the key itself included
+  DWORD maxMs = 2000;   // the walk stops once this much time has passed
+};
+
+// What one DeleteRegistryTree call did.
+struct RegistryTreeDeletion {
+  bool existed = false;       // there was a key at the path
+  bool deleted = false;       // ... and it is gone now, with everything below it
+  size_t keysDeleted = 0;     // the key itself included
+  size_t linksLeft = 0;       // links in the tree (the key itself included), left as they are
+  bool boundReached = false;  // it stopped at |limits|
+};
+
 // Deletes the key with everything below it. A key that does not exist is not an error.
+//
+// Never follows a registry link at the key or below it, and never looks a key up by its path
+// twice: the path down to the key is looked up as given (in a loaded user hive Windows itself
+// makes Software\Classes a link to the user's classes hive), and from there the key and every key
+// below it are opened as they are (REG_OPTION_OPEN_LINK), each relative to its parent's handle,
+// and deleted through their own handles (DeleteOpenRegistryKey) once their subkeys are gone. A
+// link is left as it is, with every key above it, and counted; the call then fails with
+// kRegistryTreeLeftHr, as it does past |limits|.
+[[nodiscard]] HRESULT DeleteRegistryTree(HKEY root, std::wstring_view subKey,
+                                         const RegistryTreeLimits& limits,
+                                         RegistryTreeDeletion* deletion) noexcept;
+
+// The same with the default limits. |deleted| (optional) says whether there was a key, now gone.
 [[nodiscard]] HRESULT DeleteRegistryTree(HKEY root, std::wstring_view subKey,
                                          bool* deleted = nullptr) noexcept;
 
 // Deletes the key if it has no subkeys and no values; a default value counts as a value. Never
 // deletes anything below it: a key that gains a subkey meanwhile makes the deletion fail, and is
-// then kept. A key that does not exist is not an error.
+// then kept. A key that does not exist is not an error, nor is one with subkeys or values that
+// this process may read but not delete; an empty one it may not delete is
+// (HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED)). The key is opened as it is (REG_OPTION_OPEN_LINK)
+// and deleted through that handle: a link holds the name of its target in a value, so it is never
+// empty, and it stays together with its target.
 [[nodiscard]] HRESULT DeleteRegistryKeyIfEmpty(HKEY root, std::wstring_view subKey,
                                                bool* deleted = nullptr) noexcept;
+
+// Deletes the key |key| is an open handle to (opened with DELETE), and never another one: not a
+// key made at its path after it was opened and, for a link opened with REG_OPTION_OPEN_LINK, the
+// link itself, never the key it names. Fails while the key has subkeys. A key deleted already
+// (by someone else meanwhile) is not an error.
+[[nodiscard]] HRESULT DeleteOpenRegistryKey(HKEY key) noexcept;
 
 }  // namespace pdft

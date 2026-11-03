@@ -52,8 +52,10 @@ std::string StatusJson(const Snapshot& snapshot, std::span<const Finding> findin
                        ExitCode exitCode);
 
 // |text| as a JSON string, quotes included (pure): '"' and '\' escaped, control characters as
-// \b, \f, \n, \r, \t or \u00XX, everything else as UTF-8. Text from the registry may hold a
-// lone UTF-16 surrogate; it becomes U+FFFD. May throw std::bad_alloc.
+// \b, \f, \n, \r, \t or \u00XX, DEL, the C1 controls and the line-separator and bidirectional
+// characters as \uXXXX (so a console that shows the JSON as it is cannot act on them), everything
+// else as UTF-8. Text from the registry may hold a lone UTF-16 surrogate; it becomes U+FFFD. May
+// throw std::bad_alloc.
 std::string JsonString(std::wstring_view text);
 
 // "2026-10-30T23:26:04Z" (pure); "" for a time SYSTEMTIME cannot hold. May throw std::bad_alloc.

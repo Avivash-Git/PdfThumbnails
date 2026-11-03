@@ -113,8 +113,8 @@ std::wstring ClassKeyPath() {
   return std::wstring(kClassesPrefix) + L"CLSID\\" + kHandlerClsidString;
 }
 
-HRESULT ReadClass(const RegistryRoots& roots, Scope scope, std::optional<ClassReg>* reg) noexcept
-    try {
+HRESULT ReadClass(const RegistryRoots& roots, Scope scope, std::optional<ClassReg>* reg,
+                  ClassPathExpansion expansion) noexcept try {
   reg->reset();
   const HKEY root = RootOf(roots, scope);
   RETURN_HR_IF(E_INVALIDARG, root == nullptr);
@@ -123,9 +123,12 @@ HRESULT ReadClass(const RegistryRoots& roots, Scope scope, std::optional<ClassRe
   RETURN_IF_FAILED(ReadRegistryValue(root, inproc, L"", &raw));
   if (!raw) return S_OK;
   ClassReg result;
+  bool unexpanded = false;  // a path to be expanded, left as stored
   if (const std::optional<std::wstring> text = RegistryText(*raw)) {
     if (text->empty()) return S_OK;  // 1.x: an empty path is no registration
-    if (raw->type == REG_EXPAND_SZ) {
+    result.dllExpandable = raw->type == REG_EXPAND_SZ;
+    unexpanded = result.dllExpandable && expansion == ClassPathExpansion::kNever;
+    if (result.dllExpandable && !unexpanded) {
       RETURN_IF_FAILED(ExpandEnvironment(*text, &result.dll));
     } else {
       result.dll = *text;
@@ -138,9 +141,10 @@ HRESULT ReadClass(const RegistryRoots& roots, Scope scope, std::optional<ClassRe
   result.name = text.value_or(L"");
 
   // Only an absolute path says which file Explorer loads; a relative one would be resolved
-  // against whatever folder the loading process happens to run in.
+  // against whatever folder the loading process happens to run in. A path left unexpanded names
+  // no file Windows would load, and is not looked at.
   const std::filesystem::path dll(result.dll);
-  result.dllExists = !result.dll.empty() && dll.is_absolute() && IsFile(dll);
+  result.dllExists = !unexpanded && !result.dll.empty() && dll.is_absolute() && IsFile(dll);
   if (result.dllExists) {
     USHORT machine = 0;
     if (SUCCEEDED(ReadPeMachine(dll, &machine))) result.peMachine = machine;
@@ -202,6 +206,10 @@ HRESULT WriteMachineClass(const RegistryRoots& roots, const std::filesystem::pat
     RETURN_HR(PDFT_TRACE(E_INVALIDARG));
   }
   if (!IsFile(dll) || !IsFile(dll.parent_path() / kPdfiumDll)) RETURN_HR(PDFT_TRACE(E_INVALIDARG));
+  // A fresh key, made with the descriptor it inherits from CLSID: whatever an earlier tool left in
+  // the one found here (TreatAs, LocalServer32, a descriptor of its own) goes with it, so the
+  // class is exactly the three values below.
+  RETURN_IF_FAILED(PDFT_TRACE(DeleteRegistryTree(roots.machine, ClassKeyPath())));
   // 1.x's order: the class name, then the server and its threading model.
   RETURN_IF_FAILED(
       PDFT_TRACE(WriteRegistryString(roots.machine, ClassKeyPath(), L"", kHandlerClassName)));
@@ -280,19 +288,25 @@ HRESULT RemoveSlotsIfOurs(const RegistryRoots& roots,
                           std::array<bool, kSlotCount>* removed) noexcept try {
   if (removed) removed->fill(false);
   RETURN_HR_IF(E_INVALIDARG, roots.user == nullptr);
+  bool left = false;
   for (size_t slot = 0; slot < kSlotCount; ++slot) {
     const std::wstring path = SlotKeyPath(slot);
     std::optional<std::wstring> current;
     RETURN_IF_FAILED(ReadStringOrNothing(roots.user, path, L"", &current));
     if (!current || !IsOurClsid(*current)) continue;  // someone else's: theirs to remove
     bool deleted = false;
-    RETURN_IF_FAILED(DeleteRegistryTree(roots.user, path, &deleted));
+    const HRESULT hr = DeleteRegistryTree(roots.user, path, &deleted);
+    if (hr == kRegistryTreeLeftHr) {
+      left = true;  // a link, or more than one call deletes: it stays, the rest goes on
+      continue;
+    }
+    RETURN_IF_FAILED(hr);
     if (removed) (*removed)[slot] = deleted;
   }
   for (const wchar_t* parent : kSlotParentKeys) {
     RETURN_IF_FAILED(DeleteRegistryKeyIfEmpty(roots.user, parent));
   }
-  return S_OK;
+  return left ? kRegistryTreeLeftHr : S_OK;
 }
 CATCH_RETURN();
 
@@ -300,13 +314,19 @@ HRESULT RemoveFromClassesHive(HKEY classes, ClassesHiveRemoval* removal) noexcep
   *removal = ClassesHiveRemoval{};
   RETURN_HR_IF(E_INVALIDARG, classes == nullptr);
   const size_t prefix = std::size(kClassesPrefix) - 1;
+  bool left = false;
   for (size_t slot = 0; slot < kSlotCount; ++slot) {
     const std::wstring path = SlotKeyPath(slot).substr(prefix);
     std::optional<std::wstring> current;
     RETURN_IF_FAILED(ReadStringOrNothing(classes, path, L"", &current));
     if (!current || !IsOurClsid(*current)) continue;  // someone else's: theirs to remove
     bool deleted = false;
-    RETURN_IF_FAILED(DeleteRegistryTree(classes, path, &deleted));
+    const HRESULT hr = DeleteRegistryTree(classes, path, &deleted);
+    if (hr == kRegistryTreeLeftHr) {
+      left = true;  // a link, or more than one call deletes: it stays, the rest goes on
+      continue;
+    }
+    RETURN_IF_FAILED(hr);
     removal->slots[slot] = deleted;
   }
   for (const wchar_t* parent : kSlotParentKeys) {
@@ -314,9 +334,11 @@ HRESULT RemoveFromClassesHive(HKEY classes, ClassesHiveRemoval* removal) noexcep
     if (key.size() <= prefix) continue;  // "Software\Classes" is this hive's root
     RETURN_IF_FAILED(DeleteRegistryKeyIfEmpty(classes, key.substr(prefix)));
   }
-  RETURN_IF_FAILED(
-      DeleteRegistryTree(classes, ClassKeyPath().substr(prefix), &removal->classDeleted));
-  return S_OK;
+  const HRESULT hr =
+      DeleteRegistryTree(classes, ClassKeyPath().substr(prefix), &removal->classDeleted);
+  if (hr == kRegistryTreeLeftHr) return hr;
+  RETURN_IF_FAILED(hr);
+  return left ? kRegistryTreeLeftHr : S_OK;
 }
 CATCH_RETURN();
 

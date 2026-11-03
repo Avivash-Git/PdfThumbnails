@@ -95,7 +95,9 @@ std::wstring ProbeFileName(const GUID& id);
 bool IsProbeFileName(std::wstring_view name) noexcept;
 
 // Writes a new probe into %TEMP% under a new ProbeFileName (never over an existing file) and
-// returns its path.
+// returns its path. A probe that cannot be written whole is deleted through its own handle. The
+// Explorer test deletes its probe the same way, and only while the name still leads to the file it
+// wrote.
 [[nodiscard]] HRESULT WriteProbePdf(std::filesystem::path* path) noexcept;
 
 // Probes older than this are left over (a crashed run or a surrogate that never returned).
@@ -106,9 +108,14 @@ inline constexpr ULONGLONG kStaleProbeAge100ns = 60ULL * 60 * 10'000'000;  // 1 
 bool IsStaleProbe(const FILETIME& written, const FILETIME& now) noexcept;
 
 // Deletes the files in |directory| (empty: %TEMP%) whose names pass IsProbeFileName and that are
-// IsStaleProbe by their last write time. Folders and links are never deleted, nor anything else.
+// IsStaleProbe by their last write time. The folder is opened as itself: when it is a junction or
+// a symbolic link, nothing is deleted (HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK)). The probes
+// are listed from that open folder, and each one is opened as itself and deleted through its own
+// handle, only when it is a regular file that lies in that very folder: folders and links are
+// never deleted, nor what a link, or a folder above redirected in the meantime, leads to.
 // |removed| (optional) receives how many went. A probe that cannot be deleted (still open) is
-// left for the next run.
+// left for the next run. Not for an elevated process: the user's unelevated programs choose
+// %TEMP%, and it is theirs to clean.
 [[nodiscard]] HRESULT SweepStaleProbes(const std::filesystem::path& directory = {},
                                        int* removed = nullptr) noexcept;
 

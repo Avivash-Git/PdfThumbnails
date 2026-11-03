@@ -1,8 +1,8 @@
-// The install and uninstall side's pure parts: the files of a build, the versions it installs,
-// how the administrator step's outcome becomes --install's exit code (a step without
-// administrator rights included), the class path the elevated side may write for all users, the
-// user hives it cleans, the per-user files the uninstall removes, the trash folders the status
-// reports, and the texts of --install, --uninstall and --zoom.
+// The install and uninstall side's pure parts: the files of a build and what of them is held for
+// the copy, the versions it installs, how the administrator step's outcome becomes --install's
+// exit code (a step without administrator rights included), the class path the elevated side may
+// write for all users, the user hives it cleans, the per-user files the uninstall removes, the
+// trash folders the status reports, and the texts of --install, --uninstall and --zoom.
 
 #include <windows.h>
 
@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "commands.h"
@@ -37,6 +38,20 @@ TEST(Install, BuildFiles) {
   ASSERT_EQ(notices.size(), 2u);
   EXPECT_EQ(notices[0], L"LICENSE.txt");
   EXPECT_EQ(notices[1], L"THIRD-PARTY-NOTICES.md");
+}
+
+TEST(Install, HoldsWhatIsCopied) {
+  const BuildFolderHoldOptions hold = BuildHoldOptions();
+  ASSERT_EQ(hold.files.size(), BuildBinaries().size());
+  for (size_t i = 0; i < hold.files.size(); ++i) EXPECT_EQ(hold.files[i], BuildBinaries()[i]);
+  ASSERT_EQ(hold.optional.size(), BuildTopNotices().size());
+  for (size_t i = 0; i < hold.optional.size(); ++i) {
+    EXPECT_EQ(hold.optional[i], BuildTopNotices()[i]);
+  }
+  EXPECT_EQ(hold.tree, std::wstring_view(kLicensesFolder));
+  EXPECT_EQ(hold.treeDepth, kMaxNoticeDepth);
+  EXPECT_TRUE(hold.user.empty());  // this process's user
+  EXPECT_TRUE(hold.checkAccess);
 }
 
 TEST(Install, InstallableVersions) {
@@ -269,6 +284,66 @@ TEST(UninstallTexts, Report) {
   EXPECT_NE(lines[0].find(L"no " + std::wstring(kSettingsExe)), std::wstring::npos);
   EXPECT_EQ(lines[0].find(L"--install") != std::wstring::npos, kDevInstall);
   EXPECT_EQ(lines[1], L"Some files are in use; they are removed when you next sign in.");
+}
+
+// Keys left in other users' hives, with the class and the install folders gone, are said as
+// such; with the part for all users still there, it is an ordinary failure.
+TEST(UninstallTexts, KeysLeftInOtherUsersHives) {
+  UninstallResult result;
+  result.run = ElevatedRun{};
+  result.run->outcome = ElevatedOutcome::kFailed;
+  result.run->failure = kRegistryTreeLeftHr;
+  result.run->report = {L"failed hive left: " + HResultText(kRegistryTreeLeftHr)};
+  result.failures = {L"machine left: " + HResultText(kRegistryTreeLeftHr)};
+  std::vector<std::wstring> lines = UninstallReport(result);
+  ASSERT_EQ(lines.size(), 2u);
+  EXPECT_EQ(lines[0].rfind(L"Removed the part for all users, but some keys", 0), 0u)
+      << WideToUtf8Lossy(lines[0]);
+  EXPECT_EQ(lines[1], L"  " + result.run->report[0]);
+
+  result.machineLeft = true;
+  lines = UninstallReport(result);
+  ASSERT_EQ(lines.size(), 3u);
+  EXPECT_EQ(lines[0], L"The part for all users failed: " + HResultText(kRegistryTreeLeftHr));
+  EXPECT_NE(lines[2].find(L"still installed"), std::wstring::npos);
+}
+
+// Another process had taken the report pipe's name: said after the outcome, whatever the step's
+// own exit code says, but not for a declined prompt (no step ran).
+TEST(UninstallTexts, AReportChannelTakenByAnotherProcess) {
+  UninstallResult result;
+  result.run = ElevatedRun{};
+  result.run->outcome = ElevatedOutcome::kDone;
+  result.run->reportServer = HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+  std::vector<std::wstring> lines = UninstallReport(result);
+  ASSERT_EQ(lines.size(), 3u);
+  EXPECT_EQ(lines[0], L"Removed the part for all users.");
+  EXPECT_EQ(lines[1], ReportChannelTakenMessage());
+
+  result.run->outcome = ElevatedOutcome::kFailed;
+  result.run->failure = E_FAIL;
+  result.failures = {L"machine: " + HResultText(E_FAIL)};
+  lines = UninstallReport(result);
+  ASSERT_EQ(lines.size(), 2u);
+  EXPECT_EQ(lines[0], L"The part for all users failed: " + HResultText(E_FAIL));
+  EXPECT_EQ(lines[1], ReportChannelTakenMessage());
+
+  result = UninstallResult{};
+  result.run = ElevatedRun{};
+  result.run->outcome = ElevatedOutcome::kCancelled;
+  result.run->reportServer = HRESULT_FROM_WIN32(ERROR_PIPE_BUSY);
+  result.machineLeft = true;
+  for (const std::wstring& line : UninstallReport(result)) {
+    EXPECT_NE(line, ReportChannelTakenMessage());
+  }
+
+  // A channel nobody took says nothing.
+  result.run->outcome = ElevatedOutcome::kDone;
+  result.run->reportServer = S_OK;
+  result.machineLeft = false;
+  for (const std::wstring& line : UninstallReport(result)) {
+    EXPECT_NE(line, ReportChannelTakenMessage());
+  }
 }
 
 TEST(ZoomTexts, OriginAndSaved) {

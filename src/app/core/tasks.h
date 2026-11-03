@@ -17,7 +17,13 @@
 // would inherit them. Only elevated code creates it (EnsureTaskFolder), with a fixed protected
 // security descriptor. Unelevated code never creates it and uses it only while its owner and
 // permissions are the safe ones; otherwise the user's task goes under the root-folder name.
-// Either way a user has one copy of the task: registering it in one place deletes the other.
+// Either way a user has one copy of the task: registering it in one place deletes their copy in
+// the other.
+//
+// Both names are known to every account, and anyone may add tasks to the folder and the root
+// folder, so another user can take a name first. Such a task is never registered over, nor
+// deleted as the user's other copy: the user's task goes to the other place, and with both names
+// taken it has none until an administrator removes those tasks (kTaskTakenHr).
 //
 // Every function needs COM initialized on the calling thread. Reading changes nothing; a folder
 // or task that does not exist is an answer ("not there"), not a failure.
@@ -69,6 +75,13 @@ bool SplitTaskPath(std::wstring_view path, std::wstring* folder, std::wstring* n
 
 // Task Scheduler's answer for a folder or task that does not exist (pure).
 bool IsTaskNotFound(HRESULT hr) noexcept;
+
+// Another account's task holds every name the user's check task may be registered under:
+// ApplyTaskOptions never registers over such a task, and ReadTask finds only those. Task
+// Scheduler lets only that account or an administrator change or delete them, so the user has no
+// check task until an administrator removes them. A code of this app's own (FACILITY_ITF), not a
+// Windows error, so that no call on the way can return it.
+inline constexpr HRESULT kTaskTakenHr = MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x2E8);
 
 // ---- Triggers -----------------------------------------------------------------------------
 
@@ -178,7 +191,10 @@ struct TaskState {
 // runs as that user (Task Scheduler lets only the user or an administrator register a task that
 // runs as them); anyone else's is skipped. A missing folder, a folder this user may not open, or
 // a missing task gives exists = false; when the only copies are someone else's, the result is
-// E_ACCESSDENIED. A task that is there but cannot be read otherwise fails.
+// E_ACCESSDENIED, or kTaskTakenHr when, with |userSid| set, they hold every name ApplyTaskOptions
+// may register the task under (the folder's when it registers there first, and the fallback
+// name), so registering it would fail too. A task that is there but cannot be read otherwise
+// fails.
 [[nodiscard]] HRESULT ReadTask(const TaskLocation& location, TaskState* state) noexcept;
 
 // The account a task runs as (pure): the contents of the UserId element of the principal in the
@@ -239,9 +255,14 @@ inline constexpr HRESULT kSomeTriggersFailed = static_cast<HRESULT>(0x8004131BL)
 // at all deletes it instead (DeleteTask, and S_FALSE becomes S_OK). The task runs |program| with
 // kCheckTaskArguments, as that user with their interactive token and without elevation.
 //   - Place: the folder when ChooseTaskPlace says so; otherwise, or when Task Scheduler refuses
-//     the folder, the fallback name. The folder is never created here. Afterwards the copy in the
-//     other place is deleted, so the user has one task; a copy there that this user may not
-//     delete is not theirs and stays.
+//     the folder or another account's task holds the name there, the fallback name. The folder is
+//     never created here. Afterwards the user's own copy in the other place is deleted, so the
+//     user has one task; anyone else's there stays.
+//   - Never over another account's task: a name is registered anew (TASK_CREATE) when no task has
+//     it, so a task someone makes meanwhile makes the call fail rather than be replaced, and
+//     updated only when the task there is the user's own (one this user may open that runs as
+//     the context's user). Another account's task at the last place left (the fallback name, or
+//     the folder's without one) gives kTaskTakenHr, and nothing changes.
 //   - Refused: an elevated |context| (E_ACCESSDENIED: the task belongs to the signed-in user,
 //     whom an elevated process may not even be), a context user that is not a SID
 //     (E_INVALIDARG), a |program| that is not an absolute path or holds "%" or a quote, which

@@ -1,13 +1,15 @@
-# Weekly: compares the PDFium release pinned in cmake/Pins.cmake with the latest release of
+# Daily: compares the PDFium release pinned in cmake/Pins.cmake with the latest release of
 # bblanchon/pdfium-binaries and keeps one open issue (label security/pdfium) while they differ.
-# PDFium parses untrusted PDFs inside Explorer's thumbnail process, so new releases matter;
-# Dependabot cannot see Pins.cmake. Each bump is its own pull request (docs/BUILDING.md).
+# PDFium parses untrusted PDFs inside Explorer's thumbnail process, so a release with security
+# fixes should be noticed within a day, not a week. A run edits the one open issue instead of
+# opening another, so daily runs do not pile up issues. Dependabot cannot see Pins.cmake. Each
+# bump is its own pull request (docs/BUILDING.md).
 
 name: pdfium-watch
 
 on:
   schedule:
-    - cron: "23 5 * * 1"   # Mondays, 05:23 UTC
+    - cron: "23 5 * * *"   # every day, 05:23 UTC
   workflow_dispatch:
 
 permissions: {}

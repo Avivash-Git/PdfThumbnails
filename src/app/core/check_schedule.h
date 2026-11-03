@@ -13,8 +13,10 @@
 //      points at a program that is not there, nor at a build tree. Turning the checks off needs
 //      no program: deleting the user's task is right whatever is installed.
 //   5. Register or delete (ApplyTaskOptions: the shared folder when it is there and safe, else
-//      the root-folder name; one copy either way), then read the task again for the report. A
-//      change that fails exits 5. One log line, without the user's SID.
+//      the root-folder name; one copy either way; never over another account's task), then read
+//      the task again for the report. A change that fails exits 5, also when another account's
+//      tasks hold every name the task may have (kTaskTakenHr), which only an administrator can
+//      change: the report says so. One log line, without the user's SID.
 
 #pragma once
 
@@ -64,7 +66,7 @@ struct ScheduleResult {
   bool askedAtSignIn = false;
   bool remove = false;            // the checks were turned off: delete the task
   std::filesystem::path program;  // registering: what the task runs
-  HRESULT error = S_OK;           // the change failed (exit 5)
+  HRESULT error = S_OK;           // the change failed (exit 5); kTaskTakenHr: names taken
   TaskState after;                // the task afterwards
   HRESULT readError = S_OK;       // ... could not be read (the change itself is done)
 };

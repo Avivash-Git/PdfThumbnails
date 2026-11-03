@@ -1,8 +1,9 @@
 // Processes (processes.h) against the real system, on processes this test starts itself: Restart
 // Manager finding a child that holds a file under %TEMP%\pdft-tests, ending that child only
 // when every check passes (with this test program's own image on the allow list instead of the
-// thumbnail process's), and a child finding its parent. Never ends a process it did not start:
-// each holder is matched to the child's process id before anything is ended.
+// thumbnail process's), a child finding its parent, and this program's own parent found with a
+// handle on it. Never ends a process it did not start: each holder is matched to the child's
+// process id before anything is ended.
 
 #include <windows.h>
 
@@ -12,6 +13,7 @@
 #include <wil/resource.h>
 
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -127,6 +129,24 @@ TEST(Parent, AChildFindsThisProcess) {
   ASSERT_EQ(child.Start(test::SelfPath(), L"--pdft-child parent"), S_OK);
   EXPECT_EQ(child.ReadLine(), "parent=" + std::to_string(GetCurrentProcessId()));
   EXPECT_EQ(child.Wait(10000), 0u);
+}
+
+// The parent comes with a handle on that very process, which keeps its id from passing to
+// another one while it is open.
+TEST(Parent, ComesWithAHandleOnIt) {
+  DWORD parentId = 0;
+  wil::unique_handle parent;
+  const HRESULT hr = OpenParentProcess(&parentId, std::addressof(parent));
+  if (hr == HRESULT_FROM_WIN32(ERROR_NOT_FOUND)) {
+    GTEST_SKIP() << "the process that started this test program has ended";
+  }
+  ASSERT_EQ(hr, S_OK);
+  ASSERT_TRUE(parent);
+  EXPECT_NE(parentId, 0u);
+  EXPECT_EQ(GetProcessId(parent.get()), parentId);
+  DWORD found = 0;
+  ASSERT_EQ(GetParentProcessId(&found), S_OK);
+  EXPECT_EQ(found, parentId);
 }
 
 }  // namespace

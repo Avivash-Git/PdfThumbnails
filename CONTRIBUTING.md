@@ -44,6 +44,10 @@ A process counts as elevated when the Administrators group is enabled in its tok
 (`CheckTokenMembership`) **or** its integrity level is above Medium. Either way it must not do the
 per-user work meant for the signed-in user (that user's registry, Explorer's thumbnail cache). Use
 `ProcessContext::elevated` (`src/app/core/context.h`); do not test only one of the two conditions.
+The handler applies the same rule itself, without WIL (`IsAboveMediumOrAdministrator` in
+`src/handler/PdfThumbnails.cpp`), and then refuses to render. Neither uses `TokenElevation`:
+Windows also reports it for a Medium token of the built-in Administrator with Administrators
+deny-only and no privileges, which has no administrator rights.
 
 ### Resource scripts are UTF-8
 
@@ -66,6 +70,11 @@ compares them with the exact text.
 - Everything `--diagnostics` shows goes through `BuildDiagnostics`
   (`src/app/core/diagnostics.cpp`), which masks the whole report at the end: the profile folder,
   the user, computer and domain names and every SID. Add new details there, never next to it.
+- Everything the executables print goes through `Output::Line` and `Output::Error`
+  (`src/app/core/output.cpp`). They show control and bidirectional-control characters as U+FFFD
+  (`DisplayText`), so text from the registry, paths or tasks cannot steer the console. Only
+  `--status --json` is written as is (`Output::Json`), because the JSON writer escapes those
+  characters itself.
 - The log never gets PDF paths or names, or anything else the user typed (a `--test-file` or
   `--out` path is shown on the console only).
 

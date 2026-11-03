@@ -1,6 +1,7 @@
-// pdft_handler_tests: PdfThumbnails.dll loaded in-process, at Medium integrity. The handler
-// refuses to render above Medium, so an elevated run (CI) first relaunches this program at
-// Medium; the child prints "relaunched at Medium integrity".
+// pdft_handler_tests: PdfThumbnails.dll loaded in-process, at Medium integrity as a standard user.
+// The handler refuses to render above Medium and wherever the Administrators group is enabled, so
+// an elevated run (CI) first relaunches this program at Medium with Administrators deny-only; the
+// child prints "relaunched at Medium integrity".
 
 #include <windows.h>
 
@@ -46,8 +47,9 @@ void HandlerEnvironment::SetUp() {
                  << HresultText(hr);
   }
   ASSERT_EQ(hr, S_OK) << "cannot load " << Printable(host_->path()) << ": " << HresultText(hr);
-  std::printf("[ info     ] handler %s, integrity 0x%04lX\n", Printable(host_->path()).c_str(),
-              CurrentIntegrityRid());
+  std::printf("[ info     ] handler %s, integrity 0x%04lX, Administrators %s\n",
+              Printable(host_->path()).c_str(), CurrentIntegrityRid(),
+              CurrentTokenHasEnabledAdministrators() ? "enabled" : "not enabled");
 }
 
 void HandlerEnvironment::TearDown() {

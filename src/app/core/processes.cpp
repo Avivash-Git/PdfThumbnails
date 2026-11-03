@@ -5,6 +5,7 @@
 #include <wil/result_macros.h>
 
 #include <algorithm>
+#include <memory>
 #include <utility>
 
 #include "delay_load.h"
@@ -209,8 +210,14 @@ HRESULT TerminateOwnSessionHolder(const Holder& holder,
 }
 CATCH_RETURN();
 
-HRESULT GetParentProcessId(DWORD* parent) noexcept try {
-  *parent = 0;
+HRESULT GetParentProcessId(DWORD* parent) noexcept {
+  wil::unique_handle process;
+  return OpenParentProcess(parent, std::addressof(process));
+}
+
+HRESULT OpenParentProcess(DWORD* parentId, wil::unique_handle* parent) noexcept try {
+  *parentId = 0;
+  parent->reset();
   HANDLE rawSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   RETURN_LAST_ERROR_IF(rawSnapshot == INVALID_HANDLE_VALUE);
   wil::unique_handle snapshot(rawSnapshot);
@@ -233,7 +240,8 @@ HRESULT GetParentProcessId(DWORD* parent) noexcept try {
   RETURN_IF_FAILED(ProcessStart(GetCurrentProcess(), &ownCreated));
   // Created after this process: the real parent ended and its id went to someone else.
   if (CompareFileTime(&created, &ownCreated) > 0) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-  *parent = candidate;
+  *parentId = candidate;
+  *parent = std::move(process);
   return S_OK;
 }
 CATCH_RETURN();

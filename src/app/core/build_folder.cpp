@@ -86,18 +86,25 @@ HRESULT Sha256Bytes(std::span<const BYTE> bytes, Sha256Digest* digest) noexcept 
   return hash.Finish(digest);
 }
 
-HRESULT Sha256File(const std::filesystem::path& file, Sha256Digest* digest) noexcept try {
+HRESULT Sha256File(const std::filesystem::path& file, Sha256Digest* digest) noexcept {
   digest->fill(0);
   wil::unique_hfile handle;
   const HRESULT opened = OpenFileForReading(file, handle.put());
   if (FAILED(opened)) return opened;
+  return Sha256OpenFile(handle.get(), digest);
+}
+
+HRESULT Sha256OpenFile(HANDLE file, Sha256Digest* digest) noexcept try {
+  digest->fill(0);
+  LARGE_INTEGER origin = {};
+  RETURN_IF_WIN32_BOOL_FALSE(SetFilePointerEx(file, origin, nullptr, FILE_BEGIN));
   Sha256Stream hash;
   RETURN_IF_FAILED(hash.Start());
   std::vector<BYTE> buffer(kHashChunkBytes);
   for (;;) {
     DWORD read = 0;
     RETURN_IF_WIN32_BOOL_FALSE(
-        ReadFile(handle.get(), buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr));
+        ReadFile(file, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr));
     if (read == 0) break;
     RETURN_IF_FAILED(hash.Add(buffer.data(), read));
   }

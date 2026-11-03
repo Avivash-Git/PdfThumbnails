@@ -46,8 +46,9 @@ inline constexpr size_t kPeHeadBytes = 64 * 1024;
 
 // Opens an existing file for reading, letting others read, write and delete it meanwhile, and
 // checks that it is a file on disk: a path from the registry could name a pipe or a device,
-// where a read might wait forever (HRESULT_FROM_WIN32(ERROR_BAD_FILE_TYPE) then). A path that
-// does not exist fails with its own error, which callers treat as an answer.
+// where a read might wait forever (HRESULT_FROM_WIN32(ERROR_BAD_FILE_TYPE) then). A pipe's
+// server gets an identification token at most, never one it could act with. A path that does
+// not exist fails with its own error, which callers treat as an answer.
 [[nodiscard]] HRESULT OpenFileForReading(const std::filesystem::path& file,
                                          HANDLE* handle) noexcept;
 

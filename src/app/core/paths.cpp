@@ -95,10 +95,12 @@ CATCH_RETURN();
 HRESULT Canonicalize(const std::filesystem::path& in, std::filesystem::path* out) noexcept try {
   out->clear();
   // Attributes only, sharing everything: works for folders (backup semantics) and for files
-  // other programs have open. Without FILE_FLAG_OPEN_REPARSE_POINT, links are followed.
-  HANDLE handle = CreateFileW(in.c_str(), FILE_READ_ATTRIBUTES,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                              OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  // other programs have open. Without FILE_FLAG_OPEN_REPARSE_POINT, links are followed. A path
+  // that names a pipe gives its server an identification token at most.
+  HANDLE handle = CreateFileW(
+      in.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      nullptr, OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
   if (handle == INVALID_HANDLE_VALUE) {
     // A missing path is an expected answer here, not a failure worth logging.
     const DWORD error = GetLastError();

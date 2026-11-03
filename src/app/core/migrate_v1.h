@@ -231,6 +231,9 @@ struct MachineRemoval {
   std::vector<std::wstring> failed;
   bool restartPending = false;  // files wait in a trash folder for the next restart
   bool classInV1 = false;       // the machine-wide class still points into a 1.x build folder
+  // The machine-wide class's path is stored to be expanded (REG_EXPAND_SZ), which these steps
+  // never do: which build it loads is not known, so every build folder stayed.
+  bool classForeign = false;
   HRESULT firstError = S_OK;
 };
 
@@ -244,7 +247,9 @@ struct MachineRemoval {
 
 // The machine part: reads the machine-wide class under roots.machine itself, lists
 // <legacyMachineRoot>\app and removes its 1.x folders (PlanMachineV1Removal). Elevated only for
-// the trash; unelevated, a folder in use stays.
+// the trash; unelevated, a folder in use stays. The class's path is read as stored, never
+// expanded (ClassPathExpansion::kNever): one stored as REG_EXPAND_SZ is foreign, and then no
+// folder goes (result->classForeign). The same holds for the two below.
 [[nodiscard]] HRESULT MigrateV1Machine(const RegistryRoots& roots,
                                        const std::filesystem::path& legacyMachineRoot,
                                        const std::filesystem::path& trashParent,

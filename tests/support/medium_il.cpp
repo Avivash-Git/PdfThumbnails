@@ -122,6 +122,14 @@ bool TokenHasEnabledAdministrators(HANDLE token) {
   return member != FALSE;
 }
 
+bool CurrentTokenHasEnabledAdministrators() {
+  Handle token;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, token.out())) {
+    return false;
+  }
+  return TokenHasEnabledAdministrators(token.get());
+}
+
 int ReportOwnToken() {
   Handle token;
   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, token.out())) {
@@ -306,8 +314,10 @@ std::wstring QuoteArgument(const std::wstring& argument) {
   return out;
 }
 
-RelaunchDecision DecideRelaunch(DWORD integrityRid, bool alreadyRelaunched) {
-  if (integrityRid != kUnknownIntegrity && integrityRid <= SECURITY_MANDATORY_MEDIUM_RID) {
+RelaunchDecision DecideRelaunch(DWORD integrityRid, bool administratorsEnabled,
+                                bool alreadyRelaunched) {
+  if (integrityRid != kUnknownIntegrity && integrityRid <= SECURITY_MANDATORY_MEDIUM_RID &&
+      !administratorsEnabled) {
     return RelaunchDecision::kRunHere;
   }
   return alreadyRelaunched ? RelaunchDecision::kRefuse : RelaunchDecision::kRelaunch;
@@ -317,30 +327,40 @@ bool RelaunchAtMediumIfElevated(int* exitCode) {
   wchar_t flag[4] = {};
   const bool relaunched = GetEnvironmentVariableW(kRelaunchedEnv, flag, 4) == 1 && flag[0] == L'1';
   const DWORD rid = CurrentIntegrityRid();
-  switch (DecideRelaunch(rid, relaunched)) {
+  const bool administrators = CurrentTokenHasEnabledAdministrators();
+  const char* const state = administrators ? "enabled" : "not enabled";
+  switch (DecideRelaunch(rid, administrators, relaunched)) {
     case RelaunchDecision::kRunHere:
       if (relaunched) {
         SetEnvironmentVariableW(kRelaunchedEnv, nullptr);
-        std::printf("pdft: relaunched at Medium integrity (0x%04lX)\n", rid);
+        std::printf("pdft: relaunched at Medium integrity (0x%04lX), Administrators %s\n", rid,
+                    state);
         std::fflush(stdout);
       }
       return false;
     case RelaunchDecision::kRefuse:
-      std::fprintf(stderr, "pdft: still at integrity 0x%04lX after relaunching at Medium\n", rid);
+      std::fprintf(stderr,
+                   "pdft: still at integrity 0x%04lX, Administrators %s, after relaunching at "
+                   "Medium\n",
+                   rid, state);
       *exitCode = 1;
       return true;
     case RelaunchDecision::kRelaunch:
       break;
   }
 
-  std::printf("pdft: running at integrity 0x%04lX (above Medium): relaunching at Medium\n", rid);
+  std::printf(
+      "pdft: running at integrity 0x%04lX, Administrators %s: relaunching at Medium as a standard "
+      "user\n",
+      rid, state);
   std::fflush(stdout);
   wchar_t self[MAX_PATH];
   const DWORD length = GetModuleFileNameW(nullptr, self, MAX_PATH);
   Handle token;
+  // Filtered, not label-only: the handler also refuses to render where Administrators is enabled.
   HRESULT hr = length == 0 || length >= MAX_PATH
                    ? E_FAIL
-                   : CreateMediumTokenForSelf(MediumToken::kLabelOnly, token.out());
+                   : CreateMediumTokenForSelf(MediumToken::kFiltered, token.out());
   DWORD code = 1;
   if (SUCCEEDED(hr)) {
     SetEnvironmentVariableW(kRelaunchedEnv, L"1");

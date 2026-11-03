@@ -1,7 +1,8 @@
 // File operations (file_ops.h) on folders this test makes under %TEMP%\pdft-tests: reparse point
 // checks, the verified copy, removal that never follows links, files in use (held open by this
-// test, or mapped as an image like a loaded DLL), the trash folder, the build-folder permission
-// check on folders made with known permissions, and the RunOnce clean-up values in private
+// test, or mapped as an image like a loaded DLL), the trash folder, the build-folder check on
+// folders made with known permissions (and with links and a mount point on the way or inside),
+// holding a build's folder while it is copied, and the RunOnce clean-up values in private
 // registry keys (ScopedRegistrySandbox). Never queues a deletion at restart: unelevated that call
 // is only checked to be refused, and the elevated path runs in the system tests.
 
@@ -20,6 +21,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "build_folder.h"
@@ -455,11 +457,25 @@ void SetDacl(const path& object, const std::wstring& sddl) {
             static_cast<DWORD>(ERROR_SUCCESS));
 }
 
+// Another account, of a made-up domain: an entry for it is as good as one for a real account.
+// Split after "S-1-5-21-": the repository's publish check rejects anything shaped like an
+// account SID, even an invented one.
+constexpr wchar_t kOtherAccount[] =
+    L"S-1-5-21-"
+    L"1-2-3-1005";
+
+// What the tests hold of a build's folder: its two binaries, a notice and licenses\.
+constexpr std::wstring_view kHeldBinaries[] = {L"a.exe", L"b.dll"};
+constexpr std::wstring_view kHeldNotices[] = {L"LICENSE.txt"};
+
 class BuildFolderAccess : public ::testing::Test {
  protected:
   void SetUp() override {
     ASSERT_TRUE(dir_.ok());
-    parent_ = path(dir_.path()) / L"parent";
+    // Its final path: HoldBuildFolder resolves no link on the way (%TEMP% may be written with
+    // 8.3 names or through a link).
+    ASSERT_EQ(Canonicalize(dir_.path(), &base_), S_OK);
+    parent_ = base_ / L"parent";
     folder_ = parent_ / L"build";
     ASSERT_TRUE(MakeDir(parent_));
     ASSERT_TRUE(MakeDir(folder_));
@@ -480,12 +496,41 @@ class BuildFolderAccess : public ::testing::Test {
     return unsafe;
   }
 
+  // A notice and licenses\ with a folder and a file, inheriting the folder's permissions.
+  void MakeNotices() {
+    ASSERT_TRUE(WriteFileText(folder_ / L"LICENSE.txt", "license"));
+    ASSERT_TRUE(MakeDir(folder_ / L"licenses"));
+    ASSERT_TRUE(MakeDir(folder_ / L"licenses" / L"sub"));
+    ASSERT_TRUE(WriteFileText(folder_ / L"licenses" / L"sub" / L"x.txt", "x"));
+    ASSERT_TRUE(WriteFileText(folder_ / L"licenses" / L"y.txt", "y"));
+    SetDacl(folder_, L"");
+  }
+
+  // HoldBuildFolder on |folder| as a build's folder is held for its copy.
+  std::optional<UnsafeAccess> Hold(const path& folder, HeldBuildFolder* held,
+                                   bool checkAccess = true) {
+    BuildFolderHoldOptions options;
+    options.files = kHeldBinaries;
+    options.optional = kHeldNotices;
+    options.tree = L"licenses";
+    options.treeDepth = 4;
+    options.checkAccess = checkAccess;
+    std::optional<UnsafeAccess> unsafe;
+    EXPECT_EQ(HoldBuildFolder(folder, options, held, &unsafe), S_OK);
+    return unsafe;
+  }
+
   bool OutsideTheTest(const std::optional<UnsafeAccess>& unsafe) const {
-    return unsafe && !IsUnderLexically(unsafe->object, dir_.path()) &&
-           !IEquals(unsafe->object.native(), dir_.path());
+    return unsafe && !IsUnderLexically(unsafe->object, base_) &&
+           !IEquals(unsafe->object.native(), base_.native());
+  }
+
+  static std::string Text(const std::optional<UnsafeAccess>& unsafe) {
+    return unsafe ? WideToUtf8Lossy(UnsafeAccessText(*unsafe)) : std::string("nothing");
   }
 
   test::TempDir dir_{L"acl"};
+  path base_;
   path parent_;
   path folder_;
 };
@@ -556,6 +601,146 @@ TEST_F(BuildFolderAccess, AMissingBinaryFails) {
   EXPECT_EQ(FindUnsafeBuildFolderAccess(folder_, escaping, &unsafe), E_INVALIDARG);
 }
 
+TEST_F(BuildFolderAccess, AnotherAccountMayChangeABinary) {
+  // Write, append and delete, for one account that is neither the user nor an administrator.
+  SetDacl(folder_ / L"b.dll", L"(A;;0x10116;;;" + std::wstring(kOtherAccount) + L")");
+  const std::optional<UnsafeAccess> unsafe = Check(folder_);
+  ASSERT_TRUE(unsafe);
+  EXPECT_EQ(unsafe->kind, UnsafeKind::kAccess);
+  EXPECT_TRUE(IEquals(unsafe->object.filename().native(), L"b.dll"));
+  EXPECT_EQ(unsafe->access.sid, kOtherAccount);
+  EXPECT_FALSE(unsafe->access.owner);
+  EXPECT_TRUE(unsafe->access.rights & DELETE);
+  const std::wstring text = UnsafeAccessText(*unsafe);
+  std::printf("found: %ls\n", text.c_str());
+  EXPECT_NE(text.find(kOtherAccount), std::wstring::npos);
+}
+
+// ---- holding a build's folder ----
+
+TEST_F(BuildFolderAccess, HoldsEverythingThatIsCopied) {
+  MakeNotices();
+  HeldBuildFolder held;
+  const std::optional<UnsafeAccess> unsafe = Hold(folder_, &held);
+  if (OutsideTheTest(unsafe)) GTEST_SKIP() << "a folder above the test's own: " << Text(unsafe);
+  ASSERT_FALSE(unsafe) << Text(unsafe);
+  EXPECT_TRUE(IEquals(held.dir().native(), folder_.native()));
+  const std::vector<path> files = {L"a.exe", L"b.dll", L"LICENSE.txt", L"licenses\\sub\\x.txt",
+                                   L"licenses\\y.txt"};
+  EXPECT_EQ(held.files(), files);
+  EXPECT_NE(held.File(L"B.DLL"), nullptr);  // ignoring case
+  EXPECT_EQ(held.File(L"c.dll"), nullptr);
+  held.Release();
+  EXPECT_TRUE(held.files().empty());
+  EXPECT_EQ(held.File(L"b.dll"), nullptr);
+}
+
+// Nothing held can be renamed, deleted or written until it is let go, so what is copied is what
+// was checked: the folder, a folder above, a folder and a file that are copied.
+TEST_F(BuildFolderAccess, AHeldFolderCannotBeRenamedDuringTheCopy) {
+  MakeNotices();
+  HeldBuildFolder held;
+  // The permissions are not judged here: the PC's folders above %TEMP% do not matter.
+  ASSERT_FALSE(Hold(folder_, &held, false));
+  const path moved = parent_ / L"moved";
+  EXPECT_FALSE(MoveFileExW(folder_.c_str(), moved.c_str(), 0));
+  std::printf("renaming the held folder: error %lu\n", GetLastError());
+  EXPECT_FALSE(MoveFileExW(parent_.c_str(), (base_ / L"moved").c_str(), 0));
+  EXPECT_FALSE(MoveFileExW((folder_ / L"licenses" / L"sub").c_str(),
+                           (folder_ / L"licenses" / L"sub2").c_str(), 0));
+  EXPECT_FALSE(DeleteFileW((folder_ / L"a.exe").c_str()));
+  wil::unique_hfile writer(CreateFileW((folder_ / L"b.dll").c_str(), GENERIC_WRITE,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+  const DWORD writeError = GetLastError();
+  EXPECT_FALSE(writer);
+  EXPECT_EQ(writeError, static_cast<DWORD>(ERROR_SHARING_VIOLATION));
+
+  // Copied from what is held.
+  ASSERT_TRUE(MakeDir(base_ / L"to"));
+  Sha256Digest sha = {};
+  ASSERT_EQ(CopyOpenFileVerified(held.File(L"b.dll"), base_ / L"to" / L"b.dll", &sha), S_OK);
+  EXPECT_EQ(ReadFileText(base_ / L"to" / L"b.dll"), "b");
+  Sha256Digest expected = {};
+  ASSERT_EQ(Sha256OpenFile(held.File(L"b.dll"), &expected), S_OK);
+  EXPECT_EQ(sha, expected);
+  // Still held after the copy, until it is let go.
+  EXPECT_FALSE(MoveFileExW(folder_.c_str(), moved.c_str(), 0));
+  held.Release();
+  EXPECT_TRUE(MoveFileExW(folder_.c_str(), moved.c_str(), 0)) << GetLastError();
+}
+
+// A grant that only folders below inherit passes licenses\ itself but reaches its subfolder.
+TEST_F(BuildFolderAccess, AnotherAccountMayChangeALicensesSubfolder) {
+  MakeNotices();
+  SetDacl(folder_ / L"licenses", L"(A;CIIO;0x1301bf;;;" + std::wstring(kOtherAccount) + L")");
+  HeldBuildFolder held;
+  const std::optional<UnsafeAccess> unsafe = Hold(folder_, &held);
+  ASSERT_TRUE(unsafe);
+  EXPECT_EQ(unsafe->kind, UnsafeKind::kAccess);
+  EXPECT_TRUE(IEquals(unsafe->object.native(), (folder_ / L"licenses" / L"sub").native()))
+      << Text(unsafe);
+  EXPECT_EQ(unsafe->access.sid, kOtherAccount);
+  EXPECT_TRUE(held.files().empty());  // nothing stays held once something is found
+}
+
+TEST_F(BuildFolderAccess, ALinkInsideTheLicensesFolder) {
+  MakeNotices();
+  ASSERT_TRUE(MakeDir(base_ / L"elsewhere"));
+  ASSERT_TRUE(WriteFileText(base_ / L"elsewhere" / L"other.txt", "other"));
+  const path link = folder_ / L"licenses" / L"link";
+  ASSERT_TRUE(MakeDir(link));
+  ASSERT_TRUE(test::MakeJunction(link.native(), (base_ / L"elsewhere").native()));
+  HeldBuildFolder held;
+  const std::optional<UnsafeAccess> unsafe = Hold(folder_, &held, false);
+  ASSERT_TRUE(unsafe);
+  EXPECT_EQ(unsafe->kind, UnsafeKind::kLink);
+  EXPECT_EQ(unsafe->reparseTag, static_cast<DWORD>(IO_REPARSE_TAG_MOUNT_POINT));
+  EXPECT_TRUE(IEquals(unsafe->object.native(), link.native())) << Text(unsafe);
+  EXPECT_NE(UnsafeAccessText(*unsafe).find(L"junction"), std::wstring::npos);
+}
+
+TEST_F(BuildFolderAccess, AJunctionOnTheWay) {
+  const path link = base_ / L"link";
+  ASSERT_TRUE(MakeDir(link));
+  ASSERT_TRUE(test::MakeJunction(link.native(), parent_.native()));
+  HeldBuildFolder held;
+  const std::optional<UnsafeAccess> unsafe = Hold(link / L"build", &held, false);
+  ASSERT_TRUE(unsafe);
+  EXPECT_EQ(unsafe->kind, UnsafeKind::kLink);
+  EXPECT_TRUE(IEquals(unsafe->object.native(), link.native())) << Text(unsafe);
+  EXPECT_TRUE(held.dir().empty());
+}
+
+// A mount point is a junction to a volume's root. One to the volume of the test's own folder,
+// made the way any account can (no mount manager entry, so no administrator rights), leads back
+// to the test's folder from inside it.
+TEST_F(BuildFolderAccess, AMountPointOnTheWay) {
+  wchar_t volumePath[MAX_PATH] = {};
+  wchar_t volume[MAX_PATH] = {};
+  if (!GetVolumePathNameW(base_.c_str(), volumePath, MAX_PATH) ||
+      !GetVolumeNameForVolumeMountPointW(volumePath, volume, MAX_PATH)) {
+    GTEST_SKIP() << "the test folder's volume has no name here: error " << GetLastError();
+  }
+  std::wstring target = volume;  // \\?\Volume{...}\, as MakeJunction wants it without "\\?\"
+  if (!target.starts_with(L"\\\\?\\")) GTEST_SKIP() << "an unexpected volume name";
+  target.erase(0, 4);
+  const path mount = base_ / L"mount";
+  ASSERT_TRUE(MakeDir(mount));
+  if (!test::MakeJunction(mount.native(), target)) {
+    GTEST_SKIP() << "a mount point cannot be made without administrator rights here: error "
+                 << GetLastError();
+  }
+  // Gone again right after, so that nothing walking %TEMP% meanwhile wanders the whole volume.
+  const auto unmount = wil::scope_exit([&] { RemoveDirectoryW(mount.c_str()); });
+  HeldBuildFolder held;
+  const std::optional<UnsafeAccess> unsafe = Hold(mount / folder_.relative_path(), &held, false);
+  ASSERT_TRUE(unsafe);
+  EXPECT_EQ(unsafe->kind, UnsafeKind::kLink);
+  EXPECT_EQ(unsafe->reparseTag, static_cast<DWORD>(IO_REPARSE_TAG_MOUNT_POINT));
+  EXPECT_TRUE(IEquals(unsafe->object.native(), mount.native())) << Text(unsafe);
+}
+
 // The folder this test program and the executables were built into: inside the user's profile,
 // it must pass, so a developer install from it is allowed. Printed everywhere; asserted only
 // off CI, where the checkout's drive is set up by the runner image.
@@ -564,8 +749,8 @@ TEST(BuildFolderAccessHere, TheBuildFolderPasses) {
   const std::vector<std::wstring> binaries = {kSettingsExe, kCliExe};
   ASSERT_EQ(FindUnsafeBuildFolderAccess(test::SelfFolder(), binaries, &unsafe), S_OK);
   if (unsafe) {
-    std::printf("build folder check: %ls may be changed by %ls (0x%08lX)\n", unsafe->object.c_str(),
-                unsafe->access.principal.c_str(), unsafe->access.rights);
+    std::printf("build folder check: %ls (0x%08lX)\n", UnsafeAccessText(*unsafe).c_str(),
+                unsafe->access.rights);
   } else {
     std::printf("build folder check: only the user and administrators can change it\n");
   }

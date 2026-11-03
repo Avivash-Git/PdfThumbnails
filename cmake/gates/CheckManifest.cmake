@@ -5,8 +5,8 @@
 #
 # Both kinds: one execution level, asInvoker without UI access; Windows 10/11 supportedOS;
 # long paths; this architecture. settings: Per-Monitor V2 DPI awareness and Common Controls v6
-# (the side-by-side binding that keeps COMCTL32 out of the executable's folder). cli: neither
-# (it shows no windows).
+# (the side-by-side binding to the copy in WinSxS; it does not stop an <exe>.local redirection,
+# see cmake/Hardening.cmake). cli: neither (it shows no windows).
 
 cmake_minimum_required(VERSION 4.3)
 include("${CMAKE_CURRENT_LIST_DIR}/PeTools.cmake")

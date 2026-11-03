@@ -117,6 +117,12 @@ class Install : public ::testing::Test {
     ASSERT_TRUE(WriteFileText(stage_ / L"licenses" / L"pdfium" / L"LICENSE.a", "a\n"));
     ASSERT_TRUE(WriteFileText(stage_ / L"licenses" / L"wil-LICENSE.txt", "wil\n"));
     ASSERT_TRUE(SetFolderDacl(stage_, L""));
+    // Its final path, the way --install names it: the step for all users holds the folder as it
+    // is given, where a link on the way is refused, and %TEMP% may be written with 8.3 names or
+    // through a link.
+    path canonicalStage;
+    ASSERT_HRESULT_SUCCEEDED(Canonicalize(stage_, &canonicalStage));
+    stage_ = canonicalStage;
     // The folders above %TEMP% are the PC's; where other accounts could change one of them, the
     // tests that copy from the stage for all users skip.
     const std::vector<std::wstring> binaries = {kSettingsExe, kCliExe, kHandlerDll, kPdfiumDll};
@@ -487,9 +493,107 @@ TEST_F(Install, TheStepForAllUsersSaysWhereItFailed) {
     ASSERT_TRUE(trace.failure());
     EXPECT_STREQ(trace.failure()->step, L"folder-access");
     EXPECT_STREQ(trace.failure()->site.file, "file_ops.cpp");
-    EXPECT_STREQ(trace.failure()->site.function, "FindUnsafeBuildFolderAccess");
+    EXPECT_STREQ(trace.failure()->site.function, "HoldBuildFolder");
     EXPECT_STREQ(trace.failure()->detail.data(), kPdfiumDll);
   }
+}
+
+// ---- The build's folder held for its copy ---------------------------------------------------
+
+// What a staged runtime holds: the binaries, the notice at the top and everything in licenses\,
+// and nobody but this user and the administrators can change any of it.
+TEST_F(Install, TheStagedRuntimeIsHeldWhole) {
+  HeldBuildFolder held;
+  std::optional<UnsafeAccess> unsafe;
+  ASSERT_HRESULT_SUCCEEDED(HoldBuildFolder(stage_, BuildHoldOptions(), &held, &unsafe));
+  if (unsafe && !IEquals(unsafe->object.native(), stage_.native()) &&
+      !IsUnderLexically(unsafe->object, stage_)) {
+    GTEST_SKIP() << "the folders above %TEMP% are the PC's: "
+                 << WideToUtf8Lossy(UnsafeAccessText(*unsafe));
+  }
+  ASSERT_FALSE(unsafe) << WideToUtf8Lossy(UnsafeAccessText(*unsafe));
+  const std::vector<path> files = {kSettingsExe,
+                                   kCliExe,
+                                   kHandlerDll,
+                                   kPdfiumDll,
+                                   L"LICENSE.txt",
+                                   L"licenses\\pdfium\\LICENSE.a",
+                                   L"licenses\\wil-LICENSE.txt"};
+  EXPECT_EQ(held.files(), files);
+}
+
+// The copy reads what is held, and the folder cannot be renamed or replaced until it is done.
+TEST_F(Install, CopiesFromWhatIsHeld) {
+  BuildSource source;
+  SourceCheck check;
+  ASSERT_HRESULT_SUCCEEDED(ReadBuildSource(stage_, probes_.context.osArch, &source, &check));
+  HeldBuildFolder held;
+  std::optional<UnsafeAccess> unsafe;
+  BuildFolderHoldOptions hold = BuildHoldOptions();
+  hold.checkAccess = false;  // the folders above %TEMP% are the PC's
+  ASSERT_HRESULT_SUCCEEDED(HoldBuildFolder(stage_, hold, &held, &unsafe));
+  ASSERT_FALSE(unsafe);
+  const path moved = path(temp_.path()) / L"moved";
+  EXPECT_FALSE(MoveFileExW(stage_.c_str(), moved.c_str(), 0));
+  CopyBuildOptions options;
+  options.held = &held;
+  const path root = path(temp_.path()) / L"root";
+  CopyBuildResult result;
+  ASSERT_HRESULT_SUCCEEDED(CopyBuild(source, root, options, &result));
+  EXPECT_EQ(result.copied, 2u + 2u + source.notices.size());
+  EXPECT_TRUE(Exists(root / L"licenses" / L"pdfium" / L"LICENSE.a"));
+  EXPECT_FALSE(MoveFileExW(stage_.c_str(), moved.c_str(), 0));
+  held.Release();
+
+  // A file put there after the folder was held is not held, and never read by its path instead.
+  ASSERT_HRESULT_SUCCEEDED(HoldBuildFolder(stage_, hold, &held, &unsafe));
+  ASSERT_TRUE(WriteFileText(stage_ / L"not-held.txt", "x"));
+  source.notices.push_back(L"not-held.txt");
+  EXPECT_EQ(CopyBuild(source, root, options, &result), E_UNEXPECTED);
+  EXPECT_FALSE(Exists(root / L"not-held.txt"));
+  held.Release();
+}
+
+TEST_F(Install, TheStepForAllUsersRefusesALinkInLicenses) {
+  const path elsewhere = path(temp_.path()) / L"elsewhere";
+  ASSERT_TRUE(MakeDirs(elsewhere));
+  ASSERT_TRUE(WriteFileText(elsewhere / L"other.txt", "other\n"));
+  const path link = stage_ / L"licenses" / L"link";
+  ASSERT_TRUE(MakeDirs(link));
+  ASSERT_TRUE(test::MakeJunction(link.native(), elsewhere.native()));
+  MachineInstallOptions options;
+  options.source = stage_;
+  options.machineRoot = paths_.machineRoot;
+  options.legacyMachineRoot = paths_.legacyMachineRoot;
+  options.trashParent = temp_.path();
+  options.taskFolder.clear();
+  options.checkSourceAccess = false;  // links are refused all the same
+  options.osArch = probes_.context.osArch;
+  MachineInstallResult result;
+  EXPECT_EQ(InstallForAllUsers(options, roots_, &result), kUnsafeBuildFolderHr);
+  ASSERT_TRUE(result.unsafe);
+  EXPECT_EQ(result.unsafe->kind, UnsafeKind::kLink);
+  EXPECT_TRUE(IEquals(result.unsafe->object.native(), link.native()));
+  EXPECT_FALSE(Exists(paths_.machineRoot));
+  EXPECT_FALSE(MachineClassDll());
+}
+
+TEST_F(Install, PerUserInstallRefusesALicensesFolderOthersMayChange) {
+  const std::wstring other =
+      L"S-1-5-21-"
+      L"1-2-3-1005";
+  const path pdfium = stage_ / L"licenses" / L"pdfium";
+  ASSERT_TRUE(SetFolderDacl(pdfium, L"(A;OICI;0x1301bf;;;" + other + L")"));
+  InstallResult result;
+  ASSERT_HRESULT_SUCCEEDED(
+      InstallFromOwnFolder(MakeInstallOptions(Scope::kUser), roots_, probes_, &result));
+  EXPECT_EQ(result.refusal, InstallRefusal::kUnsafeFolder);
+  EXPECT_EQ(result.code, ExitCode::kWrongContext);
+  ASSERT_TRUE(result.unsafe);
+  EXPECT_TRUE(IEquals(result.unsafe->object.native(), pdfium.native()));
+  EXPECT_EQ(result.unsafe->access.sid, other);
+  EXPECT_FALSE(Exists(paths_.userRoot / kSettingsExe));
+  EXPECT_FALSE(UserClassDll());
 }
 
 TEST_F(Install, RepairMachineClassPicksTheNewestCompleteBuild) {

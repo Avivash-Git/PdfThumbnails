@@ -9,6 +9,7 @@
 #include "log.h"
 #include "project_config.h"
 #include "settings.h"
+#include "status_format.h"
 #include "strings.h"
 #include "zoom.h"
 
@@ -77,6 +78,9 @@ HRESULT TakeLock(const wchar_t* command, DWORD waitMs, std::optional<OperationLo
     Log(LogLevel::kWarning, command,
         std::wstring(command) + L" result=failed named-objects-refused hr=" + HResultText(hr));
     return S_OK;
+  }
+  if (SUCCEEDED(hr) && lock->has_value() && (*lock)->sessionOnly()) {
+    Log(LogLevel::kWarning, command, std::wstring(command) + L" lock=session-only");
   }
   return hr;
 }
@@ -200,7 +204,14 @@ HRESULT SetupUser(const SetupUserOptions& options, const RegistryRoots& roots,
     result->task = SetupTaskOptions(options.checks, current);
     hr = probes.ApplyTaskOptions(before.taskLocation, result->task, *program, context);
     result->taskRegistered = SUCCEEDED(hr) && !HasNoTriggers(result->task);
-    if (FAILED(hr)) Failed(&failures, L"task", hr);
+    result->taskTaken = hr == kTaskTakenHr;
+    if (result->taskTaken) {
+      // Only an administrator can free the names: the line says so, and which tasks to remove.
+      failures.push_back(L"task: " + TaskTakenText() + L" (" + HResultText(hr) + L"). " +
+                         TaskTakenHint(before.taskLocation));
+    } else if (FAILED(hr)) {
+      Failed(&failures, L"task", hr);
+    }
   }
 
   // 6. Thumbnail processes that still hold an old build, so the new one loads.
@@ -241,9 +252,11 @@ HRESULT SetupUser(const SetupUserOptions& options, const RegistryRoots& roots,
   result->code = failures.empty() ? ExitCode::kOk : ExitCode::kFailed;
   LogInfo(L"setup-user", L"setup-user result=" + std::wstring(CheckResultName(result->code)) +
                              L" runonce=" + std::to_wstring(result->runOnceDeleted) + L" task=" +
-                             (result->taskRegistered ? L"yes" : L"no") + L" holders-ended=" +
-                             std::to_wstring(result->holdersEnded) + L" failures=" +
-                             std::to_wstring(failures.size()));
+                             (result->taskRegistered ? L"yes"
+                              : result->taskTaken    ? L"taken"
+                                                     : L"no") +
+                             L" holders-ended=" + std::to_wstring(result->holdersEnded) +
+                             L" failures=" + std::to_wstring(failures.size()));
   return S_OK;
 }
 CATCH_RETURN();
@@ -268,13 +281,10 @@ HRESULT SetupMachine(const SetupMachineOptions& options, const RegistryRoots& ro
     result->code = ExitCode::kWrongContext;
     return S_OK;
   }
-  std::optional<OperationLock> lock;
-  RETURN_IF_FAILED(TakeLock(L"setup-machine", options.lockWaitMs, &lock, &result->busy,
-                            &result->namedObjectsRefused));
-  if (result->busy || result->namedObjectsRefused) {
-    result->code = result->busy ? ExitCode::kBusy : ExitCode::kFailed;
-    return S_OK;
-  }
+  // No operation lock: it is named after one user, so it would not keep out another
+  // administrator's steps anyway, and any account may make its name first. In session 0 (a
+  // deployment tool running this as SYSTEM) nothing else is left to take, so that account could
+  // stop the step. The installer runs one at a time by itself.
   EnginePaths paths;
   if (options.paths) {
     paths = *options.paths;

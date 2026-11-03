@@ -118,14 +118,16 @@ jobs:
           call scripts\build.cmd %PRESET% || exit /b 1
 
       # The runner is elevated (High integrity): the handler tests must have relaunched
-      # themselves at Medium, the elevated-refusal test must have run, not skipped, and
-      # gate.planting must have run the executables' elevated-only command too (its own line,
+      # themselves at Medium, the elevated-refusal test must have run, not skipped (its copy at
+      # Medium with Administrators still enabled refused too), and gate.planting must have run the
+      # executables' elevated-only command too (its own line,
       # "<exe> --status --no-live-test -> exit 0x...", which no other test prints). The task
       # tests that only an elevated runner can run (the protected task folder, a standard user's
-      # task in it, --checks refused elevated and run at Medium where nothing is installed, the
-      # writing commands --setup-user, --migrate-v1, --install and --uninstall refused elevated,
-      # --setup-machine in test places) skip quietly elsewhere, so each must have printed its own
-      # line here.
+      # task in it, another account's tasks at the user's task names, --checks refused elevated
+      # and run at Medium where nothing is installed, the writing commands --setup-user,
+      # --migrate-v1, --install and --uninstall refused elevated, --diagnostics without the log
+      # and --diagnostics --out refused elevated, --setup-machine in test places) skip quietly
+      # elsewhere, so each must have printed its own line here.
       - name: Check the elevated test paths
         if: env.PDFT_ARCH == 'x64'
         run: |
@@ -135,18 +137,23 @@ jobs:
           "%BIN%\pdft-run-medium.exe" -- "%BIN%\pdft-run-medium.exe" --check-token
           findstr /c:"pdft: relaunched at Medium integrity" "%LOG%" || (echo ::error::The handler tests did not relaunch at Medium integrity& exit /b 1)
           findstr /c:"ok: the handler refuses to render in an elevated process" "%LOG%" || (echo ::error::handler.refuses_elevated did not run elevated& exit /b 1)
+          findstr /c:"ok: the handler refuses to render at Medium integrity with Administrators enabled" "%LOG%" || (echo ::error::handler.refuses_elevated did not check a Medium token with Administrators enabled& exit /b 1)
           findstr /l /c:"--status --no-live-test -> exit 0x" "%LOG%" || (echo ::error::gate.planting did not run --status elevated& exit /b 1)
           findstr /l /c:"[ tasks ] folder made as" "%LOG%" || (echo ::error::EnsureTaskFolder did not make the protected task folder elevated& exit /b 1)
           findstr /l /c:"[ tasks ] repaired a folder a standard user made:" "%LOG%" || (echo ::error::EnsureTaskFolder did not repair a folder a standard user made& exit /b 1)
           findstr /l /c:"[ tasks ] standard user: apply-task hr=0x00000000 elevated=0" "%LOG%" || (echo ::error::A standard user did not register a task in the protected folder& exit /b 1)
           findstr /l /c:"[ tasks ] someone else's task in the folder skipped: yes" "%LOG%" || (echo ::error::ReadTask did not skip another account's task in the protected folder& exit /b 1)
           findstr /l /c:"[ tasks ] every user's task removed with the folder: yes" "%LOG%" || (echo ::error::DeleteTaskFolderAllUsers did not remove a standard user's task with the folder& exit /b 1)
+          findstr /l /c:"[ tasks ] another account's task in the folder kept, the fallback name used: yes" "%LOG%" || (echo ::error::ApplyTaskOptions registered over or deleted another account's task in the protected folder& exit /b 1)
+          findstr /l /c:"[ tasks ] another account's task under the fallback name kept, the folder used: yes" "%LOG%" || (echo ::error::ApplyTaskOptions deleted another account's task under the fallback name& exit /b 1)
+          findstr /l /c:"[ tasks ] standard user with both names taken: apply-task hr=0x800402E8 elevated=0" "%LOG%" || (echo ::error::A standard user's registration did not answer that another account's tasks hold both names& exit /b 1)
           findstr /l /c:"--checks default (elevated) -> exit 8" "%LOG%" || (echo ::error::--checks was not refused elevated& exit /b 1)
           findstr /l /c:"--checks default (not installed) -> exit " "%LOG%" || (echo ::error::--checks did not run at Medium integrity where nothing is installed& exit /b 1)
           findstr /l /c:" --setup-user (elevated) -> exit 8" "%LOG%" || (echo ::error::--setup-user was not refused elevated& exit /b 1)
           findstr /l /c:" --migrate-v1 (elevated) -> exit 8" "%LOG%" || (echo ::error::--migrate-v1 was not refused elevated& exit /b 1)
           findstr /l /c:" --install (elevated) -> exit 8" "%LOG%" || (echo ::error::--install was not refused elevated& exit /b 1)
           findstr /l /c:" --uninstall --yes (elevated) -> exit 8" "%LOG%" || (echo ::error::--uninstall was not refused elevated& exit /b 1)
+          findstr /l /c:" --diagnostics --out (elevated) -> exit 8" "%LOG%" || (echo ::error::--diagnostics --out was not refused elevated& exit /b 1)
           findstr /l /c:"[ setup ] --setup-machine in test places (elevated) -> exit " "%LOG%" || (echo ::error::--setup-machine did not run elevated in test places& exit /b 1)
           findstr /l /c:"[ install ] --uninstall-cleanup machine part in test places (elevated): removed" "%LOG%" || (echo ::error::--uninstall-cleanup did not remove the part for all users elevated in test places& exit /b 1)
 
@@ -269,17 +276,22 @@ jobs:
           t\pdft-run-medium.exe -- t\pdft-run-medium.exe --check-token
           findstr /c:"pdft: relaunched at Medium integrity" t\Testing\Temporary\LastTest.log || (echo ::error::The handler tests did not relaunch at Medium integrity& exit /b 1)
           findstr /c:"ok: the handler refuses to render in an elevated process" t\Testing\Temporary\LastTest.log || (echo ::error::handler.refuses_elevated did not run elevated& exit /b 1)
+          findstr /c:"ok: the handler refuses to render at Medium integrity with Administrators enabled" t\Testing\Temporary\LastTest.log || (echo ::error::handler.refuses_elevated did not check a Medium token with Administrators enabled& exit /b 1)
           findstr /l /c:"[ tasks ] folder made as" t\Testing\Temporary\LastTest.log || (echo ::error::EnsureTaskFolder did not make the protected task folder elevated& exit /b 1)
           findstr /l /c:"[ tasks ] repaired a folder a standard user made:" t\Testing\Temporary\LastTest.log || (echo ::error::EnsureTaskFolder did not repair a folder a standard user made& exit /b 1)
           findstr /l /c:"[ tasks ] standard user: apply-task hr=0x00000000 elevated=0" t\Testing\Temporary\LastTest.log || (echo ::error::A standard user did not register a task in the protected folder& exit /b 1)
           findstr /l /c:"[ tasks ] someone else's task in the folder skipped: yes" t\Testing\Temporary\LastTest.log || (echo ::error::ReadTask did not skip another account's task in the protected folder& exit /b 1)
           findstr /l /c:"[ tasks ] every user's task removed with the folder: yes" t\Testing\Temporary\LastTest.log || (echo ::error::DeleteTaskFolderAllUsers did not remove a standard user's task with the folder& exit /b 1)
+          findstr /l /c:"[ tasks ] another account's task in the folder kept, the fallback name used: yes" t\Testing\Temporary\LastTest.log || (echo ::error::ApplyTaskOptions registered over or deleted another account's task in the protected folder& exit /b 1)
+          findstr /l /c:"[ tasks ] another account's task under the fallback name kept, the folder used: yes" t\Testing\Temporary\LastTest.log || (echo ::error::ApplyTaskOptions deleted another account's task under the fallback name& exit /b 1)
+          findstr /l /c:"[ tasks ] standard user with both names taken: apply-task hr=0x800402E8 elevated=0" t\Testing\Temporary\LastTest.log || (echo ::error::A standard user's registration did not answer that another account's tasks hold both names& exit /b 1)
           findstr /l /c:"--checks default (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--checks was not refused elevated& exit /b 1)
           findstr /l /c:"--checks default (not installed) -> exit " t\Testing\Temporary\LastTest.log || (echo ::error::--checks did not run at Medium integrity where nothing is installed& exit /b 1)
           findstr /l /c:" --setup-user (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--setup-user was not refused elevated& exit /b 1)
           findstr /l /c:" --migrate-v1 (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--migrate-v1 was not refused elevated& exit /b 1)
           findstr /l /c:" --install (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--install was not refused elevated& exit /b 1)
           findstr /l /c:" --uninstall --yes (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--uninstall was not refused elevated& exit /b 1)
+          findstr /l /c:" --diagnostics --out (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--diagnostics --out was not refused elevated& exit /b 1)
           findstr /l /c:"[ setup ] --setup-machine in test places (elevated) -> exit " t\Testing\Temporary\LastTest.log || (echo ::error::--setup-machine did not run elevated in test places& exit /b 1)
           findstr /l /c:"[ install ] --uninstall-cleanup machine part in test places (elevated): removed" t\Testing\Temporary\LastTest.log || (echo ::error::--uninstall-cleanup did not remove the part for all users elevated in test places& exit /b 1)
 

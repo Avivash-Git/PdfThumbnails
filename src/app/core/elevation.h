@@ -22,9 +22,14 @@
 //
 // Progress lines go back to the process that asked, through a named pipe that process creates
 // before starting the elevated one (\\.\pipe\<Product>.Elevated.<its process id>, first
-// instance only, open to the user and Administrators). The elevated process writes there only
-// after making sure that the pipe's server is its own parent process; it connects anonymously,
-// so the server cannot act with its rights. Nothing it reads ever comes from the pipe.
+// instance only, owned by its user and open to the user and Administrators). The name is
+// predictable, so the elevated process writes there only after making sure that the pipe's
+// server is its own parent process (held open while it checks, so the id stays the parent's),
+// in the parent's session, and that the pipe's owner is the parent's user (no other account can
+// make it that). It connects anonymously, so the server cannot act with its rights, and gives
+// each line a few seconds at most, so a server that does not read cannot hold up the step.
+// Nothing it reads ever comes from the pipe. When someone else made a pipe of that name first,
+// the step runs without a report, and the asking side records why (ReportChannelTaken).
 
 #pragma once
 
@@ -175,13 +180,37 @@ class ElevatedReporter;
 
 // ---- The reporting channel ------------------------------------------------------------------
 
-// Lines longer than this are cut; the parent keeps at most kMaxReportLines lines.
+// Lines longer than this are cut; the parent keeps at most kMaxReportLines lines, from the first
+// kMaxReportBytes bytes that arrive. It reads the rest too, and drops it: left in the pipe, it
+// would make the elevated process wait for room.
 inline constexpr size_t kMaxReportLineChars = 1024;
 inline constexpr size_t kMaxReportLines = 512;
+inline constexpr size_t kMaxReportBytes = 256 * 1024;
+
+// How long the elevated process waits for the pipe to take one line. A parent that does not read
+// must not hold up the step: past this, the step goes on without a report.
+inline constexpr DWORD kReportWriteTimeoutMs = 5000;
 
 // The pipe of the process |parentProcessId|: \\.\pipe\<Product>.Elevated.<id>. May throw
 // std::bad_alloc.
 std::wstring ElevationPipeName(DWORD parentProcessId);
+
+// What the elevated side knows about the pipe named after its parent when it decides whether to
+// write there.
+struct ReportServerFacts {
+  DWORD parentId = 0;       // its parent (OpenParentProcess, kept open while it decides)
+  DWORD parentSession = 0;  // the parent's session
+  DWORD serverId = 0;       // the process that made the pipe (GetNamedPipeServerProcessId)
+  DWORD serverSession = 0;  // that process's session (GetNamedPipeServerSessionId)
+  // The pipe's owner is the user of the parent's token.
+  bool ownerIsParentsUser = false;
+};
+
+// Whether the elevated side writes to the pipe (pure): only when its parent made it, in the
+// parent's session, and it is owned by the parent's user. The process id alone is not enough:
+// another account's pipe could carry an id that has since passed to the parent, but no other
+// account can make the parent's user its owner.
+bool TrustReportServer(const ReportServerFacts& facts) noexcept;
 
 // The elevated side's end: connects to its parent's pipe and writes lines to it.
 class ElevatedReporter {
@@ -190,18 +219,22 @@ class ElevatedReporter {
   ElevatedReporter(ElevatedReporter&&) noexcept = default;
   ElevatedReporter& operator=(ElevatedReporter&&) noexcept = default;
 
-  // Connects to the pipe named after this process's parent, but only when the parent (still the
-  // process that created this one: not created after it) is the pipe's server. Without a pipe,
-  // or with someone else's, the reporter stays unconnected and Line() does nothing.
+  // Connects to the pipe named after this process's parent (still the process that created this
+  // one: not created after it, and kept open while the pipe is checked), but only when
+  // TrustReportServer trusts it. Without a pipe, with someone else's, or when the pipe's or the
+  // parent's facts cannot be read, the reporter stays unconnected and Line() does nothing.
   static ElevatedReporter Connect() noexcept;
 
   bool connected() const noexcept { return pipe_.is_valid(); }
   // Writes one line (UTF-8, control characters as spaces, at most kMaxReportLineChars). A write
-  // that fails disconnects the reporter.
+  // that fails, or that the pipe does not take within kReportWriteTimeoutMs (it is cancelled),
+  // disconnects the reporter for the rest of the step; the step's exit code still tells how it
+  // ended.
   void Line(std::wstring_view text) noexcept;
 
  private:
-  wil::unique_hfile pipe_;
+  wil::unique_hfile pipe_;             // opened for overlapped I/O
+  wil::unique_event_nothrow written_;  // set when a write to |pipe_| has ended
 };
 
 // The asking side's end: the pipe, and a thread that collects what arrives.
@@ -212,14 +245,16 @@ class ElevationReportServer {
   ~ElevationReportServer();
 
   // Creates this process's pipe (first instance only: a pipe of that name that someone else made
-  // first fails with HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED) or ERROR_PIPE_BUSY) with a DACL for
-  // |userSid| and Administrators, and starts collecting.
+  // first fails with HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED) or ERROR_PIPE_BUSY), owned by
+  // |userSid| (this process's user, GetCurrentUserSid: the elevated side writes only to a pipe
+  // its parent's user owns) with a DACL for |userSid| and Administrators, and starts collecting.
   [[nodiscard]] static HRESULT Create(std::wstring_view userSid,
                                       std::unique_ptr<ElevationReportServer>* server) noexcept;
 
   // Call once the elevated process has ended: stops collecting (waiting briefly for the rest of
-  // its lines) and returns the lines, but only if the client was |processId|; otherwise none.
-  // |fromClient| (optional) tells whether |processId| was the client.
+  // its lines, also when a client keeps writing) and returns the lines of the first
+  // kMaxReportBytes bytes (the rest was read and dropped), but only if the client was
+  // |processId|; otherwise none. |fromClient| (optional) tells whether |processId| was the client.
   std::vector<std::wstring> Finish(DWORD processId, bool* fromClient = nullptr) noexcept;
 
   // What the collecting thread shares with this object (elevation.cpp only).
@@ -274,6 +309,9 @@ struct ElevatedRun {
   DWORD exitCode = 0;
   bool reportChannel = false;        // the elevated process wrote to this process's pipe
   std::vector<std::wstring> report;  // what it wrote, as untrusted text
+  // Making this process's pipe, before the launch. A failure leaves the step without a report
+  // (it runs all the same); ReportChannelTaken tells when another process caused it.
+  HRESULT reportServer = S_OK;
 };
 
 // Whether |run| failed because the step did not get administrator rights: it was launched and
@@ -281,9 +319,18 @@ struct ElevatedRun {
 // (pure).
 bool LackedAdministratorRights(const ElevatedRun& run) noexcept;
 
+// Whether |run| had no report channel because another process had made a pipe of its name
+// first: making it failed with HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED) or ERROR_PIPE_BUSY
+// (pure). The step ran all the same and its exit code still tells how it ended; only its own
+// report could not come back, which is worth telling the user ("the report channel was taken by
+// another process").
+bool ReportChannelTaken(const ElevatedRun& run) noexcept;
+
 // Has |verb| done by the settings executable |exe| (which must be named like it and be
 // absolute: E_INVALIDARG otherwise, before anything starts) through |launcher|, collecting its
-// report. Fails only for invalid arguments or when out of memory; everything else is in |run|.
+// report. Fails only for invalid arguments or when out of memory; everything else is in |run|,
+// a report channel it could not make included (reportServer; the summary line it logs says so
+// too).
 [[nodiscard]] HRESULT RunElevated(ElevatedVerb verb, const std::filesystem::path& exe, HWND owner,
                                   const ElevationLauncher& launcher, ElevatedRun* run) noexcept;
 

@@ -177,15 +177,19 @@ std::wstring WithCrLf(std::wstring_view text) {
   return result;
 }
 
-// Prints |text| (UTF-8 JSON) as one line.
-void PrintUtf8(Output& out, const std::string& text) {
+// Prints |text| (UTF-8 JSON) as one line, exactly as the JSON writer made it.
+void PrintJson(Output& out, const std::string& text) {
   std::wstring wide;
-  if (SUCCEEDED(Utf8ToWide(text, &wide))) out.Line(wide);
+  if (SUCCEEDED(Utf8ToWide(text, &wide))) out.Json(wide);
+}
+
+// Deletes the probe PDFs a crashed run left in %TEMP%, where SweepsProbes says so; best effort.
+void SweepProbesUnlessElevated(const ProcessContext& context) noexcept {
+  if (SweepsProbes(context)) (void)SweepStaleProbes();
 }
 
 int RunStatus(const CliArgs& args, const ProcessContext& context, Output& out) {
-  // Probe PDFs a crashed run left in %TEMP%; best effort.
-  (void)SweepStaleProbes();
+  SweepProbesUnlessElevated(context);
   GatherOptions options;
   options.liveTest = !args.noLiveTest;
   options.context = context;
@@ -209,7 +213,7 @@ int RunStatus(const CliArgs& args, const ProcessContext& context, Output& out) {
   const std::vector<Finding> findings = Evaluate(snapshot);
   const ExitCode code = ExitCodeFromFindings(findings);
   if (args.json) {
-    PrintUtf8(out, StatusJson(snapshot, findings, code));
+    PrintJson(out, StatusJson(snapshot, findings, code));
   } else {
     out.Line(RenderStatus(FormatStatus(snapshot, findings)));
   }
@@ -227,10 +231,12 @@ void PrintElevatedRun(const ElevatedRun& run, std::wstring_view what, Output& ou
   switch (run.outcome) {
     case ElevatedOutcome::kDone:
       out.Line(std::wstring(what) + L" is done.");
+      if (ReportChannelTaken(run)) out.Error(ReportChannelTakenMessage());
       return;
     case ElevatedOutcome::kRestartPending:
       out.Line(std::wstring(what) +
                L" is done; files that were in use are deleted at the next restart.");
+      if (ReportChannelTaken(run)) out.Error(ReportChannelTakenMessage());
       return;
     case ElevatedOutcome::kCancelled:
       out.Line(L"The administrator prompt was declined.");
@@ -243,6 +249,7 @@ void PrintElevatedRun(const ElevatedRun& run, std::wstring_view what, Output& ou
   } else {
     out.Error(std::wstring(what) + L" failed: " + HResultText(run.failure));
   }
+  if (ReportChannelTaken(run)) out.Error(ReportChannelTakenMessage());
   PrintReport(run, out);
 }
 
@@ -280,7 +287,7 @@ int ReportCheck(HRESULT hr, const CheckResult& result, const ProcessContext& con
 }
 
 int RunCheckCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
-  (void)SweepStaleProbes();
+  SweepProbesUnlessElevated(context);
   CheckOptions options;
   options.repair = args.noRepair ? RepairMode::kNone : RepairMode::kSafe;
   options.liveTest = !args.noLiveTest;
@@ -321,7 +328,7 @@ int RunFixCommand(const CliArgs& args, const ProcessContext& context, Output& ou
       }
     }
   }
-  (void)SweepStaleProbes();
+  SweepProbesUnlessElevated(context);
   CheckOptions options;
   options.repair = args.takeBack ? RepairMode::kSafeAndTakeBack : RepairMode::kSafe;
   options.context = context;
@@ -429,10 +436,15 @@ int RunSetupMachineCommand(const CliArgs& args, const ProcessContext& context, O
   if (result.refusal != SetupRefusal::kNone) {
     return ReportSetupRefusal(result.refusal, Describe(args.verb).name, context, out);
   }
-  if (ReportLockNotTaken(result.busy, result.namedObjectsRefused, out)) return Code(result.code);
   PrintFailures(result.failures, out);
   if (result.v1.restartPending || result.old.restartPending) {
     out.Line(L"Some old files are in use; Windows deletes them at the next restart.");
+  }
+  // The step runs elevated and logs nothing, so this is the only trace of why nothing old went.
+  if (result.v1.classForeign || result.old.classForeign) {
+    out.Line(
+        L"The class for all users names its DLL with environment variables (REG_EXPAND_SZ), so "
+        L"no old build folder was removed.");
   }
   return Code(result.code);
 }
@@ -531,6 +543,9 @@ int RunMigrateV1Command(const CliArgs& args, const ProcessContext& context, Outp
         }
         break;
     }
+    if (result.run->outcome != ElevatedOutcome::kCancelled && ReportChannelTaken(*result.run)) {
+      out.Error(ReportChannelTakenMessage());
+    }
   }
   PrintFailures(result.failures, out);
   if (result.code == ExitCode::kOk) out.Line(L"Nothing of 1.x is left to clean up.");
@@ -562,6 +577,9 @@ int RunInstallCommand(const CliArgs& args, const ProcessContext& context, Output
     out.Error(InstallRefusalMessage(result));
     if (result.run) {
       for (const std::wstring& line : result.run->report) out.Error(L"  " + line);
+      if (result.run->outcome != ElevatedOutcome::kCancelled && ReportChannelTaken(*result.run)) {
+        out.Error(ReportChannelTakenMessage());
+      }
     }
     return Code(result.code);
   }
@@ -709,6 +727,7 @@ int RunZoomCommand(const CliArgs& args, const ProcessContext& context, Output& o
     out.Error(L"Cannot save the zoom: " + HResultText(locked));
     return Code(ExitCode::kFailed);
   }
+  if (lock->sessionOnly()) Log(LogLevel::kWarning, L"zoom", L"zoom lock=session-only");
   if (const HRESULT hr = SaveZoom(RegistryRoots{}, *args.zoom); FAILED(hr)) {
     out.Error(L"Cannot save the zoom: " + HResultText(hr));
     return Code(ExitCode::kFailed);
@@ -781,6 +800,12 @@ HRESULT WriteReportFile(const std::wstring& path, std::wstring_view text, bool* 
 CATCH_RETURN();
 
 int RunDiagnostics(const CliArgs& args, const ProcessContext& context, Output& out) {
+  // An administrator process writes no file where the user's unelevated programs could redirect
+  // it; refused before anything is read. Standard output and --copy remain.
+  if (context.elevated && args.out) {
+    out.Error(DiagnosticsOutElevatedRefusalMessage());
+    return Code(ExitCode::kWrongContext);
+  }
   // The report never starts a thumbnail process; it shows the last recorded Explorer test.
   GatherOptions options;
   options.liveTest = false;
@@ -792,11 +817,7 @@ int RunDiagnostics(const CliArgs& args, const ProcessContext& context, Output& o
     return Code(ExitCode::kFailed);
   }
   const std::vector<Finding> findings = Evaluate(snapshot);
-  // A log that cannot be read costs its lines, not the report.
-  std::vector<std::wstring> tail;
-  if (const HRESULT hr = ReadLogTail(kDiagnosticsLogLines, &tail); FAILED(hr)) {
-    tail = {L"(the log could not be read: " + HResultText(hr) + L")"};
-  }
+  const std::vector<std::wstring> tail = DiagnosticsLogTail(context);
   RedactContext redact;
   (void)GetRedactContext(context, &redact);
   const std::wstring report = BuildDiagnostics(snapshot, findings, tail, redact);
@@ -866,6 +887,13 @@ std::wstring ChecksElevatedRefusalMessage() {
          L"prompt.";
 }
 
+std::wstring DiagnosticsOutElevatedRefusalMessage() {
+  return L"Cannot run here: running as administrator. --diagnostics --out writes a file into "
+         L"folders the signed-in user's own programs can change and redirect, which an "
+         L"administrator process does not do; run it from a normal (not administrator) prompt, or "
+         L"use --copy.";
+}
+
 std::wstring SetupElevatedRefusalMessage(std::wstring_view command) {
   return L"Cannot run here: running as administrator. " + std::wstring(command) +
          L" changes the signed-in user's own settings, which an administrator process does not "
@@ -916,8 +944,7 @@ std::wstring InstallRefusalMessage(const InstallResult& result) {
     case InstallRefusal::kUnsafeFolder: {
       std::wstring text = L"Cannot install from " + folder + L": ";
       if (result.unsafe) {
-        text += result.unsafe->object.native() + L" can be changed by " +
-                result.unsafe->access.principal;
+        text += UnsafeAccessText(*result.unsafe);
       } else {
         text += L"the step for all users found that other accounts can change it";
       }
@@ -952,6 +979,12 @@ std::wstring UninstallElevatedRefusalMessage() {
 std::wstring NoAdministratorRightsMessage() {
   return L"The step for all users did not get administrator rights (Windows started it without "
          L"them), so it changed nothing.";
+}
+
+std::wstring ReportChannelTakenMessage() {
+  return L"The administrator step's report channel was taken by another process, so its own "
+         L"report could not come back; the step ran all the same, and its result above comes "
+         L"from its exit code.";
 }
 
 std::wstring NamedObjectsRefusedMessage() {
@@ -993,14 +1026,23 @@ std::vector<std::wstring> UninstallReport(const UninstallResult& result) {
             L"install folder) stays. Run --uninstall again and approve the prompt to remove it.");
         break;
       case ElevatedOutcome::kFailed:
-        lines.push_back(LackedAdministratorRights(*result.run)
-                            ? NoAdministratorRightsMessage() +
-                                  L" The part for all users (its class and its install folder) "
-                                  L"stays."
-                            : L"The part for all users failed: " +
-                                  HResultText(result.run->failure));
+        if (LackedAdministratorRights(*result.run)) {
+          lines.push_back(NoAdministratorRightsMessage() +
+                          L" The part for all users (its class and its install folder) stays.");
+        } else if (result.run->failure == kRegistryTreeLeftHr && !result.machineLeft) {
+          // Only keys in other users' hives stayed: the class and the install folders are gone.
+          lines.push_back(
+              L"Removed the part for all users, but some keys in other signed-in users' "
+              L"registry hives were left as they were (a registry link, which is never "
+              L"followed, or more keys than one deletion removes).");
+        } else {
+          lines.push_back(L"The part for all users failed: " + HResultText(result.run->failure));
+        }
         for (const std::wstring& line : result.run->report) lines.push_back(L"  " + line);
         break;
+    }
+    if (result.run->outcome != ElevatedOutcome::kCancelled && ReportChannelTaken(*result.run)) {
+      lines.push_back(ReportChannelTakenMessage());
     }
   }
   if (result.machineNoProgram) {
@@ -1062,6 +1104,8 @@ bool ShouldStartSettingsWindow(DWORD consoleProcessCount, bool hasConsoleWindow)
 }
 
 bool ShouldLog(const ProcessContext& context) noexcept { return !context.elevated; }
+
+bool SweepsProbes(const ProcessContext& context) noexcept { return !context.elevated; }
 
 bool TakeBackNeedsYes(const CliArgs& args, bool canAskOnConsole) noexcept {
   return args.verb == Verb::kFix && args.takeBack && !args.yes && !canAskOnConsole;

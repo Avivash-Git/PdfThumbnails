@@ -42,8 +42,22 @@ TEST(JsonString, Escaping) {
   controls += wchar_t{0x01};
   controls += wchar_t{0x1F};
   controls += wchar_t{0x00};
-  controls += wchar_t{0x7F};  // DEL needs no escape in JSON
-  EXPECT_EQ(JsonString(controls), std::string("\"\\u0001\\u001F\\u0000") + '\x7F' + "\"");
+  controls += wchar_t{0x7F};  // DEL needs no escape in JSON, but a console shows it
+  EXPECT_EQ(JsonString(controls), "\"\\u0001\\u001F\\u0000\\u007F\"");
+}
+
+// What a console would act on (DEL, the C1 controls, the line separators and the bidirectional
+// controls) goes out escaped, so the JSON written as it is cannot steer the console.
+TEST(JsonString, ConsoleControlsAreEscaped) {
+  // Built from code units: the compiler warns about bidirectional characters in the source.
+  const auto text = [](std::initializer_list<wchar_t> units) { return std::wstring(units); };
+  EXPECT_EQ(JsonString(text({L'a', 0x7F, 0x9B, 0x2028, 0x202E, 0x2066, L'b'})),
+            "\"a\\u007F\\u009B\\u2028\\u202E\\u2066b\"");
+  EXPECT_EQ(JsonString(text({0x80, 0x9F, 0x2029, 0x202A, 0x2069})),
+            "\"\\u0080\\u009F\\u2029\\u202A\\u2069\"");
+  // Their neighbours stay UTF-8.
+  EXPECT_EQ(JsonString(text({0xA0, 0x2027, 0x202F, 0x2065, 0x206A})),
+            "\"\xC2\xA0\xE2\x80\xA7\xE2\x80\xAF\xE2\x81\xA5\xE2\x81\xAA\"");
 }
 
 TEST(JsonString, NonAsciiIsUtf8) {

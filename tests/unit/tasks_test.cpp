@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include "elevation.h"
+#include "instance.h"
 #include "project_config.h"
 
 namespace pdft {
@@ -111,6 +113,20 @@ TEST(TaskNames, NotFound) {
   EXPECT_FALSE(IsTaskNotFound(E_ACCESSDENIED));
   EXPECT_FALSE(IsTaskNotFound(S_OK));
   EXPECT_FALSE(IsTaskNotFound(S_FALSE));
+  EXPECT_FALSE(IsTaskNotFound(kTaskTakenHr));
+}
+
+// Names another account's tasks hold are a code of the app's own, so no Windows call on the way
+// can return it, and it is none of the other answers a task change gives.
+TEST(TaskNames, TakenIsACodeOfItsOwn) {
+  EXPECT_TRUE(FAILED(kTaskTakenHr));
+  EXPECT_EQ(HRESULT_FACILITY(kTaskTakenHr), FACILITY_ITF);
+  for (const HRESULT other :
+       {E_ACCESSDENIED, kSomeTriggersFailed, HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS),
+        HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), kNoAdministratorRightsHr,
+        kNamedObjectsRefusedHr}) {
+    EXPECT_NE(kTaskTakenHr, other);
+  }
 }
 
 TEST(TaskTriggerClassification, PdfCraftSubscription) {

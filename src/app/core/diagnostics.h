@@ -83,4 +83,14 @@ std::vector<std::wstring> LastLines(std::wstring_view text, size_t maxLines, boo
 [[nodiscard]] HRESULT ReadLogTailFrom(const std::filesystem::path& log, size_t maxLines,
                                       std::vector<std::wstring>* lines) noexcept;
 
+// What the report shows in place of the log's lines when an elevated process makes it.
+inline constexpr wchar_t kLogNotReadElevated[] = L"(not read: running as administrator)";
+
+// The log lines the report of a process in |context| ends with: the last kDiagnosticsLogLines of
+// the app's log (ReadLogTail), or one line that says why there are none. An elevated process does
+// not open the log at all (kLogNotReadElevated): it lies in the user's profile, whose folders the
+// user's unelevated programs can turn into links to any file an administrator may read. A log that
+// cannot be read costs its lines, not the report. May throw std::bad_alloc.
+std::vector<std::wstring> DiagnosticsLogTail(const ProcessContext& context);
+
 }  // namespace pdft

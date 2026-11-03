@@ -1,4 +1,6 @@
-// The registry roots and the pure value decoders (registry_roots.h). No registry access.
+// The registry roots, the pure value decoders and the tree deletion's result code and bounds
+// (registry_roots.h). No registry access: the deletions themselves are exercised by the
+// integration tests, in a private key.
 
 #include <windows.h>
 
@@ -80,6 +82,18 @@ TEST(RegistryValues, QwordNeedsEightBytesOfRegQword) {
   EXPECT_EQ(RegistryQword(Value(REG_QWORD, &number, sizeof(number))), number);
   EXPECT_EQ(RegistryQword(Value(REG_QWORD, &number, 4)), std::nullopt);
   EXPECT_EQ(RegistryQword(Value(REG_BINARY, &number, sizeof(number))), std::nullopt);
+}
+
+TEST(RegistryTreeDeletion, LeftIsACodeOfTheAppsOwn) {
+  // A failure no Windows call on the way can return, so callers can tell it from theirs.
+  EXPECT_TRUE(FAILED(kRegistryTreeLeftHr));
+  EXPECT_EQ(HRESULT_FACILITY(kRegistryTreeLeftHr), FACILITY_ITF);
+  // The product's own trees (the class key with its server, the product key with its State key)
+  // are far inside the default bounds.
+  const RegistryTreeLimits limits;
+  EXPECT_GE(limits.maxDepth, 2u);
+  EXPECT_GE(limits.maxKeys, 8u);
+  EXPECT_GE(limits.maxMs, 1000u);
 }
 
 }  // namespace

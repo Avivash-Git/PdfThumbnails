@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <memory>
 #include <system_error>
+#include <vector>
 
 #include "paths.h"
 #include "project_config.h"
@@ -30,6 +31,9 @@ constexpr wchar_t kProbeInfix[] = L"-probe-";
 constexpr wchar_t kProbeExtension[] = L".pdf";
 constexpr size_t kGuidChars = 36;  // xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 
+// How much of a folder's listing one call reads.
+constexpr size_t kListingBytes = 64 * 1024;
+
 // What the caller and the worker thread share. The caller and the thread each hold a reference
 // (std::shared_ptr), so the block lives until the later of the two lets go: after a timeout the
 // caller returns and drops its reference, and the worker, still inside the shell, keeps writing
@@ -39,9 +43,90 @@ struct LiveTestJob {
   std::wstring file;
   UINT size = 0;
   bool ownsFile = false;  // a probe written for this test: the worker deletes it when done
+  // Where that probe really is (FinalPath), checked before it is deleted.
+  std::wstring finalPath;
   LiveTest result;
   wil::unique_event_nothrow finished;
 };
+
+// The path Windows resolved |handle| to, in the volume's device form (\Device\HarddiskVolume3\...):
+// where any junction or link on the way really led, with no drive letter to look up.
+HRESULT FinalPath(HANDLE handle, std::wstring* path) noexcept try {
+  path->clear();
+  std::wstring buffer(MAX_PATH, L'\0');
+  for (;;) {
+    const DWORD length =
+        GetFinalPathNameByHandleW(handle, buffer.data(), static_cast<DWORD>(buffer.size()),
+                                  FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
+    RETURN_LAST_ERROR_IF(length == 0);
+    if (length < buffer.size()) {
+      buffer.resize(length);
+      *path = std::move(buffer);
+      return S_OK;
+    }
+    // Too small: |length| is the size needed, terminating null included.
+    buffer.resize(length);
+  }
+}
+CATCH_RETURN();
+
+// The open handle is a regular file on disk, opened as itself: not a link or another reparse
+// point, not a folder, not a pipe or a device.
+bool IsRegularFile(HANDLE file) noexcept {
+  if (GetFileType(file) != FILE_TYPE_DISK) return false;
+  FILE_ATTRIBUTE_TAG_INFO tag = {};
+  return GetFileInformationByHandleEx(file, FileAttributeTagInfo, &tag, sizeof(tag)) &&
+         !(tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT));
+}
+
+// Opens |path| to delete it, as itself (a link at the end is not followed), when it is a regular
+// file, and returns where it really is in |finalPath|. An empty handle otherwise (missing, in use,
+// a link, a folder).
+wil::unique_hfile OpenFileToDelete(const std::wstring& path, std::wstring* finalPath) noexcept {
+  finalPath->clear();
+  wil::unique_hfile file(CreateFileW(path.c_str(), DELETE | FILE_READ_ATTRIBUTES,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT,
+                                     nullptr));
+  if (!file || !IsRegularFile(file.get()) || FAILED(FinalPath(file.get(), finalPath))) {
+    return wil::unique_hfile();
+  }
+  return file;
+}
+
+// Deletes the file open as |file| (with DELETE access) through that handle, so its path is never
+// looked up again: the name goes at once where the file system can (POSIX semantics), otherwise
+// when the last handle closes.
+HRESULT DeleteThroughHandle(HANDLE file) noexcept {
+  FILE_DISPOSITION_INFO_EX dispositionEx = {};
+  dispositionEx.Flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+  if (SetFileInformationByHandle(file, FileDispositionInfoEx, &dispositionEx,
+                                 sizeof(dispositionEx))) {
+    return S_OK;
+  }
+  const DWORD error = GetLastError();
+  // File systems without the newer form (FAT, older NTFS drivers) take the classic one.
+  if (error != ERROR_INVALID_PARAMETER && error != ERROR_NOT_SUPPORTED &&
+      error != ERROR_INVALID_FUNCTION) {
+    return HRESULT_FROM_WIN32(error);
+  }
+  FILE_DISPOSITION_INFO disposition = {};
+  disposition.DeleteFile = TRUE;
+  if (!SetFileInformationByHandle(file, FileDispositionInfo, &disposition, sizeof(disposition))) {
+    const DWORD classic = GetLastError();
+    return HRESULT_FROM_WIN32(classic ? classic : ERROR_ACCESS_DENIED);
+  }
+  return S_OK;
+}
+
+// Deletes the probe this process wrote at |path| (|finalPath| from WriteProbe), only while the
+// name still leads to that very file: never a link, nor what something put in its place or
+// redirected the folder to. Best effort.
+void DeleteOwnProbe(const std::wstring& path, const std::wstring& finalPath) noexcept {
+  std::wstring now;
+  const wil::unique_hfile file = OpenFileToDelete(path, &now);
+  if (file && IEquals(now, finalPath)) (void)DeleteThroughHandle(file.get());
+}
 
 DWORD ElapsedMs(const LARGE_INTEGER& start, const LARGE_INTEGER& frequency) noexcept {
   LARGE_INTEGER now;
@@ -95,7 +180,7 @@ DWORD WINAPI LiveTestThread(void* parameter) noexcept {
   }
   Extract(job.get());
   // The surrogate has let go of the file once GetThumbnail returned.
-  if (job->ownsFile) DeleteFileW(job->file.c_str());
+  if (job->ownsFile) DeleteOwnProbe(job->file, job->finalPath);
   SetEvent(job->finished.get());
   return 0;
 }
@@ -135,6 +220,67 @@ ULONGLONG Ticks(const FILETIME& time) noexcept {
   return (static_cast<ULONGLONG>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
 }
 
+FILETIME ToFileTime(const LARGE_INTEGER& time) noexcept {
+  FILETIME result;
+  result.dwLowDateTime = time.LowPart;
+  result.dwHighDateTime = static_cast<DWORD>(time.HighPart);
+  return result;
+}
+
+// Writes a new probe into %TEMP% (WriteProbePdf), and returns in |finalPath| where it really is
+// (FinalPath), which DeleteOwnProbe checks.
+HRESULT WriteProbe(std::filesystem::path* path, std::wstring* finalPath) noexcept try {
+  path->clear();
+  finalPath->clear();
+  std::filesystem::path dir;
+  RETURN_IF_FAILED(TempDirectory(&dir));
+  GUID id;
+  RETURN_IF_FAILED(CoCreateGuid(&id));
+  std::filesystem::path probe = dir / ProbeFileName(id);
+  const std::string bytes = ProbePdfBytes();
+  // CREATE_NEW: never over a file (or a link) that is already there. A probe that is not written
+  // whole goes again through this handle, never by its path.
+  wil::unique_hfile file(CreateFileW(probe.c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
+                                     FILE_ATTRIBUTE_NORMAL, nullptr));
+  RETURN_LAST_ERROR_IF(!file);
+  auto discard = wil::scope_exit([&]() noexcept { (void)DeleteThroughHandle(file.get()); });
+  DWORD written = 0;
+  if (!WriteFile(file.get(), bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) ||
+      written != bytes.size()) {
+    const DWORD error = GetLastError();
+    RETURN_HR(HRESULT_FROM_WIN32(error ? error : ERROR_WRITE_FAULT));
+  }
+  RETURN_IF_FAILED(FinalPath(file.get(), finalPath));
+  discard.release();
+  *path = std::move(probe);
+  return S_OK;
+}
+CATCH_RETURN();
+
+// Deletes the probe |name| in the folder held open for a sweep (|dir|, whose final path is
+// |folderPath|) when it is stale at |now|: opened as itself, and deleted through its handle only
+// when it is a regular file in that very folder, never what a link or a folder redirected in the
+// meantime leads to. S_OK when it went, S_FALSE when it stays.
+HRESULT DeleteStaleProbe(const std::filesystem::path& dir, std::wstring_view name,
+                         std::wstring_view folderPath, const FILETIME& now) noexcept try {
+  std::wstring finalPath;
+  const wil::unique_hfile file = OpenFileToDelete((dir / name).native(), &finalPath);
+  if (!file) return S_FALSE;
+  const std::wstring_view real = finalPath;
+  const size_t separator = real.rfind(L'\\');
+  if (separator == std::wstring_view::npos || !IEquals(real.substr(0, separator), folderPath) ||
+      !IEquals(real.substr(separator + 1), name)) {
+    return S_FALSE;
+  }
+  FILE_BASIC_INFO basic = {};
+  if (!GetFileInformationByHandleEx(file.get(), FileBasicInfo, &basic, sizeof(basic)) ||
+      !IsStaleProbe(ToFileTime(basic.LastWriteTime), now)) {
+    return S_FALSE;
+  }
+  return SUCCEEDED(DeleteThroughHandle(file.get())) ? S_OK : S_FALSE;
+}
+CATCH_RETURN();
+
 }  // namespace
 
 HRESULT RunLiveTest(UINT size, const std::filesystem::path* file, DWORD timeoutMs,
@@ -148,7 +294,7 @@ HRESULT RunLiveTest(UINT size, const std::filesystem::path* file, DWORD timeoutM
     job->file = file->native();
   } else {
     std::filesystem::path probe;
-    RETURN_IF_FAILED(WriteProbePdf(&probe));
+    RETURN_IF_FAILED(WriteProbe(&probe, &job->finalPath));
     job->file = probe.native();
     job->ownsFile = true;
   }
@@ -156,7 +302,7 @@ HRESULT RunLiveTest(UINT size, const std::filesystem::path* file, DWORD timeoutM
   wil::unique_handle thread(CreateThread(nullptr, 0, LiveTestThread, handoff.get(), 0, nullptr));
   if (!thread) {
     const HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
-    if (job->ownsFile) DeleteFileW(job->file.c_str());
+    if (job->ownsFile) DeleteOwnProbe(job->file, job->finalPath);
     RETURN_HR(FAILED(hr) ? hr : E_FAIL);
   }
   handoff.release();  // LiveTestThread deletes it
@@ -227,31 +373,10 @@ bool IsProbeFileName(std::wstring_view name) noexcept {
          IEquals(name.substr(prefix + kGuidChars), extension);
 }
 
-HRESULT WriteProbePdf(std::filesystem::path* path) noexcept try {
-  path->clear();
-  std::filesystem::path dir;
-  RETURN_IF_FAILED(TempDirectory(&dir));
-  GUID id;
-  RETURN_IF_FAILED(CoCreateGuid(&id));
-  std::filesystem::path probe = dir / ProbeFileName(id);
-  const std::string bytes = ProbePdfBytes();
-  // CREATE_NEW: never over a file (or a link) that is already there.
-  wil::unique_hfile file(CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
-                                     FILE_ATTRIBUTE_NORMAL, nullptr));
-  RETURN_LAST_ERROR_IF(!file);
-  DWORD written = 0;
-  if (!WriteFile(file.get(), bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) ||
-      written != bytes.size()) {
-    const DWORD error = GetLastError();
-    file.reset();
-    DeleteFileW(probe.c_str());
-    RETURN_HR(HRESULT_FROM_WIN32(error ? error : ERROR_WRITE_FAULT));
-  }
-  file.reset();
-  *path = std::move(probe);
-  return S_OK;
+HRESULT WriteProbePdf(std::filesystem::path* path) noexcept {
+  std::wstring finalPath;
+  return WriteProbe(path, &finalPath);
 }
-CATCH_RETURN();
 
 bool IsStaleProbe(const FILETIME& written, const FILETIME& now) noexcept {
   const ULONGLONG at = Ticks(written);
@@ -263,25 +388,57 @@ HRESULT SweepStaleProbes(const std::filesystem::path& directory, int* removed) n
   if (removed) *removed = 0;
   std::filesystem::path dir = directory;
   if (dir.empty()) RETURN_IF_FAILED(TempDirectory(&dir));
-  const std::filesystem::path pattern = dir / (std::wstring(kProductName) + kProbeInfix + L"*");
-  WIN32_FIND_DATAW entry = {};
-  wil::unique_hfind find(FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &entry,
-                                          FindExSearchNameMatch, nullptr, 0));
-  if (!find) {
+  // The folder itself, never what a junction or link in its place leads to. It stays open: the
+  // probes are listed from this handle, and each one deleted must lie in this very folder.
+  wil::unique_hfile folder(
+      CreateFileW(dir.c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                  FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+  if (!folder) {
     const DWORD error = GetLastError();
     if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return S_OK;
-    RETURN_WIN32(error ? error : ERROR_READ_FAULT);
+    RETURN_WIN32(error ? error : ERROR_OPEN_FAILED);
   }
+  FILE_ATTRIBUTE_TAG_INFO tag = {};
+  RETURN_IF_WIN32_BOOL_FALSE(
+      GetFileInformationByHandleEx(folder.get(), FileAttributeTagInfo, &tag, sizeof(tag)));
+  if ((tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+      IsReparseTagNameSurrogate(tag.ReparseTag)) {
+    return HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK);
+  }
+  RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_DIRECTORY),
+               !(tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY));
+  std::wstring folderPath;
+  RETURN_IF_FAILED(FinalPath(folder.get(), &folderPath));
+  if (folderPath.ends_with(L'\\')) folderPath.pop_back();  // a volume's root
+
   FILETIME now;
   GetSystemTimeAsFileTime(&now);
-  do {
-    // The pattern also matches short (8.3) names; only the long name is checked.
-    if (entry.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
-      continue;
-    if (!IsProbeFileName(entry.cFileName) || !IsStaleProbe(entry.ftLastWriteTime, now)) continue;
-    if (DeleteFileW((dir / entry.cFileName).c_str()) && removed) ++*removed;
-  } while (FindNextFileW(find.get(), &entry));
-  return S_OK;
+  // FILE_FULL_DIR_INFO holds 64-bit fields, so the buffer is aligned for them.
+  std::vector<ULONGLONG> buffer(kListingBytes / sizeof(ULONGLONG));
+  FILE_INFO_BY_HANDLE_CLASS listing = FileFullDirectoryRestartInfo;
+  for (;;) {
+    if (!GetFileInformationByHandleEx(folder.get(), listing, buffer.data(),
+                                      static_cast<DWORD>(buffer.size() * sizeof(ULONGLONG)))) {
+      const DWORD error = GetLastError();
+      if (error == ERROR_NO_MORE_FILES || error == ERROR_FILE_NOT_FOUND) return S_OK;
+      RETURN_WIN32(error ? error : ERROR_READ_FAULT);
+    }
+    listing = FileFullDirectoryInfo;
+    const BYTE* at = reinterpret_cast<const BYTE*>(buffer.data());
+    for (;;) {
+      const auto* entry = reinterpret_cast<const FILE_FULL_DIR_INFO*>(at);
+      const std::wstring_view name(entry->FileName, entry->FileNameLength / sizeof(wchar_t));
+      // The long name only: a listing by handle has no short (8.3) names to match.
+      if (!(entry->FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
+          IsProbeFileName(name) && IsStaleProbe(ToFileTime(entry->LastWriteTime), now) &&
+          DeleteStaleProbe(dir, name, folderPath, now) == S_OK && removed) {
+        ++*removed;
+      }
+      if (entry->NextEntryOffset == 0) break;
+      at += entry->NextEntryOffset;
+    }
+  }
 }
 CATCH_RETURN();
 

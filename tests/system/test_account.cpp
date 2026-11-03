@@ -117,6 +117,16 @@ class EnabledPrivileges {
   alignas(TOKEN_PRIVILEGES) std::array<BYTE, kBufferSize> previous_ = {};
 };
 
+// Whether |process| runs as |sid|, by its token's user. False when that cannot be read.
+bool RunsAs(HANDLE process, PSID sid) noexcept {
+  wil::unique_handle token;
+  if (!OpenProcessToken(process, TOKEN_QUERY, token.put())) return false;
+  alignas(TOKEN_USER) BYTE user[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+  DWORD size = 0;
+  return GetTokenInformation(token.get(), TokenUser, user, sizeof(user), &size) &&
+         EqualSid(reinterpret_cast<TOKEN_USER*>(user)->User.Sid, sid);
+}
+
 // Ends every process that runs as |sid| (but this one), printing each.
 void EndProcessesOf(PSID sid) noexcept {
   // Their objects grant only the account and SYSTEM; an administrator ends them with the debug
@@ -132,13 +142,20 @@ void EndProcessesOf(PSID sid) noexcept {
         entry.ProcessId == GetCurrentProcessId()) {
       continue;
     }
+    // The list is a snapshot: by now the process may have ended and its number gone to another
+    // one. So the process this handle holds is ended only if it runs as the account itself.
     const wil::unique_handle process(
-        OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, entry.ProcessId));
-    const bool ended = process && TerminateProcess(process.get(), 1) &&
-                       WaitForSingleObject(process.get(), 5000) == WAIT_OBJECT_0;
+        OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE,
+                    entry.ProcessId));
+    const char* ended = "no";
+    if (process && !RunsAs(process.get(), sid)) {
+      ended = "no (not confirmed to run as the account)";
+    } else if (process && TerminateProcess(process.get(), 1) &&
+               WaitForSingleObject(process.get(), 5000) == WAIT_OBJECT_0) {
+      ended = "yes";
+    }
     std::printf("[ system ] %ls (process %lu) still ran as a test account: ended %s\n",
-                entry.pProcessName ? entry.pProcessName : L"?", entry.ProcessId,
-                ended ? "yes" : "no");
+                entry.pProcessName ? entry.pProcessName : L"?", entry.ProcessId, ended);
   }
 }
 

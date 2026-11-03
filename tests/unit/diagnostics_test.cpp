@@ -1,6 +1,7 @@
 // The diagnostics report (diagnostics.h): masking, hard cases first (names inside paths and
 // words, short names, overlapping names, names with regex characters, SIDs anywhere), then a
-// whole report built from made-up details, in which none of them may survive.
+// whole report built from made-up details, in which none of them may survive; and what an elevated
+// process leaves out or refuses.
 
 #include <windows.h>
 
@@ -13,6 +14,8 @@
 #include <string>
 #include <vector>
 
+#include "commands.h"
+#include "context.h"
 #include "evaluate.h"
 #include "project_config.h"
 #include "snapshot_fixtures.h"
@@ -247,6 +250,30 @@ TEST(Diagnostics, RecordedExplorerTestAndEmptyLog) {
   EXPECT_NE(report.find(L"Explorer test: 0x80040154 at the last recorded check"),
             std::wstring::npos);
   EXPECT_NE(report.find(L"Log (last 30 lines)\n  (empty)"), std::wstring::npos);
+}
+
+// An elevated process does not open the log; the report says so where its lines would be.
+TEST(Diagnostics, AnElevatedProcessLeavesTheLogOut) {
+  ProcessContext context;
+  context.elevated = true;
+  const std::vector<std::wstring> tail = DiagnosticsLogTail(context);
+  EXPECT_EQ(tail, std::vector<std::wstring>{kLogNotReadElevated});
+
+  Snapshot s = MachineInstallSnapshot();
+  s.context.elevated = true;
+  const std::wstring report = BuildDiagnostics(s, Evaluate(s), tail, RedactContext{});
+  EXPECT_NE(report.find(L"Log (last 30 lines)\n  (not read: running as administrator)"),
+            std::wstring::npos)
+      << report.c_str();
+}
+
+// --diagnostics --out refuses an elevated process the way the other elevated refusals do (exit
+// 8, checked where the executables run elevated) and names what still works.
+TEST(Diagnostics, OutRefusedElevated) {
+  const std::wstring message = DiagnosticsOutElevatedRefusalMessage();
+  EXPECT_EQ(message.rfind(L"Cannot run here: running as administrator. ", 0), 0u);
+  EXPECT_NE(message.find(L"--out"), std::wstring::npos);
+  EXPECT_NE(message.find(L"--copy"), std::wstring::npos);
 }
 
 }  // namespace

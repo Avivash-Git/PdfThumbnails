@@ -296,6 +296,7 @@ TEST(StatusFormat, ExplorerTestFailures) {
 TEST(StatusFormat, SmartAppControlTexts) {
   Snapshot s = MachineInstallSnapshot();
   s.sac.state = SacState::kOn;
+  s.blocks = BlockCount{true, 0, S_OK};
   const std::wstring on =
       L"On; Code Integrity logged no blocks of the installed DLLs in the last "
       L"7 days";
@@ -338,6 +339,14 @@ TEST(StatusFormat, SmartAppControlTexts) {
   empty.sac.state = SacState::kOn;
   empty.sacVerdict = DecideSac(SacState::kOn, std::nullopt, std::nullopt);
   std::optional<StatusLine> line = FindLine(Lines(empty), L"Smart App Control", ' ');
+  ASSERT_TRUE(line);
+  EXPECT_EQ(line->text, L"On");
+
+  // A class whose DLL is gone: nothing was counted, so nothing is said about blocks.
+  s.sac = {SacState::kOn, 1, REG_DWORD};
+  s.blocks.reset();
+  s.sacVerdict = DecideSac(SacState::kOn, E_FAIL, std::nullopt);
+  line = FindLine(Lines(s), L"Smart App Control", ' ');
   ASSERT_TRUE(line);
   EXPECT_EQ(line->text, L"On");
 }
@@ -561,6 +570,71 @@ TEST(StatusFormat, ChecksOffHintOnlyWhereChecksCanTurnThemOn) {
   EXPECT_EQ(checks->hint, L"");
 }
 
+// Another account's tasks hold every name the user's check task may have (the gathering keeps
+// ReadTask's answer as an issue): the checks are off not by choice, and only an administrator can
+// change that, so the Checks line is a problem whose hint names those tasks.
+TEST(StatusFormat, ChecksOffWhileAnotherAccountHoldsTheTaskNames) {
+  Snapshot s = MachineInstallSnapshot();
+  s.task = {};
+  ASSERT_HRESULT_SUCCEEDED(DefaultTaskLocation(s.context.userSid, &s.taskLocation));
+  s.issues.push_back({L"task", kTaskTakenHr});
+  const std::wstring administrator =
+      L"An administrator can delete " + std::wstring(kTaskFolder) + L"\\" + kTaskPrefix +
+      s.context.userSid + L" and \\" + kTaskRootPrefix + s.context.userSid +
+      L" in Task Scheduler (uninstalling " + kProduct + L" for all users deletes them too)";
+  EXPECT_EQ(TaskTakenHint(s.taskLocation), administrator);
+  std::optional<StatusLine> checks = FindLine(Lines(s), L"Checks", '!');
+  ASSERT_TRUE(checks);
+  EXPECT_EQ(checks->text,
+            L"off; another account's scheduled tasks hold the names of this user's check task");
+  EXPECT_EQ(checks->hint, administrator + L"; then --checks default turns them on");
+  ExpectHintsOnProblems(s);
+  bool found = false;
+  for (const Finding& finding : Evaluate(s)) {
+    if (finding.id != FindingId::kChecksOff) continue;
+    found = true;
+    EXPECT_EQ(FindingText(s, finding), L"no scheduled check: " + TaskTakenText());
+    EXPECT_EQ(FindingHint(s, finding), checks->hint);
+  }
+  EXPECT_TRUE(found);
+
+  // From an administrator prompt, --checks is named for a normal one; without the program the
+  // task would run, only the administrator's part is left.
+  s.context.elevated = true;
+  checks = FindLine(Lines(s), L"Checks", '!');
+  ASSERT_TRUE(checks);
+  EXPECT_EQ(checks->hint, administrator +
+                              L"; then --checks default turns them on (from a normal, not "
+                              L"administrator, prompt)");
+  s.context.elevated = false;
+  s.settingsExeFound = false;
+  checks = FindLine(Lines(s), L"Checks", '!');
+  ASSERT_TRUE(checks);
+  EXPECT_EQ(checks->hint, administrator);
+
+  // Any other reason the task could not be read is the plain "off".
+  s = MachineInstallSnapshot();
+  s.task = {};
+  s.issues.push_back({L"task", E_ACCESSDENIED});
+  checks = FindLine(Lines(s), L"Checks", ' ');
+  ASSERT_TRUE(checks);
+  EXPECT_EQ(checks->text, L"off");
+  EXPECT_EQ(checks->hint, L"--checks default turns them on");
+
+  // Nothing installed: nothing to turn on, so nothing to say.
+  s = EmptySnapshot();
+  s.issues.push_back({L"task", kTaskTakenHr});
+  checks = FindLine(Lines(s), L"Checks", ' ');
+  ASSERT_TRUE(checks);
+  EXPECT_EQ(checks->text, L"off");
+  EXPECT_EQ(checks->hint, L"");
+
+  // Without the task's names, the hint still says who can remove the tasks.
+  EXPECT_EQ(TaskTakenHint(TaskLocation{}),
+            L"An administrator can delete them in Task Scheduler (uninstalling " + kProduct +
+                L" for all users deletes them too)");
+}
+
 TEST(StatusFormat, TaskDisabledAndStaleWithoutTheProgram) {
   Snapshot s = MachineInstallSnapshot();
   s.task.enabled = false;
@@ -650,6 +724,26 @@ TEST(StatusFormat, ChecksReports) {
   report = ScheduleResultReport(result);
   EXPECT_EQ(report.out, (std::vector<std::wstring>{L"Checks: off (the check task was removed)"}));
 
+  // Off where another account's tasks hold both names: nothing of this user's was changed or
+  // read back, and the names are said in words, with who can free them.
+  result.before = UserInstallSnapshot();
+  result.before.task = {};
+  ASSERT_HRESULT_SUCCEEDED(
+      DefaultTaskLocation(result.before.context.userSid, &result.before.taskLocation));
+  result.readError = kTaskTakenHr;
+  report = ScheduleResultReport(result);
+  ASSERT_EQ(report.out.size(), 2u);
+  EXPECT_EQ(report.out[0], L"Checks: off (there was no check task)");
+  EXPECT_EQ(report.out[1],
+            L"The check task cannot be registered while another account's scheduled tasks hold "
+            L"the names of this user's check task (" +
+                HResultText(kTaskTakenHr) + L"). " + TaskTakenHint(result.before.taskLocation) +
+                L".");
+  for (const std::wstring& line : report.out) {
+    EXPECT_EQ(line.find(L"could not be read back"), std::wstring::npos) << WideToUtf8Lossy(line);
+  }
+  result.readError = S_OK;
+
   // Refused: nothing installed, a 1.x build, an install without the program.
   result = {};
   result.refusal = ScheduleRefusal::kNotInstalled;
@@ -690,6 +784,19 @@ TEST(StatusFormat, ChecksReports) {
                                0),
             0u)
       << report.error;
+
+  // Another account's tasks hold every name the task may have: in words, which tasks, and who
+  // can remove them.
+  ASSERT_HRESULT_SUCCEEDED(
+      DefaultTaskLocation(result.before.context.userSid, &result.before.taskLocation));
+  result.error = kTaskTakenHr;
+  report = ScheduleResultReport(result);
+  EXPECT_TRUE(report.out.empty());
+  EXPECT_EQ(report.error,
+            L"Could not register the check task: another account's scheduled tasks hold the names "
+            L"of this user's check task (" +
+                HResultText(kTaskTakenHr) + L"). " + TaskTakenHint(result.before.taskLocation) +
+                L"; then run --checks again.");
 }
 
 TEST(StatusFormat, WhereTheWindowsChecksCannotRun) {
@@ -889,6 +996,13 @@ TEST(StatusFormat, RepairOutcomes) {
   outcome.result = RepairResult::kFailed;
   outcome.hr = E_ACCESSDENIED;
   EXPECT_EQ(RepairOutcomeText(outcome), L"Failed (0x80070005): rewrite the zoom value as 200 %");
+  // The task's names held by another account's tasks: why, in words.
+  outcome.step.kind = RepairStep::Kind::kReRegisterTask;
+  outcome.step.path = kUserRoot / kSettingsExe;
+  outcome.hr = kTaskTakenHr;
+  EXPECT_EQ(RepairOutcomeText(outcome),
+            L"Failed, " + TaskTakenText() + L" (" + HResultText(kTaskTakenHr) +
+                L"): register the check task again for " + (kUserRoot / kSettingsExe).native());
   EXPECT_EQ(ElevatedVerbText(ElevatedVerb::kMachineRepairClass),
             L"point the machine-wide class at a complete build again");
 }

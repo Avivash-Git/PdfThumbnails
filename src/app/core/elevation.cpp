@@ -1,11 +1,13 @@
 #include "elevation.h"
 
+#include <aclapi.h>
 #include <sddl.h>
 #include <shellapi.h>
 #include <wil/result_macros.h>
 
 #include <algorithm>
 #include <cwchar>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -29,9 +31,6 @@ namespace {
 constexpr wchar_t kLogComponent[] = L"elevated";
 
 constexpr std::wstring_view kElevatedOption = L"--elevated";
-
-// The parent keeps at most this many bytes of report; the rest is dropped.
-constexpr size_t kMaxReportBytes = 256 * 1024;
 
 // Once the elevated process has ended, the rest of its lines are already in the pipe: this is
 // how long Finish waits for the reader to get them.
@@ -113,11 +112,17 @@ HRESULT GatherEntryFacts(ElevatedEntryFacts* facts) noexcept try {
 }
 CATCH_RETURN();
 
-// One report line per folder of a removal: "<what> <folder name>".
+// One report line per folder of a removal: "<what> <folder name>"; and why none went when the
+// class for all users is one the steps for all users leave alone.
 void ReportRemoval(ElevatedReporter& report, const MachineRemoval& removal) {
   for (const std::wstring& name : removal.removed) report.Line(L"removed " + name);
   for (const std::wstring& name : removal.left) report.Line(L"in use, left " + name);
   for (const std::wstring& name : removal.failed) report.Line(L"failed " + name);
+  if (removal.classForeign) {
+    report.Line(
+        L"the class for all users names its DLL with environment variables (REG_EXPAND_SZ); no "
+        L"build folder was removed");
+  }
 }
 
 // machine-migrate-v1: 1.x's build folders for all users, except the one the machine-wide class
@@ -424,37 +429,102 @@ std::wstring ElevationPipeName(DWORD parentProcessId) {
          std::to_wstring(parentProcessId);
 }
 
+bool TrustReportServer(const ReportServerFacts& facts) noexcept {
+  return facts.parentId != 0 && facts.serverId == facts.parentId &&
+         facts.serverSession == facts.parentSession && facts.ownerIsParentsUser;
+}
+
+namespace {
+
+// The facts TrustReportServer judges: those of |pipe| (opened with READ_CONTROL) and of the
+// parent |parentId|, read through |parent| (PROCESS_QUERY_LIMITED_INFORMATION), which keeps the
+// id the parent's while they are read.
+HRESULT ReadReportServerFacts(HANDLE pipe, DWORD parentId, HANDLE parent,
+                              ReportServerFacts* facts) noexcept {
+  *facts = ReportServerFacts{};
+  facts->parentId = parentId;
+  RETURN_IF_WIN32_BOOL_FALSE(ProcessIdToSessionId(parentId, &facts->parentSession));
+  RETURN_IF_WIN32_BOOL_FALSE(GetNamedPipeServerProcessId(pipe, &facts->serverId));
+  RETURN_IF_WIN32_BOOL_FALSE(GetNamedPipeServerSessionId(pipe, &facts->serverSession));
+
+  PSID owner = nullptr;
+  wil::unique_hlocal_security_descriptor descriptor;
+  RETURN_IF_WIN32_ERROR(GetSecurityInfo(pipe, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, &owner,
+                                        nullptr, nullptr, nullptr, descriptor.put()));
+  wil::unique_handle token;
+  RETURN_IF_WIN32_BOOL_FALSE(OpenProcessToken(parent, TOKEN_QUERY, token.put()));
+  alignas(TOKEN_USER) BYTE user[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+  DWORD size = 0;
+  RETURN_IF_WIN32_BOOL_FALSE(
+      GetTokenInformation(token.get(), TokenUser, user, sizeof(user), &size));
+  facts->ownerIsParentsUser =
+      owner != nullptr &&
+      EqualSid(owner, reinterpret_cast<const TOKEN_USER*>(user)->User.Sid) != FALSE;
+  return S_OK;
+}
+
+// Writes |bytes| to |pipe| (opened for overlapped I/O; |event| a manual-reset event for it).
+// True when all of them went in within kReportWriteTimeoutMs. A write still pending then is
+// cancelled, and waited for until it has ended, since until then it uses |bytes|.
+bool WriteInTime(HANDLE pipe, HANDLE event, std::string_view bytes) noexcept {
+  OVERLAPPED overlapped = {};
+  overlapped.hEvent = event;
+  if (!WriteFile(pipe, bytes.data(), static_cast<DWORD>(bytes.size()), nullptr, &overlapped) &&
+      GetLastError() != ERROR_IO_PENDING) {
+    return false;
+  }
+  const bool inTime = WaitForSingleObject(event, kReportWriteTimeoutMs) == WAIT_OBJECT_0;
+  if (!inTime) CancelIoEx(pipe, &overlapped);
+  DWORD written = 0;
+  const bool ended = GetOverlappedResult(pipe, &overlapped, &written, TRUE) != FALSE;
+  return inTime && ended && written == bytes.size();
+}
+
+}  // namespace
+
 ElevatedReporter ElevatedReporter::Connect() noexcept {
   ElevatedReporter reporter;
-  DWORD parent = 0;
-  if (FAILED(GetParentProcessId(&parent))) return reporter;
+  // The parent stays open until the checks are done: meanwhile its id cannot pass to another
+  // process, so what is checked against the id is checked against the parent.
+  DWORD parentId = 0;
+  wil::unique_handle parent;
+  if (FAILED(OpenParentProcess(&parentId, std::addressof(parent)))) return reporter;
   std::wstring name;
   try {
-    name = ElevationPipeName(parent);
+    name = ElevationPipeName(parentId);
   } catch (...) {
     return reporter;
   }
-  // Anonymous: whoever serves the pipe cannot impersonate this (elevated) process.
-  wil::unique_hfile pipe(CreateFileW(name.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                                     SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS, nullptr));
+  // Anonymous: whoever serves the pipe cannot impersonate this (elevated) process. READ_CONTROL
+  // to read the pipe's owner; overlapped, so that a write the pipe does not take can be given up.
+  wil::unique_hfile pipe(
+      CreateFileW(name.c_str(), GENERIC_WRITE | READ_CONTROL, 0, nullptr, OPEN_EXISTING,
+                  FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS, nullptr));
   if (!pipe) return reporter;
-  ULONG server = 0;
-  if (!GetNamedPipeServerProcessId(pipe.get(), &server) || server != parent) return reporter;
+  ReportServerFacts facts;
+  if (FAILED(ReadReportServerFacts(pipe.get(), parentId, parent.get(), &facts)) ||
+      !TrustReportServer(facts)) {
+    return reporter;
+  }
+  if (FAILED(reporter.written_.create(wil::EventOptions::ManualReset))) return reporter;
   reporter.pipe_ = std::move(pipe);
   return reporter;
 }
 
 void ElevatedReporter::Line(std::wstring_view text) noexcept {
   if (!pipe_) return;
-  std::wstring clean(text.substr(0, kMaxReportLineChars));
-  std::replace_if(clean.begin(), clean.end(), IsControl, L' ');
-  std::string bytes = WideToUtf8Lossy(clean);
-  bytes.push_back('\n');
-  DWORD written = 0;
-  if (!WriteFile(pipe_.get(), bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) ||
-      written != bytes.size()) {
-    pipe_.reset();
+  std::string bytes;
+  try {
+    std::wstring clean(text.substr(0, kMaxReportLineChars));
+    std::replace_if(clean.begin(), clean.end(), IsControl, L' ');
+    bytes = WideToUtf8Lossy(clean);
+    bytes.push_back('\n');
+  } catch (...) {
+    return;  // out of memory: this line is lost, the next ones may still go
   }
+  // A parent that does not take the line in time is given up on: the step goes on unreported
+  // rather than wait for it.
+  if (!WriteInTime(pipe_.get(), written_.get(), bytes)) pipe_.reset();
 }
 
 struct ElevationReportServer::State {
@@ -501,6 +571,10 @@ DWORD WINAPI ReportThread(void* parameter) noexcept {
   }
   char buffer[4096];
   for (;;) {
+    // Finish or the destructor stopped waiting: what the client still sends is dropped. Checked
+    // on every pass, because a client that keeps writing makes each read complete at once, and
+    // only a read that waits looks at |stop| otherwise.
+    if (WaitForSingleObject(state.stop.get(), 0) == WAIT_OBJECT_0) break;
     state.overlapped = OVERLAPPED{};
     state.overlapped.hEvent = state.io.get();
     transferred = 0;
@@ -510,13 +584,14 @@ DWORD WINAPI ReportThread(void* parameter) noexcept {
       if (!AwaitPipe(state, others, &transferred)) break;
     }
     if (transferred == 0) continue;
+    // Past the cap the rest is still read, and dropped: left in the pipe, it would make the
+    // elevated process wait for room.
     const size_t room = kMaxReportBytes - std::min(kMaxReportBytes, state.bytes.size());
     try {
       state.bytes.append(buffer, std::min<size_t>(room, transferred));
     } catch (...) {
-      break;
+      // Out of memory: dropped like the bytes past the cap, and reading goes on.
     }
-    if (transferred > room) break;  // enough: the rest is dropped
   }
   return 0;
 }
@@ -541,7 +616,10 @@ HRESULT ElevationReportServer::Create(std::wstring_view userSid,
   RETURN_IF_FAILED(state->childDone.create(wil::EventOptions::ManualReset));
   RETURN_IF_FAILED(state->stop.create(wil::EventOptions::ManualReset));
 
-  const std::wstring sddl = L"D:P(A;;GA;;;" + std::wstring(userSid) + L")(A;;GA;;;BA)";
+  // Owned by the user, whatever the token's default owner (Administrators in some elevated
+  // tokens): the elevated side writes only to a pipe its parent's user owns.
+  const std::wstring sddl =
+      L"O:" + std::wstring(userSid) + L"D:P(A;;GA;;;" + std::wstring(userSid) + L")(A;;GA;;;BA)";
   wil::unique_hlocal_security_descriptor descriptor;
   RETURN_IF_WIN32_BOOL_FALSE(ConvertStringSecurityDescriptorToSecurityDescriptorW(
       sddl.c_str(), SDDL_REVISION_1, descriptor.put(), nullptr));
@@ -684,6 +762,13 @@ bool LackedAdministratorRights(const ElevatedRun& run) noexcept {
          run.failure == kNoAdministratorRightsHr;
 }
 
+bool ReportChannelTaken(const ElevatedRun& run) noexcept {
+  // A first instance fails with ERROR_ACCESS_DENIED where a pipe of the name exists already (so
+  // does an instance that pipe's DACL refuses), with ERROR_PIPE_BUSY where it takes no more.
+  return run.reportServer == HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED) ||
+         run.reportServer == HRESULT_FROM_WIN32(ERROR_PIPE_BUSY);
+}
+
 HRESULT RunElevated(ElevatedVerb verb, const std::filesystem::path& exe, HWND owner,
                     const ElevationLauncher& launcher, ElevatedRun* run) noexcept try {
   *run = ElevatedRun{};
@@ -692,11 +777,14 @@ HRESULT RunElevated(ElevatedVerb verb, const std::filesystem::path& exe, HWND ow
                                  ElevatedVerbName(verb).empty());
   const ElevationRequest request{exe, ElevatedParameters(verb), owner};
 
-  // Best effort: without the pipe the step still runs, it only cannot tell what it did.
+  // Best effort: without the pipe the step still runs, it only cannot tell what it did. Why there
+  // is none is kept, for the log and for the caller: a name someone else took first is worth
+  // telling the user.
   std::unique_ptr<ElevationReportServer> server;
   std::wstring userSid;
-  if (SUCCEEDED(GetCurrentUserSid(&userSid))) {
-    (void)ElevationReportServer::Create(userSid, &server);
+  run->reportServer = GetCurrentUserSid(&userSid);
+  if (SUCCEEDED(run->reportServer)) {
+    run->reportServer = ElevationReportServer::Create(userSid, &server);
   }
   DWORD processId = 0;
   DWORD exitCode = 0;
@@ -711,8 +799,13 @@ HRESULT RunElevated(ElevatedVerb verb, const std::filesystem::path& exe, HWND ow
   std::wstring summary = std::wstring(ElevatedVerbName(verb)) + L" launch=" +
                          HResultText(launched) + L" exit=" +
                          HResultText(static_cast<HRESULT>(exitCode));
+  const bool taken = ReportChannelTaken(*run);
+  if (FAILED(run->reportServer)) {
+    summary += L" report-channel=" + HResultText(run->reportServer) +
+               (taken ? L" (taken by another process)" : L"");
+  }
   if (!run->reportChannel) summary += L" no-report";
-  Log(run->outcome == ElevatedOutcome::kFailed ? LogLevel::kWarning : LogLevel::kInfo,
+  Log((run->outcome == ElevatedOutcome::kFailed || taken) ? LogLevel::kWarning : LogLevel::kInfo,
       kLogComponent, summary);
   return S_OK;
 }

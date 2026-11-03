@@ -25,6 +25,8 @@ void LogResult(const ScheduleOptions& options, const ScheduleResult& result) noe
   message += OnOff(options.atSignIn);
   message += FAILED(result.error) ? L" result=failed hr=" + HResultText(result.error)
                                   : std::wstring(L" result=done");
+  // Not this user's doing, and only an administrator can undo it.
+  if (result.error == kTaskTakenHr) message += L" names-taken-by-another-account";
   message += L" task=";
   message += !result.after.exists ? L"none" : result.after.atFallback ? L"root-folder" : L"folder";
   Log(FAILED(result.error) ? LogLevel::kWarning : LogLevel::kInfo, kLogComponent, message);
@@ -75,6 +77,7 @@ HRESULT ChangeCheckSchedule(const ScheduleOptions& options, const RegistryRoots&
     return S_OK;
   }
   RETURN_IF_FAILED(locked);
+  if (lock->sessionOnly()) Log(LogLevel::kWarning, kLogComponent, L"checks lock=session-only");
 
   GatherOptions gather;
   gather.liveTest = false;

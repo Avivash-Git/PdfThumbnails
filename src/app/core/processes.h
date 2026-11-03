@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include <RestartManager.h>
+#include <wil/resource.h>
 
 #include <filesystem>
 #include <span>
@@ -77,5 +78,10 @@ HolderRefusal JudgeHolder(const Holder& found, const HolderFacts& now,
 // and was created before this one (so the id was not reused). Fails with
 // HRESULT_FROM_WIN32(ERROR_NOT_FOUND) otherwise.
 [[nodiscard]] HRESULT GetParentProcessId(DWORD* parent) noexcept;
+
+// The same parent, with the handle (PROCESS_QUERY_LIMITED_INFORMATION) its creation time was
+// checked through. While |parent| stays open, |parentId| cannot pass to another process, so
+// whatever is checked against the id meanwhile is checked against this parent.
+[[nodiscard]] HRESULT OpenParentProcess(DWORD* parentId, wil::unique_handle* parent) noexcept;
 
 }  // namespace pdft

@@ -39,7 +39,9 @@ class SystemProbes {
   // Smart App Control's state. The real one reads it under roots.machine.
   [[nodiscard]] virtual HRESULT ReadSacState(const RegistryRoots& roots,
                                              SacReading* reading) const noexcept = 0;
-  virtual BlockCount CountCiBlocks(std::wstring_view leaf, int days) const noexcept = 0;
+  // Code Integrity blocks of the build in |buildFolder| (the registered DLL's folder).
+  virtual BlockCount CountCiBlocks(const std::filesystem::path& buildFolder,
+                                   int days) const noexcept = 0;
   [[nodiscard]] virtual HRESULT DetectPdfCraft(PdfCraftInfo* info) const noexcept = 0;
   [[nodiscard]] virtual HRESULT ReadTask(const TaskLocation& location,
                                          TaskState* state) const noexcept = 0;

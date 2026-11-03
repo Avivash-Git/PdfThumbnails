@@ -174,26 +174,50 @@ void ReleasePdfiumLock() {
   ReleaseSRWLockExclusive(&g_pdfiumLock);
 }
 
-// True in elevated processes (and services): like per-user COM classes, this
-// handler never parses PDFs there. Explorer and its thumbnail process run at
-// Medium integrity.
-bool IsAboveMediumIntegrity() {
-  static const bool above = [] {
+// True when the Administrators group is enabled in |token| (opened with
+// TOKEN_QUERY | TOKEN_DUPLICATE), and when that cannot be checked.
+// CheckTokenMembership needs an impersonation token, so it checks an
+// identification-level copy.
+bool AdministratorsEnabledOrUnknown(HANDLE token) {
+  BYTE administrators[SECURITY_MAX_SID_SIZE];
+  DWORD size = sizeof(administrators);
+  if (!CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr, administrators, &size)) return true;
+  HANDLE identification = nullptr;
+  if (!DuplicateToken(token, SecurityIdentification, &identification)) return true;
+  BOOL member = FALSE;
+  const BOOL checked = CheckTokenMembership(identification, administrators, &member);
+  CloseHandle(identification);
+  return !checked || member != FALSE;
+}
+
+// True in processes that may have administrator rights, where this handler
+// never parses PDFs: the integrity level is above Medium (elevated processes and
+// services; COM ignores per-user classes there too), or the Administrators group
+// is enabled in the token, as in an administrator's full token that another
+// program started with only its label lowered to Medium. Also true when the
+// token cannot be read. Explorer and its thumbnail process run at Medium, with
+// Administrators deny-only for an administrator under UAC. TokenElevation is
+// not used: Windows also sets it for a Medium token with Administrators
+// deny-only and no privileges (a filtered copy of the built-in Administrator's
+// token), which has no administrator rights.
+bool IsAboveMediumOrAdministrator() {
+  static const bool refuse = [] {
     HANDLE token = nullptr;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return true;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &token)) return true;
     alignas(TOKEN_MANDATORY_LABEL)
         BYTE buffer[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
     DWORD size = 0;
     bool result = true;
     if (GetTokenInformation(token, TokenIntegrityLevel, buffer, sizeof(buffer), &size)) {
       PSID sid = reinterpret_cast<TOKEN_MANDATORY_LABEL*>(buffer)->Label.Sid;
-      result = *GetSidSubAuthority(sid, *GetSidSubAuthorityCount(sid) - 1) >
-               SECURITY_MANDATORY_MEDIUM_RID;
+      const UCHAR count = *GetSidSubAuthorityCount(sid);
+      result = count == 0 || *GetSidSubAuthority(sid, count - 1u) > SECURITY_MANDATORY_MEDIUM_RID ||
+               AdministratorsEnabledOrUnknown(token);
     }
     CloseHandle(token);
     return result;
   }();
-  return above;
+  return refuse;
 }
 
 // The zoom in the 1.x settings file, read exactly as 1.1 reads it:
@@ -428,7 +452,7 @@ class PdfThumbnailProvider final : public IInitializeWithStream,
     *alpha = WTSAT_UNKNOWN;
     if (!stream_) return E_UNEXPECTED;
     if (cx == 0) return E_INVALIDARG;
-    if (IsAboveMediumIntegrity()) return WTS_E_FAILEDEXTRACTION;
+    if (IsAboveMediumOrAdministrator()) return WTS_E_FAILEDEXTRACTION;
     if (!InitOnceExecuteOnce(&g_pdfiumOnce, LoadPdfium, nullptr, nullptr))
       return WTS_E_FAILEDEXTRACTION;
 

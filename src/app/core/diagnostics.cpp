@@ -342,6 +342,15 @@ HRESULT ReadLogTail(size_t maxLines, std::vector<std::wstring>* lines) noexcept 
 }
 CATCH_RETURN();
 
+std::vector<std::wstring> DiagnosticsLogTail(const ProcessContext& context) {
+  if (context.elevated) return {std::wstring(kLogNotReadElevated)};
+  std::vector<std::wstring> tail;
+  if (const HRESULT hr = ReadLogTail(kDiagnosticsLogLines, &tail); FAILED(hr)) {
+    return {L"(the log could not be read: " + HResultText(hr) + L")"};
+  }
+  return tail;
+}
+
 HRESULT GetRedactContext(const ProcessContext& context, RedactContext* redact) noexcept try {
   *redact = {};
   wil::unique_cotaskmem_string profile;

@@ -170,6 +170,18 @@ TEST(Commands, ElevatedProcessesNeverLog) {
   EXPECT_FALSE(ShouldLog(context));
 }
 
+// An elevated --status, --check or --fix leaves %TEMP% alone: the user's programs choose where
+// it is.
+TEST(Commands, ElevatedProcessesNeverSweepProbes) {
+  ProcessContext context;
+  context.elevated = false;
+  EXPECT_TRUE(SweepsProbes(context));
+  context.elevated = true;
+  EXPECT_FALSE(SweepsProbes(context));
+  context.integrityRid = SECURITY_MANDATORY_MEDIUM_RID;  // Administrators enabled at Medium
+  EXPECT_FALSE(SweepsProbes(context));
+}
+
 // Each registry check logs its own result under its own name.
 TEST(Commands, StartMessageNamesTheCheckThatRan) {
   ProcessContext context;
@@ -263,9 +275,26 @@ TEST(NamedObjects, Names) {
   const std::wstring prefix = kObjectPrefix;
   EXPECT_EQ(SettingsInstanceMutexName(L"S-1-2"), L"Local\\" + prefix + L".Settings.S-1-2");
   EXPECT_EQ(OperationLockName(L"S-1-2"), L"Global\\" + prefix + L".Operation.S-1-2");
+  EXPECT_EQ(OperationSessionLockName(L"S-1-2"), L"Local\\" + prefix + L".Operation.S-1-2");
   EXPECT_EQ(LogMutexName(L"S-1-2"), L"Local\\" + prefix + L".Log.S-1-2");
   EXPECT_EQ(AppMutexName(false), prefix + L"AppMutex");
   EXPECT_EQ(AppMutexName(true), L"Global\\" + prefix + L"AppMutex");
+}
+
+// Whose global lock may be trusted: one this user made, unelevated (the user owns it) or elevated
+// (Administrators own it), or one SYSTEM made. Made-up SIDs in the Microsoft Entra form, as above.
+TEST(NamedObjects, LockOwnerMadeByThisUser) {
+  constexpr wchar_t kUser[] = L"S-1-12-1-1-2-3-4";
+  EXPECT_TRUE(MadeByThisUser(kUser, kUser));
+  EXPECT_TRUE(MadeByThisUser(L"S-1-5-32-544", kUser));       // Administrators
+  EXPECT_TRUE(MadeByThisUser(L"S-1-5-18", kUser));           // SYSTEM
+  EXPECT_FALSE(MadeByThisUser(L"S-1-12-1-1-2-3-5", kUser));  // another user
+  EXPECT_FALSE(MadeByThisUser(L"S-1-12-1-1-2-3-44", kUser));
+  EXPECT_FALSE(MadeByThisUser(L"S-1-12-1-1-2-3", kUser));  // a prefix of the user's SID
+  EXPECT_FALSE(MadeByThisUser(L"S-1-5-32-545", kUser));    // Users
+  EXPECT_FALSE(MadeByThisUser(L"S-1-5-19", kUser));        // LOCAL SERVICE
+  EXPECT_FALSE(MadeByThisUser(L"S-1-1-0", kUser));         // Everyone
+  EXPECT_FALSE(MadeByThisUser(L"", kUser));                // no owner could be read
 }
 
 // CreateMutexW refuses with ERROR_ACCESS_DENIED both a mutex that another instance made with a

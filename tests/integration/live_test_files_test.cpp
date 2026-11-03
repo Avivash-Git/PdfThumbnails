@@ -1,8 +1,8 @@
-// The files around the Explorer test (live_test.h): writing the probe PDF, sweeping old probes,
-// and checking a --test-file path. No test here extracts a thumbnail: that would start a
-// thumbnail surrogate and load whatever handler is registered on the PC, so the extraction is
-// left to the check's own runs, and the code that gathers the state is tested with a fake
-// (SystemProbes).
+// The files around the Explorer test (live_test.h): writing the probe PDF, sweeping old probes
+// (never through a link or a junction), and checking a --test-file path. No test here extracts a
+// thumbnail: that would start a thumbnail surrogate and load whatever handler is registered on the
+// PC, so the extraction is left to the check's own runs, and the code that gathers the state is
+// tested with a fake (SystemProbes).
 
 #include <windows.h>
 
@@ -30,11 +30,12 @@ std::string ReadAll(const std::filesystem::path& path) {
 
 void Touch(const std::wstring& path) { std::ofstream(path, std::ios::binary) << "x"; }
 
-// Sets the last write time of |path| (a file, or a folder with |folder|) to |ageHours| ago.
-void Age(const std::wstring& path, int ageHours, bool folder = false) {
+// Sets the last write time of |path| to |ageHours| ago. |flags|: FILE_FLAG_BACKUP_SEMANTICS for a
+// folder, FILE_FLAG_OPEN_REPARSE_POINT for a link itself rather than its target.
+void Age(const std::wstring& path, int ageHours, DWORD flags = 0) {
   HANDLE handle = CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES,
                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                              OPEN_EXISTING, folder ? FILE_FLAG_BACKUP_SEMANTICS : 0, nullptr);
+                              OPEN_EXISTING, flags, nullptr);
   ASSERT_NE(handle, INVALID_HANDLE_VALUE) << GetLastError();
   FILETIME now;
   GetSystemTimeAsFileTime(&now);
@@ -55,8 +56,14 @@ std::wstring ProbeName() {
   return ProbeFileName(id);
 }
 
+// |path| is there, itself: a link counts, wherever it leads.
 bool Exists(const std::wstring& path) {
   return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+bool IsReparsePoint(const std::wstring& path) {
+  const DWORD attributes = GetFileAttributesW(path.c_str());
+  return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 
 TEST(ProbeFile, WrittenToTempWithThe1xBytes) {
@@ -106,7 +113,7 @@ TEST(ProbeFile, SweepTakesOnlyOldProbes) {
   Age(old, 2);
   Age(oldButNotAProbe, 2);
   Age(oldOther, 2);
-  Age(oldFolder, 2, true);
+  Age(oldFolder, 2, FILE_FLAG_BACKUP_SEMANTICS);
 
   int removed = -1;
   ASSERT_HRESULT_SUCCEEDED(SweepStaleProbes(temp.path(), &removed));
@@ -120,6 +127,78 @@ TEST(ProbeFile, SweepTakesOnlyOldProbes) {
   // A folder that is not there is nothing to sweep.
   ASSERT_HRESULT_SUCCEEDED(SweepStaleProbes(temp.File(L"missing"), &removed));
   EXPECT_EQ(removed, 0);
+}
+
+// A folder that is a junction is not swept at all: nothing is deleted through it, not even a
+// stale probe in the folder it leads to. The folder itself is swept as usual.
+TEST(ProbeFile, SweepStopsAtAFolderThatIsAJunction) {
+  test::TempDir temp(L"probes");
+  ASSERT_TRUE(temp.ok());
+  const std::wstring real = temp.File(L"real");
+  ASSERT_TRUE(CreateDirectoryW(real.c_str(), nullptr));
+  const std::wstring probe = real + L"\\" + ProbeName();
+  Touch(probe);
+  Age(probe, 2);
+  const std::wstring link = temp.File(L"link");
+  ASSERT_TRUE(CreateDirectoryW(link.c_str(), nullptr));
+  ASSERT_TRUE(test::MakeJunction(link, real));
+
+  int removed = -1;
+  EXPECT_EQ(SweepStaleProbes(link, &removed), HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK));
+  EXPECT_EQ(removed, 0);
+  EXPECT_TRUE(Exists(probe));
+
+  ASSERT_HRESULT_SUCCEEDED(SweepStaleProbes(real, &removed));
+  EXPECT_EQ(removed, 1);
+  EXPECT_FALSE(Exists(probe));
+}
+
+// A junction with a probe's name is left alone, and so is the stale probe in the folder it leads
+// to, however old the junction is.
+TEST(ProbeFile, SweepLeavesAJunctionNamedLikeAProbe) {
+  test::TempDir temp(L"probes");
+  ASSERT_TRUE(temp.ok());
+  const std::wstring target = temp.File(L"target");
+  ASSERT_TRUE(CreateDirectoryW(target.c_str(), nullptr));
+  const std::wstring behind = target + L"\\" + ProbeName();
+  Touch(behind);
+  Age(behind, 2);
+  const std::wstring sweep = temp.File(L"sweep");
+  ASSERT_TRUE(CreateDirectoryW(sweep.c_str(), nullptr));
+  const std::wstring junction = sweep + L"\\" + ProbeName();
+  ASSERT_TRUE(CreateDirectoryW(junction.c_str(), nullptr));
+  ASSERT_TRUE(test::MakeJunction(junction, target));
+  Age(junction, 2, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+
+  int removed = -1;
+  ASSERT_HRESULT_SUCCEEDED(SweepStaleProbes(sweep, &removed));
+  EXPECT_EQ(removed, 0);
+  EXPECT_TRUE(IsReparsePoint(junction));
+  EXPECT_TRUE(Exists(behind));
+}
+
+// A file link with a probe's name is never deleted, nor the file it leads to, however old both
+// are. Making the link needs the right to create symbolic links (elevated, as on CI, or Developer
+// Mode); without it the test is skipped.
+TEST(ProbeFile, SweepLeavesAFileLinkNamedLikeAProbe) {
+  test::TempDir temp(L"probes");
+  ASSERT_TRUE(temp.ok());
+  const std::wstring target = temp.File(L"target.pdf");
+  Touch(target);
+  Age(target, 2);
+  const std::wstring link = temp.File(ProbeName());
+  if (!CreateSymbolicLinkW(link.c_str(), target.c_str(),
+                           SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+    const DWORD error = GetLastError();
+    GTEST_SKIP() << "no symbolic link can be made here (error " << error << ")";
+  }
+  Age(link, 2, FILE_FLAG_OPEN_REPARSE_POINT);
+
+  int removed = -1;
+  ASSERT_HRESULT_SUCCEEDED(SweepStaleProbes(temp.path(), &removed));
+  EXPECT_EQ(removed, 0);
+  EXPECT_TRUE(IsReparsePoint(link));
+  EXPECT_TRUE(Exists(target));
 }
 
 TEST(ProbeFile, RunRefusesSizesBeforeWritingAnything) {

@@ -358,18 +358,20 @@ HRESULT DefineTask(ITaskService* service, const TaskOptions& options,
   return S_OK;
 }
 
-// Registers |definition| as |name| in |folder|, creating or replacing it, with the principal's
-// interactive token. "Some triggers failed" is a failure (kSomeTriggersFailed). No log line for
-// E_ACCESSDENIED: the caller falls back.
-HRESULT RegisterIn(ITaskFolder* folder, std::wstring_view name, ITaskDefinition* definition) {
+// Registers |definition| as |name| in |folder| with the principal's interactive token: with
+// TASK_CREATE as a new task, which fails when a task has the name; with TASK_UPDATE over the task
+// there, which fails when none has. "Some triggers failed" is a failure (kSomeTriggersFailed). No
+// log line for E_ACCESSDENIED: the caller falls back.
+HRESULT RegisterIn(ITaskFolder* folder, std::wstring_view name, ITaskDefinition* definition,
+                   TASK_CREATION creation) {
   wil::unique_bstr taskName;
   RETURN_IF_FAILED(MakeBstr(name, taskName));
   VARIANT empty;
   VariantInit(&empty);
   wil::com_ptr_nothrow<IRegisteredTask> registered;
   const HRESULT hr =
-      folder->RegisterTaskDefinition(taskName.get(), definition, TASK_CREATE_OR_UPDATE, empty,
-                                     empty, TASK_LOGON_INTERACTIVE_TOKEN, empty, registered.put());
+      folder->RegisterTaskDefinition(taskName.get(), definition, creation, empty, empty,
+                                     TASK_LOGON_INTERACTIVE_TOKEN, empty, registered.put());
   if (hr == SCHED_S_SOME_TRIGGERS_FAILED) return kSomeTriggersFailed;
   return hr;
 }
@@ -523,6 +525,74 @@ HRESULT RunsAsUser(IRegisteredTask* task, std::wstring_view sid, bool* yes) {
   return S_OK;
 }
 
+// Whose task holds a name.
+enum class NameHolder {
+  kNobody,
+  kUser,         // the user's own: it runs as them
+  kSomeoneElse,  // one this user may not open, or one that runs as another account
+};
+
+// Whose task holds |name| in |folder|, for the user |sid|.
+HRESULT HolderOf(ITaskFolder* folder, std::wstring_view name, std::wstring_view sid,
+                 NameHolder* holder) {
+  *holder = NameHolder::kNobody;
+  wil::unique_bstr taskName;
+  RETURN_IF_FAILED(MakeBstr(name, taskName));
+  wil::com_ptr_nothrow<IRegisteredTask> task;
+  const HRESULT hr = folder->GetTask(taskName.get(), task.put());
+  if (IsTaskNotFound(hr)) return S_OK;
+  if (hr == E_ACCESSDENIED) {
+    // The user's own task gives them full control: one they may not open is not theirs.
+    *holder = NameHolder::kSomeoneElse;
+    return S_OK;
+  }
+  RETURN_IF_FAILED(hr);
+  bool users = false;
+  RETURN_IF_FAILED(RunsAsUser(task.get(), sid, &users));
+  *holder = users ? NameHolder::kUser : NameHolder::kSomeoneElse;
+  return S_OK;
+}
+
+// Registers |definition| as |name| in |folder| for the user |sid|, never over another account's
+// task (kTaskTakenHr then). A free name is registered anew, so a task someone makes meanwhile
+// makes the call fail rather than be replaced; only the user's own task is updated. A name that
+// changed hands between looking and registering is looked at once more.
+HRESULT RegisterUnlessTaken(ITaskFolder* folder, std::wstring_view name,
+                            ITaskDefinition* definition, std::wstring_view sid) {
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    NameHolder holder = NameHolder::kNobody;
+    RETURN_IF_FAILED(HolderOf(folder, name, sid, &holder));
+    if (holder == NameHolder::kSomeoneElse) return kTaskTakenHr;
+    const bool create = holder == NameHolder::kNobody;
+    const HRESULT hr = RegisterIn(folder, name, definition, create ? TASK_CREATE : TASK_UPDATE);
+    const bool changedHands =
+        create ? hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) : IsTaskNotFound(hr);
+    if (!changedHands) return hr;
+  }
+  // Taken again as soon as it was free, or there for Task Scheduler but not for this user: not a
+  // name the user can have.
+  return kTaskTakenHr;
+}
+
+// Deletes the task |name| from |folder| when it is the user |sid|'s own: S_FALSE when it is not
+// there, or is someone else's, which stays.
+HRESULT DeleteOwnTaskNamed(ITaskFolder* folder, std::wstring_view name, std::wstring_view sid) {
+  NameHolder holder = NameHolder::kNobody;
+  RETURN_IF_FAILED(HolderOf(folder, name, sid, &holder));
+  return holder == NameHolder::kUser ? DeleteTaskNamed(folder, name) : S_FALSE;
+}
+
+// The same, with the folder given by its path: S_FALSE also when the folder does not exist or
+// may not be opened.
+HRESULT DeleteOwnTaskAt(ITaskService* service, std::wstring_view folderPath, std::wstring_view name,
+                        std::wstring_view sid) {
+  wil::com_ptr_nothrow<ITaskFolder> folder;
+  const HRESULT hr = OpenFolder(service, folderPath, folder);
+  if (hr == S_FALSE || hr == E_ACCESSDENIED) return S_FALSE;
+  if (FAILED(hr)) return hr;
+  return DeleteOwnTaskNamed(folder.get(), name, sid);
+}
+
 }  // namespace
 
 bool IsSidString(std::wstring_view sid) noexcept {
@@ -669,6 +739,9 @@ HRESULT ReadTask(const TaskLocation& location, TaskState* state) noexcept try {
   }
   const TaskPlace second = first == TaskPlace::kFolder ? TaskPlace::kFallback : TaskPlace::kFolder;
   HRESULT refused = S_OK;
+  // Where someone else's copy is: at every name ApplyTaskOptions may use, the user cannot have one.
+  bool othersInFolder = false;
+  bool othersAtFallback = false;
   for (const TaskPlace place : {first, second}) {
     const bool atFallback = place == TaskPlace::kFallback;
     if (atFallback && !hasFallback) continue;
@@ -688,6 +761,11 @@ HRESULT ReadTask(const TaskLocation& location, TaskState* state) noexcept try {
     // One this user may not open is not theirs either: their own gives them full control.
     if (hr == E_ACCESSDENIED) {
       refused = hr;
+      if (atFallback) {
+        othersAtFallback = true;
+      } else {
+        othersInFolder = true;
+      }
       continue;
     }
     if (FAILED(hr)) return hr;
@@ -699,6 +777,11 @@ HRESULT ReadTask(const TaskLocation& location, TaskState* state) noexcept try {
     }
     state->atFallback = atFallback;
     return S_OK;
+  }
+  // ApplyTaskOptions tries the folder only when it comes first, and the fallback name after it.
+  if (!location.userSid.empty() && (first != TaskPlace::kFolder || othersInFolder) &&
+      (!hasFallback || othersAtFallback)) {
+    return kTaskTakenHr;
   }
   return refused;  // not there (S_OK), or only someone else's
 }
@@ -806,30 +889,33 @@ HRESULT ApplyTaskOptions(const TaskLocation& location, const TaskOptions& option
 
   wil::com_ptr_nothrow<ITaskDefinition> definition;
   RETURN_IF_FAILED(DefineTask(service.get(), options, program, context, definition));
+  const std::wstring_view sid = context.userSid;
   HRESULT hr = S_OK;
   if (place == TaskPlace::kFolder) {
-    hr = RegisterIn(folder.get(), location.name, definition.get());
-    if (hr == E_ACCESSDENIED && hasFallback) place = TaskPlace::kFallback;
+    hr = RegisterUnlessTaken(folder.get(), location.name, definition.get(), sid);
+    if ((hr == E_ACCESSDENIED || hr == kTaskTakenHr) && hasFallback) place = TaskPlace::kFallback;
   }
   if (place == TaskPlace::kFallback) {
     wil::com_ptr_nothrow<ITaskFolder> fallback;
     hr = OpenFolder(service.get(), location.fallbackFolder, fallback);
     if (hr == S_FALSE) hr = HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
-    if (SUCCEEDED(hr)) hr = RegisterIn(fallback.get(), location.fallbackName, definition.get());
+    if (SUCCEEDED(hr)) {
+      hr = RegisterUnlessTaken(fallback.get(), location.fallbackName, definition.get(), sid);
+    }
   }
   // Task Scheduler registered the task even when some triggers failed: the other copy goes then
   // too.
   if (FAILED(hr) && hr != kSomeTriggersFailed) return hr;
   const HRESULT registered = hr;
 
-  // One copy per user.
+  // One copy per user: their own in the other place goes, anyone else's stays.
   HRESULT other = S_FALSE;
   if (place == TaskPlace::kFolder) {
     if (hasFallback) {
-      other = DeleteTaskAt(service.get(), location.fallbackFolder, location.fallbackName);
+      other = DeleteOwnTaskAt(service.get(), location.fallbackFolder, location.fallbackName, sid);
     }
   } else if (folder) {
-    other = DeleteTaskNamed(folder.get(), location.name);
+    other = DeleteOwnTaskNamed(folder.get(), location.name, sid);
   }
   if (FAILED(registered)) return registered;
   return FAILED(other) ? other : S_OK;

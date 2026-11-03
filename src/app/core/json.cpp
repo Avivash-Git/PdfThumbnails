@@ -257,6 +257,14 @@ void AppendUtf8(char32_t code, std::string* out) {
   }
 }
 
+// Written as \uXXXX: the control characters, which JSON requires, and also DEL, the C1 controls,
+// the line and paragraph separators and the bidirectional controls. The JSON goes out as it is
+// (Output::Json), so none of these may reach a console that shows it raw.
+bool EscapedAsCode(char32_t code) noexcept {
+  return code < 0x20 || (code >= 0x7F && code <= 0x9F) || (code >= 0x2028 && code <= 0x202E) ||
+         (code >= 0x2066 && code <= 0x2069);
+}
+
 }  // namespace
 
 std::string JsonString(std::wstring_view text) {
@@ -295,7 +303,7 @@ std::string JsonString(std::wstring_view text) {
         out += "\\t";
         break;
       default:
-        if (code < 0x20) {
+        if (EscapedAsCode(code)) {
           char escaped[8] = {};
           std::snprintf(escaped, sizeof(escaped), "\\u%04X", static_cast<unsigned>(code));
           out += escaped;

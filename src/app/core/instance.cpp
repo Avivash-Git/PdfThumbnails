@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "project_config.h"
@@ -14,8 +15,13 @@
 namespace pdft {
 namespace {
 
-// How often CreateNamedMutex creates a name again that was gone after a refused creation.
+// How often CreateNamedMutex creates a name again that was gone after a refused creation, and
+// OpenLockMutex one that was gone before its owner could be read.
 constexpr int kCreateAttempts = 3;
+
+// The owners of what an elevated process of the user and the system make ("BA" and "SY").
+constexpr std::wstring_view kAdministratorsSid = L"S-1-5-32-544";
+constexpr std::wstring_view kSystemSid = L"S-1-5-18";
 
 // Appended to every object name (SetObjectNameSuffixForTesting); empty outside tests. Created
 // on first use, not before main.
@@ -77,6 +83,124 @@ HRESULT LabelIsBelowMedium(HANDLE object, bool* below) noexcept {
   return S_OK;
 }
 
+// The owner of |object| (a handle with READ_CONTROL) as a SID string; empty when it has none.
+HRESULT GetOwnerSid(HANDLE object, std::wstring* ownerSid) noexcept try {
+  ownerSid->clear();
+  PSID owner = nullptr;
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  const DWORD error = GetSecurityInfo(object, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, &owner,
+                                      nullptr, nullptr, nullptr, &descriptor);
+  RETURN_IF_WIN32_ERROR(error);
+  wil::unique_hlocal freeDescriptor(descriptor);
+  if (!owner) return S_OK;
+  wil::unique_hlocal_string text;
+  RETURN_IF_WIN32_BOOL_FALSE(ConvertSidToStringSidW(owner, text.put()));
+  *ownerSid = text.get();
+  return S_OK;
+}
+CATCH_RETURN();
+
+// What one of the operation lock's names is to this process.
+enum class LockMutex {
+  kUsable,          // made now, or made by this user: wait on it
+  kAnotherAccount,  // another account's, one that keeps this user out, or no mutex at all
+  kBusy,            // this user's, but this process may not wait on it (OperationLock::kBusy)
+  kLowerIntegrity,  // this user's, made below Medium (OperationLock::kTakenByLowerIntegrity)
+  kRefused,         // this process may not create named objects there (kNamedObjectsRefusedHr)
+};
+
+// Creates the operation lock's mutex |name| for the user |userSid|, or opens it if it exists, and
+// says what it is to this process (*found); *mutex holds it when that is kUsable. A mutex that
+// exists counts as this user's only when its owner says so (MadeByThisUser): anyone may make a
+// Global\ name first, but no other standard account can give what it makes such an owner. The
+// app's descriptor lets the user read the owner and wait on the mutex, so a mutex whose
+// descriptor refuses this user that much was not made for this user by the app.
+HRESULT OpenLockMutex(const std::wstring& name, const std::wstring& userSid,
+                      wil::unique_handle* mutex, LockMutex* found) noexcept try {
+  mutex->reset();
+  *found = LockMutex::kAnotherAccount;
+  for (int attempt = 0; attempt < kCreateAttempts; ++attempt) {
+    wil::unique_handle full;
+    bool existed = false;
+    const HRESULT made = CreateNamedMutex(name, userSid, false, 0, std::addressof(full), &existed);
+    if (made == kNamedObjectsRefusedHr) {
+      *found = LockMutex::kRefused;
+      return S_OK;
+    }
+    // The name is no mutex that this user may make or open: an object of another type
+    // (ERROR_INVALID_HANDLE), or an object manager link that leads where no mutex can be made
+    // (the others). No instance of this user made that either.
+    if (made == HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE) ||
+        made == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND) ||
+        made == HRESULT_FROM_WIN32(ERROR_BAD_PATHNAME) ||
+        made == HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED)) {
+      return S_OK;  // kAnotherAccount
+    }
+    RETURN_IF_FAILED(made);
+    if (!existed) {
+      *mutex = std::move(full);
+      *found = LockMutex::kUsable;
+      return S_OK;
+    }
+    // It exists, and it was opened fully when its descriptor let this process. When not, a
+    // handle that may only read who owns it (and wait on it) tells whose it is.
+    wil::unique_handle readOnly;
+    if (!full) {
+      readOnly.reset(OpenMutexW(READ_CONTROL | SYNCHRONIZE, FALSE, name.c_str()));
+      if (!readOnly) {
+        const DWORD error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND) continue;    // gone in between: make it again
+        if (error == ERROR_ACCESS_DENIED) return S_OK;  // keeps this user out: kAnotherAccount
+        RETURN_WIN32(error);
+      }
+    }
+    std::wstring owner;
+    RETURN_IF_FAILED(GetOwnerSid(full ? full.get() : readOnly.get(), &owner));
+    if (!MadeByThisUser(owner, userSid)) return S_OK;  // kAnotherAccount
+    if (!full) {
+      // This user's, with a descriptor that keeps this process from holding it: another
+      // instance has it, as before the owner was read.
+      *found = LockMutex::kBusy;
+      return S_OK;
+    }
+    bool belowMedium = false;
+    RETURN_IF_FAILED(LabelIsBelowMedium(full.get(), &belowMedium));
+    if (belowMedium) {
+      *found = LockMutex::kLowerIntegrity;
+      return S_OK;
+    }
+    *mutex = std::move(full);
+    *found = LockMutex::kUsable;
+    return S_OK;
+  }
+  // There each time, and gone again each time before its owner could be read: something keeps
+  // making and closing a name that this user may not open fully, which no instance of this user
+  // does, so it counts as another account's (kAnotherAccount).
+  return S_OK;
+}
+CATCH_RETURN();
+
+// Waits up to |waitMs| for |mutex|: S_OK when this thread owns it now (*abandoned set when its
+// holder ended without releasing it), OperationLock::kBusy when another holder kept it all along.
+HRESULT WaitForLock(HANDLE mutex, DWORD waitMs, bool* abandoned) noexcept {
+  const DWORD waited = WaitForSingleObject(mutex, waitMs);
+  if (waited == WAIT_OBJECT_0) return S_OK;
+  if (waited == WAIT_ABANDONED) {
+    // The holder ended without releasing it; this thread owns it now.
+    *abandoned = true;
+    return S_OK;
+  }
+  if (waited == WAIT_TIMEOUT) return OperationLock::kBusy;
+  RETURN_LAST_ERROR();
+}
+
+// What is left of |waitMs| (INFINITE stays INFINITE) of a wait that began at |start|.
+DWORD RemainingWait(DWORD waitMs, ULONGLONG start) noexcept {
+  if (waitMs == INFINITE) return INFINITE;
+  const ULONGLONG spent = GetTickCount64() - start;
+  return spent >= waitMs ? 0 : static_cast<DWORD>(waitMs - spent);
+}
+
 }  // namespace
 
 void SetObjectNameSuffixForTesting(std::wstring_view suffix) noexcept {
@@ -119,6 +243,11 @@ std::wstring SettingsInstanceMutexName(std::wstring_view userSid) {
 
 std::wstring OperationLockName(std::wstring_view userSid) {
   return std::wstring(L"Global\\") + kObjectPrefix + L".Operation." + std::wstring(userSid) +
+         NameSuffix();
+}
+
+std::wstring OperationSessionLockName(std::wstring_view userSid) {
+  return std::wstring(L"Local\\") + kObjectPrefix + L".Operation." + std::wstring(userSid) +
          NameSuffix();
 }
 
@@ -223,46 +352,102 @@ HRESULT AppMutexes::Hold(std::wstring_view userSid) noexcept try {
 }
 CATCH_RETURN();
 
-OperationLock::OperationLock(wil::unique_handle mutex, bool abandoned) noexcept
-    : mutex_(std::move(mutex)), abandoned_(abandoned) {}
+bool MadeByThisUser(std::wstring_view ownerSid, std::wstring_view userSid) noexcept {
+  return !ownerSid.empty() &&
+         (ownerSid == userSid || ownerSid == kAdministratorsSid || ownerSid == kSystemSid);
+}
+
+OperationLock::OperationLock(wil::unique_handle session, wil::unique_handle global, bool abandoned,
+                             bool sessionOnly) noexcept
+    : session_(std::move(session)),
+      global_(std::move(global)),
+      abandoned_(abandoned),
+      sessionOnly_(sessionOnly) {}
 
 OperationLock::~OperationLock() {
-  if (mutex_) ReleaseMutex(mutex_.get());
+  // The other way round from Acquire; in session 0 the two are one mutex, owned twice.
+  if (global_) ReleaseMutex(global_.get());
+  if (session_) ReleaseMutex(session_.get());
 }
 
 HRESULT OperationLock::Acquire(DWORD waitMs, std::optional<OperationLock>* lock) noexcept try {
   lock->reset();
   std::wstring sid;
   RETURN_IF_FAILED(GetCurrentUserSid(&sid));
-  wil::unique_handle mutex;
-  bool existed = false;
-  const HRESULT made =
-      CreateNamedMutex(OperationLockName(sid), sid, false, 0, std::addressof(mutex), &existed);
-  // Not busy: there is no holder to wait for, and waiting would not let this process make the
-  // lock. The callers say so (not a WIL failure).
-  if (made == kNamedObjectsRefusedHr) return made;
-  RETURN_IF_FAILED(made);
-  // It exists, but this process may not wait on it: whoever made it keeps everyone else out.
-  if (!mutex) return kBusy;
-  if (existed) {
-    bool belowMedium = false;
-    RETURN_IF_FAILED(LabelIsBelowMedium(mutex.get(), &belowMedium));
-    if (belowMedium) return kTakenByLowerIntegrity;
-  }
+  const ULONGLONG start = GetTickCount64();
   bool abandoned = false;
-  switch (WaitForSingleObject(mutex.get(), waitMs)) {
-    case WAIT_OBJECT_0:
+
+  // This session's name first, in every process, so two of them never wait for each other the
+  // wrong way round. No other account's sign-in can make it, so the user's processes in this
+  // session keep each other out whatever happens to the global name.
+  wil::unique_handle session;
+  LockMutex found = LockMutex::kRefused;
+  RETURN_IF_FAILED(
+      OpenLockMutex(OperationSessionLockName(sid), sid, std::addressof(session), &found));
+  switch (found) {
+    case LockMutex::kUsable:
+      if (const HRESULT waited = WaitForLock(session.get(), waitMs, &abandoned); waited != S_OK) {
+        if (waited == kBusy) return kBusy;
+        RETURN_HR(waited);
+      }
       break;
-    case WAIT_ABANDONED:
-      // The holder ended without releasing it; this thread owns it now.
-      abandoned = true;
+    case LockMutex::kRefused:
+      // This process may not make names in its session (one started as another account in
+      // someone else's session, say): the global name alone, if it can be had.
       break;
-    case WAIT_TIMEOUT:
+    case LockMutex::kLowerIntegrity:
+      return kTakenByLowerIntegrity;
+    case LockMutex::kAnotherAccount:
+    case LockMutex::kBusy:
+      // It exists, but this process may not wait on it: whoever made it keeps everyone else out.
+      // In session 0 a Local\ name is the Global\ one (that session's namespace is the
+      // machine's), so another account may have made this one too.
       return kBusy;
-    default:
-      RETURN_LAST_ERROR();
   }
-  lock->emplace(OperationLock(std::move(mutex), abandoned));
+  // Let go of this session's mutex again when the global name ends the attempt.
+  auto releaseSession = wil::scope_exit([&session] {
+    if (session) ReleaseMutex(session.get());
+  });
+
+  // Then the global name, which keeps out the user's processes in their other sessions too, but
+  // only when this user made it. Any account may make that name, or put an object manager link
+  // there that leads wherever it likes, so whatever fails there (WIL has logged why) is not this
+  // user's lock either.
+  wil::unique_handle global;
+  LockMutex globalFound = LockMutex::kAnotherAccount;
+  if (FAILED(OpenLockMutex(OperationLockName(sid), sid, std::addressof(global), &globalFound))) {
+    global.reset();
+    globalFound = LockMutex::kAnotherAccount;
+  }
+  switch (globalFound) {
+    case LockMutex::kUsable:
+      // In session 0 this is the session's mutex again: this thread owns it already, so the wait
+      // returns at once, and each handle releases it once.
+      if (const HRESULT waited =
+              WaitForLock(global.get(), RemainingWait(waitMs, start), &abandoned);
+          waited != S_OK) {
+        if (waited == kBusy) return kBusy;
+        RETURN_HR(waited);
+      }
+      break;
+    case LockMutex::kLowerIntegrity:
+      return kTakenByLowerIntegrity;
+    case LockMutex::kBusy:
+      return kBusy;
+    case LockMutex::kAnotherAccount:
+    case LockMutex::kRefused:
+      global.reset();
+      if (!session) {
+        // Neither name can be had. When this process may make neither, there is no holder to
+        // wait for, and waiting would not let it make the lock: the callers say so (not a WIL
+        // failure). Otherwise the global name keeps it out.
+        return globalFound == LockMutex::kRefused ? kNamedObjectsRefusedHr : kBusy;
+      }
+      break;
+  }
+  releaseSession.release();
+  const bool sessionOnly = !global;
+  lock->emplace(OperationLock(std::move(session), std::move(global), abandoned, sessionOnly));
   return S_OK;
 }
 CATCH_RETURN();

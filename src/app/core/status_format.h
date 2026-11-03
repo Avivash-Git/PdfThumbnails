@@ -85,6 +85,15 @@ struct ScheduleReport {
 // std::bad_alloc.
 ScheduleReport ScheduleResultReport(const ScheduleResult& result);
 
+// Another account's tasks hold every name the user's check task may have (kTaskTakenHr): what
+// that means, as words that can end a sentence (pure). May throw std::bad_alloc.
+std::wstring TaskTakenText();
+
+// ... and the way out, which only an administrator has: deleting the tasks at |location|'s names
+// in Task Scheduler, or uninstalling for all users, which deletes every user's check task (pure).
+// One sentence without a final period. May throw std::bad_alloc.
+std::wstring TaskTakenHint(const TaskLocation& location);
+
 // What the administrator step |verb| would do, as the end of "The machine-wide part needs an
 // administrator to ..." (pure). May throw std::bad_alloc.
 std::wstring ElevatedVerbText(ElevatedVerb verb);

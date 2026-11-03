@@ -151,6 +151,8 @@ HRESULT RunCheck(const CheckOptions& options, const RegistryRoots& roots,
   }
   RETURN_IF_FAILED(locked);
   result->lockAbandoned = lock->abandoned();
+  // Another account made the global lock's name first: this lock keeps out only this session.
+  if (lock->sessionOnly()) LogLine(LogLevel::kWarning, L"check lock=session-only");
 
   GatherOptions gather;
   gather.liveTest = options.liveTest;

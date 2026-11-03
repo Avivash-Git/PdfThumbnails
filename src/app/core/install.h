@@ -11,18 +11,22 @@
 //   1. refused where the registry may be virtualized (8) and in an elevated process (8: the
 //      per-user half must run as the signed-in user; the step for all users asks for an
 //      administrator itself); refused while the installer (Inno Setup) has an install here (8),
-//      for a folder that is not a build of this version for this Windows (8), and for a folder
-//      that other accounts could change (8: an administrator would copy and register what they
-//      put there; for --user, this user's thumbnail process and sign-in task would run it);
+//      for a folder on a network drive (8, before anything reads it), for a folder that is not a
+//      build of this version for this Windows (8), and for a folder that other accounts could
+//      change (8: an administrator would copy and register what they put there; for --user, this
+//      user's thumbnail process and sign-in task would run it): the folder, anything that is
+//      copied from it or a folder above it that another account owns or may change, or a link,
+//      junction or mount point on its path or among what is copied (file_ops.h HoldBuildFolder);
 //   2. the operation lock (4; 5 when Windows does not let this process make it);
 //   3. this session's thumbnail processes that hold an old build's DLLs are ended (only Windows'
 //      own dllhost.exe of this user), so the old builds can go and the new one loads;
 //   4. the administrator step machine-install through UAC (declined: 3; started without
-//      administrator rights, it refuses: 7): it checks the folder's permissions again, copies
-//      the build into <Program Files>\<Product>, writes the class for all users, makes the
-//      shared task folder, then removes 1.x's and the old 2.x build folders for all users, last,
-//      after a short retry for files still in use (those go to a trash folder and are deleted at
-//      the next restart);
+//      administrator rights, it refuses: 7): it checks the folder again and holds it open, so
+//      that nothing in it or above it can be renamed, replaced or written until the copy is done,
+//      copies the build from what it holds into <Program Files>\<Product>, writes the class for
+//      all users, makes the shared task folder, then removes 1.x's and the old 2.x build folders
+//      for all users, last, after a short retry for files still in use (those go to a trash
+//      folder and are deleted at the next restart);
 //   5. the installer's per-user step (setup.h SetupUser);
 //   6. the status, with the Explorer test. Exit 0 when healthy, 1 when installed but not healthy;
 //      files waiting for a restart are reported, not an exit code of their own.
@@ -30,8 +34,8 @@
 //   exists, 1.x's rule applies and the install is for all users instead; a 1.x install for all
 //   users refuses it unless --force (Windows' thumbnail process would go on loading 1.x). Pending
 //   sign-in clean-ups of the per-user folder go first, then the files 1.x left in it, which this
-//   install shares (migrate_v1.h's file part); then the build is copied there, the per-user class
-//   written, and step 5 and 6 follow.
+//   install shares (migrate_v1.h's file part); then the build is copied there from the folder
+//   held since its check, the per-user class written, and step 5 and 6 follow.
 
 #pragma once
 
@@ -74,6 +78,10 @@ std::span<const std::wstring_view> BuildBinaries() noexcept;
 // The notice files at the top of a build's folder, copied when present (pure).
 std::span<const std::wstring_view> BuildTopNotices() noexcept;
 
+// What HoldBuildFolder holds of a build's folder for its copy: the binaries, the notices at the
+// top and licenses\ (at most kMaxNoticeDepth folders deep), for this process's user (pure).
+BuildFolderHoldOptions BuildHoldOptions() noexcept;
+
 // A handler FileVersion this program installs (pure): a build folder version of 2 or later.
 bool IsInstallableVersion(std::wstring_view version) noexcept;
 
@@ -102,7 +110,8 @@ struct BuildSource {
   Sha256Digest dllSha = {};
   Sha256Digest pdfiumSha = {};
   // The notices found, relative to |dir|: the top ones, then every regular file below
-  // licenses\ (at most kMaxNoticeDepth folders deep; links and junctions are skipped).
+  // licenses\ (at most kMaxNoticeDepth folders deep; links and junctions are skipped here, and
+  // refused where the folder is held for its copy).
   std::vector<std::filesystem::path> notices;
 };
 
@@ -120,6 +129,9 @@ struct CopyBuildOptions {
   // restart). Empty: a file still in use after |retryMs| fails the copy.
   std::filesystem::path trashParent;
   DWORD retryMs = 2000;
+  // The build's folder as HoldBuildFolder holds it (BuildHoldOptions): every file is read from
+  // its held handle, and one that is not held fails with E_UNEXPECTED. nullptr: by its path.
+  const HeldBuildFolder* held = nullptr;
 };
 
 struct CopyBuildResult {
@@ -147,6 +159,8 @@ struct MachineInstallOptions {
   std::filesystem::path legacyMachineRoot;
   std::filesystem::path trashParent;      // empty: the folder that holds |machineRoot|
   std::wstring taskFolder = kTaskFolder;  // empty: not made (tests)
+  // false: the owners and permissions are not judged (tests whose folders above %TEMP% are the
+  // PC's); network folders and links are refused, and the folder is held, all the same.
   bool checkSourceAccess = true;
   Arch osArch = Arch::kOther;
   DWORD retryMs = kMachineRemoveRetryMs;
@@ -164,11 +178,12 @@ struct MachineInstallResult {
   std::vector<std::wstring> failures;  // the steps after the class that did not complete
 };
 
-// The step for all users of --install, in this order: the folder's permissions
-// (kUnsafeBuildFolderHr), the build (HRESULT_FROM_WIN32(ERROR_BAD_FORMAT) when it is not one to
-// install), no link on the way to |machineRoot|, CopyBuild, the class (WriteMachineClass), the
-// task folder, then 1.x's and the old 2.x build folders. S_OK once the class is written (later
-// steps that fail are listed); the failure otherwise. Never throws.
+// The step for all users of --install, in this order: the folder checked and held
+// (HoldBuildFolder with BuildHoldOptions: kUnsafeBuildFolderHr when it refuses), the build
+// (HRESULT_FROM_WIN32(ERROR_BAD_FORMAT) when it is not one to install; its DLLs hashed again from
+// what is held), no link on the way to |machineRoot|, CopyBuild from what is held, the class
+// (WriteMachineClass), the task folder, then 1.x's and the old 2.x build folders. S_OK once the
+// class is written (later steps that fail are listed); the failure otherwise. Never throws.
 [[nodiscard]] HRESULT InstallForAllUsers(const MachineInstallOptions& options,
                                          const RegistryRoots& roots,
                                          MachineInstallResult* result) noexcept;
@@ -195,8 +210,10 @@ enum class InstallRefusal {
   kInnoInstall,   // 8: the installer has an install here
   kNotABuild,     // 8: SourceCheck says why
   kInsideRoot,    // 8: the build's folder is the install root or inside it
-  kUnsafeFolder,  // 8: other accounts could change the build's folder
-  kV1Machine,     // 8: a per-user install over a 1.x install for all users, without --force
+  // 8: other accounts could change the build's folder (|unsafe| says what was found: also a link
+  // or a network drive)
+  kUnsafeFolder,
+  kV1Machine,  // 8: a per-user install over a 1.x install for all users, without --force
 };
 
 struct InstallOptions {

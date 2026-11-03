@@ -42,8 +42,12 @@ option(PDFT_ASAN "AddressSanitizer for every target (local test builds only)" OF
 # always maps from System32 (the list in HKLM\SYSTEM\CurrentControlSet\Control\Session
 # Manager\KnownDLLs). Every other DLL is delay-loaded: the first call loads it, after
 # HardenProcess() (src/app/core/startup.h) has limited the DLL search to System32.
-# Common Controls v6 is the one exception: the settings executable's manifest binds COMCTL32
-# to the side-by-side copy in WinSxS, which the loader never looks for next to the executable.
+# Common Controls v6 is the one exception: the settings executable imports COMCTL32 statically,
+# and its manifest binds it to the side-by-side copy in WinSxS rather than to a COMCTL32.dll next
+# to the executable. Neither HardenProcess() nor /DEPENDENTLOADFLAG covers that binding: the
+# loader resolves it through the manifest's activation context before main() runs, and the flag
+# does not apply to side-by-side lookups. So an <exe>.local folder next to a copy of the
+# executable may still redirect it, and gate.planting does not try that case.
 # The gates (gate.imports.*) enforce both lists, and gate.planting tries the second.
 set(PDFT_EXE_STATIC_IMPORTS
   KERNEL32.dll USER32.dll GDI32.dll ADVAPI32.dll SHELL32.dll ole32.dll OLEAUT32.dll SHLWAPI.dll
@@ -182,8 +186,9 @@ function(pdft_harden target kind)
     /DEBUG:FULL /PDBALTPATH:%_PDB% /INCREMENTAL:NO
     /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /GUARD:CF
     $<$<NOT:$<CONFIG:Debug>>:/OPT:REF /OPT:ICF>)
-  # Static imports resolve from System32 only (0x800 = LOAD_LIBRARY_SEARCH_SYSTEM32); not with
-  # ASan, whose runtime DLL is a static import from outside System32.
+  # Static imports resolve from System32 only (0x800 = LOAD_LIBRARY_SEARCH_SYSTEM32), except
+  # those a manifest binds side by side (COMCTL32, see the import lists above); not with ASan,
+  # whose runtime DLL is a static import from outside System32.
   if(NOT PDFT_ASAN)
     target_link_options(${target} PRIVATE /DEPENDENTLOADFLAG:0x800)
   endif()

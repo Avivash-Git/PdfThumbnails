@@ -43,7 +43,8 @@ using OpenWindowFn = int (*)() noexcept;
 //                    (none); exit 0, 4, 5, 6 (not installed, or no settings executable for the
 //                    task to run), 8 (also when elevated)
 //     --diagnostics  the masked report on standard output, the clipboard (--copy) or a file
-//                    (--out)
+//                    (--out); elevated, without the log's last lines (DiagnosticsLogTail), and
+//                    --out is refused (exit 8)
 //     --setup-user, --setup-machine, --migrate-v1: the installer's steps and the 1.x clean-up
 //                    (setup.h); --migrate-v1 asks for administrator rights for its part for all
 //                    users
@@ -74,6 +75,12 @@ std::wstring ElevatedRefusalMessage();
 // and runs with their own rights. Starts like CannotRunHereMessage ("Cannot run here: ").
 std::wstring ChecksElevatedRefusalMessage();
 
+// Why --diagnostics --out refuses an elevated process (pure): the file would go into folders the
+// signed-in user's unelevated programs can change, so they could point an administrator's write
+// at any file. The report on standard output and --copy remain. Starts like CannotRunHereMessage
+// ("Cannot run here: ").
+std::wstring DiagnosticsOutElevatedRefusalMessage();
+
 // Why --setup-user and --migrate-v1 (|command|) refuse an elevated process (pure): they change the
 // signed-in user's own settings. Starts like CannotRunHereMessage ("Cannot run here: "). May throw
 // std::bad_alloc.
@@ -85,6 +92,12 @@ std::wstring SetupElevatedRefusalMessage(std::wstring_view command);
 // files there would then do so wherever the link points. The unelevated side logs the outcome
 // of elevated steps.
 bool ShouldLog(const ProcessContext& context) noexcept;
+
+// Whether --status, --check and --fix run in |context| delete the probe PDFs a crashed run left
+// in %TEMP% (pure): never in an elevated process. The user's unelevated programs choose what
+// %TEMP% is and can redirect it, so its deletions could reach files that only an administrator
+// may delete.
+bool SweepsProbes(const ProcessContext& context) noexcept;
 
 // A command's first log line (pure): how it was started and what the registry check that ran
 // found, nothing about the user: "start cli il=0x2000 elevated=no packaged=yes virtualized=yes"
@@ -115,6 +128,11 @@ std::wstring UninstallElevatedRefusalMessage();
 // get administrator rights (LackedAdministratorRights; exit 7), before the step's own report
 // (pure). Not the line of a declined prompt (exit 3).
 std::wstring NoAdministratorRightsMessage();
+
+// What --install, --fix, --migrate-v1 and --uninstall add when another process had taken the
+// name of their administrator step's report pipe (ReportChannelTaken), so the step's own report
+// could not come back (pure). The exit code is the step's own all the same.
+std::wstring ReportChannelTakenMessage();
 
 // What a command that takes the operation lock says when Windows does not let this process make
 // it (kNamedObjectsRefusedHr; exit 5), instead of the line for a lock another check or change

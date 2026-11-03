@@ -634,7 +634,7 @@ TEST_F(CheckEngine, MachinePartNeedsAnAdministrator) {
 }
 
 TEST_F(CheckEngine, SmartAppControlCountsAndRecountsLike1x) {
-  InstallPerUser(L"2.0.0.0-1a2b3c4d");
+  const std::filesystem::path build = InstallPerUser(L"2.0.0.0-1a2b3c4d");
   probes_.sac.state = SacState::kOn;
 
   // The test passed: nothing counted.
@@ -649,7 +649,7 @@ TEST_F(CheckEngine, SmartAppControlCountsAndRecountsLike1x) {
   s = Gather();
   EXPECT_EQ(probes_.countCalls, 2u);
   EXPECT_EQ(probes_.waits, (std::vector<DWORD>{kSacRecountDelayMs}));
-  EXPECT_EQ(probes_.countedLeaf, L"2.0.0.0-1a2b3c4d");
+  EXPECT_TRUE(IEquals(probes_.countedFolder.native(), build.native())) << probes_.countedFolder;
   EXPECT_EQ(probes_.countedDays, kSacBlockDays);
   EXPECT_EQ(s.sacVerdict.kind, SacVerdictKind::kBlocked);
   EXPECT_EQ(s.sacVerdict.blocks, 2);
@@ -665,6 +665,23 @@ TEST_F(CheckEngine, SmartAppControlCountsAndRecountsLike1x) {
   EXPECT_TRUE(probes_.waits.empty());
   EXPECT_EQ(s.sacVerdict.kind, SacVerdictKind::kBlocked);
   EXPECT_EQ(s.sacVerdict.evidence, HRESULT_FROM_WIN32(4551));
+}
+
+// The registered DLL's folder is gone: there is no folder to look for in the log, so nothing is
+// counted or waited for, and the verdict says nothing about blocks (not that the log could not
+// be read).
+TEST_F(CheckEngine, SmartAppControlCountsNothingForABuildThatIsGone) {
+  const std::filesystem::path missing = paths_.machineRoot / L"app" / L"2.0.0.0-1a2b3c4d";
+  RegisterMachineClass(missing / kHandlerDll);
+  SetSlot(0, kOurs);
+  SetSlot(1, kOurs);
+  probes_.sac.state = SacState::kOn;
+  probes_.live.hr = E_FAIL;
+  const Snapshot s = Gather();
+  EXPECT_EQ(probes_.countCalls, 0u);
+  EXPECT_TRUE(probes_.waits.empty());
+  EXPECT_FALSE(s.blocks);
+  EXPECT_EQ(s.sacVerdict.kind, SacVerdictKind::kOn);
 }
 
 TEST_F(CheckEngine, WindowsChecksAndTheExplorerTestNeedExplorersView) {
@@ -862,6 +879,27 @@ TEST_F(CheckEngine, ChecksReportAFailedChange) {
   EXPECT_EQ(result.error, kSomeTriggersFailed);
   EXPECT_EQ(probes_.applied.size(), 1u);
   EXPECT_FALSE(ScheduleResultReport(result).error.empty());
+}
+
+// Another account's tasks hold every name the task may have: exit 5, and the report says so in
+// words, names those tasks and says who can remove them.
+TEST_F(CheckEngine, ChecksSayWhenAnotherAccountHoldsTheTaskNames) {
+  InstallPerUser();
+  PlaceSettingsExe(paths_.userRoot);
+  probes_.applyError = kTaskTakenHr;
+  const ScheduleResult result = Schedule(true, true);
+  EXPECT_EQ(result.code, ExitCode::kFailed);
+  EXPECT_EQ(result.error, kTaskTakenHr);
+  EXPECT_EQ(probes_.applied.size(), 1u);
+  const ScheduleReport report = ScheduleResultReport(result);
+  EXPECT_TRUE(report.out.empty());
+  const std::string error = WideToUtf8Lossy(report.error);
+  EXPECT_NE(report.error.find(TaskTakenText()), std::wstring::npos) << error;
+  EXPECT_NE(report.error.find(L"An administrator can delete "), std::wstring::npos) << error;
+  const TaskLocation location = Location();
+  EXPECT_NE(report.error.find(location.folder + L"\\" + location.name), std::wstring::npos)
+      << error;
+  EXPECT_NE(report.error.find(L"\\" + location.fallbackName), std::wstring::npos) << error;
 }
 
 // ---- The stale task -----------------------------------------------------------------------------

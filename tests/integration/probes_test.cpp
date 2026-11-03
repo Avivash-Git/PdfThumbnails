@@ -11,6 +11,7 @@
 #include <objbase.h>
 
 #include <cstring>
+#include <filesystem>
 #include <optional>
 #include <string>
 
@@ -24,6 +25,7 @@
 #include "strings.h"
 #include "system_probes.h"
 #include "tasks.h"
+#include "temp_dir.h"
 
 namespace pdft {
 namespace {
@@ -124,9 +126,12 @@ TEST_F(Sandboxed, SmartAppControlStates) {
 }
 
 TEST(SmartAppControl, BlockLogForAMadeUpBuild) {
-  // A build folder that cannot exist: nothing in the log names it.
-  const std::wstring leaf = L"9.9.9.9-" + NewId();
-  const BlockCount blocks = CountCiBlocks(leaf, kSacBlockDays);
+  // A build folder made for this test, so nothing in the log names a file in it.
+  test::TempDir dir(L"sac");
+  ASSERT_TRUE(dir.ok());
+  const std::filesystem::path folder = dir.File(L"9.9.9.9-" + NewId());
+  ASSERT_TRUE(CreateDirectoryW(folder.c_str(), nullptr)) << GetLastError();
+  const BlockCount blocks = CountCiBlocks(folder, kSacBlockDays);
   if (!blocks.readable) {
     // Only a Windows without the channel may say so; anything else is a reading bug.
     EXPECT_EQ(blocks.error, HRESULT_FROM_WIN32(ERROR_EVT_CHANNEL_NOT_FOUND))
@@ -136,7 +141,7 @@ TEST(SmartAppControl, BlockLogForAMadeUpBuild) {
   EXPECT_EQ(blocks.count, 0);
   EXPECT_EQ(blocks.error, S_OK);
   // Through the interface the check uses, the same.
-  const BlockCount again = RealSystemProbes().CountCiBlocks(leaf, kSacBlockDays);
+  const BlockCount again = RealSystemProbes().CountCiBlocks(folder, kSacBlockDays);
   EXPECT_TRUE(again.readable);
   EXPECT_EQ(again.count, 0);
 }

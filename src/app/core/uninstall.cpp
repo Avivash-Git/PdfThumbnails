@@ -39,8 +39,11 @@ constexpr std::wstring_view kUserRootFiles[] = {
 // How long the per-user app folder is retried while Explorer lets go of its DLLs.
 constexpr DWORD kUserRemoveRetryMs = 1000;
 
+// One listed failure: "<step>: <hr>", or "<step> left: <hr>" for keys DeleteRegistryTree left as
+// they were (kRegistryTreeLeftHr: a link it never follows, or a tree past its bounds).
 void Failed(std::vector<std::wstring>* failures, const wchar_t* step, HRESULT hr) {
-  failures->push_back(std::wstring(step) + L": " + HResultText(hr));
+  failures->push_back(std::wstring(step) + (hr == kRegistryTreeLeftHr ? L" left: " : L": ") +
+                      HResultText(hr));
 }
 
 DWORD Attributes(const std::filesystem::path& path) noexcept {
@@ -79,11 +82,24 @@ HRESULT TakeLock(DWORD waitMs, std::optional<OperationLock>* lock, bool* busy, b
         L"uninstall result=failed named-objects-refused hr=" + HResultText(hr));
     return S_OK;
   }
+  if (SUCCEEDED(hr) && lock->has_value() && (*lock)->sessionOnly()) {
+    Log(LogLevel::kWarning, kLogComponent, L"uninstall lock=session-only");
+  }
   return hr;
 }
 
 // The slots, the class and the product key in every loaded user hive below |users|. A failure
 // in one hive is noted and the others still go.
+//
+// These hives are other users' own, and they may have made anything at these paths, links
+// included. Checking the keys' owner would add nothing: a user owns what they make in their
+// hive, links too. What keeps these deletions to our own keys is that they go only to fixed
+// names (a slot only while it names the handler), that DeleteRegistryTree never follows a link
+// (it leaves it, and the hive counts in hivesLeft) and stops at its bounds, so whatever a user
+// made there neither leads this step elsewhere nor keeps it busy. A link on the way down to one
+// of these keys can lead only elsewhere in that same user's hives, their own and their classes
+// hive (Windows itself links Software\Classes there): Windows refuses links from a user's hives
+// into another user's or into HKEY_LOCAL_MACHINE.
 void CleanLoadedHives(HKEY users, MachineUninstallResult* result,
                       const std::function<void(const wchar_t*, HRESULT)>& note) {
   std::vector<std::wstring> names;
@@ -112,24 +128,29 @@ void CleanLoadedHives(HKEY users, MachineUninstallResult* result,
       continue;
     }
     bool removed = false;
+    bool left = false;
+    const auto noteHive = [&](HRESULT hr) {
+      if (hr == kRegistryTreeLeftHr) left = true;
+      note(L"hive", hr);
+    };
     if (classesHive) {
       ClassesHiveRemoval removal;
-      const HRESULT hr = RemoveFromClassesHive(hive.get(), &removal);
-      note(L"hive", hr);
+      noteHive(RemoveFromClassesHive(hive.get(), &removal));
       removed = removal.slots[0] || removal.slots[1] || removal.classDeleted;
     } else {
-      // Our own known keys only, each after the check that it is ours: a slot only while it
-      // names the handler, the handler's class key and the product key.
+      // Our own known keys only: a slot only while it names the handler, the handler's class key
+      // and the product key.
       const RegistryRoots hiveRoots{hive.get(), HKEY_LOCAL_MACHINE};
       std::array<bool, kSlotCount> slots = {};
-      note(L"hive", RemoveSlotsIfOurs(hiveRoots, &slots));
+      noteHive(RemoveSlotsIfOurs(hiveRoots, &slots));
       bool classDeleted = false;
-      note(L"hive", DeleteRegistryTree(hive.get(), ClassKeyPath(), &classDeleted));
+      noteHive(DeleteRegistryTree(hive.get(), ClassKeyPath(), &classDeleted));
       bool settingsDeleted = false;
-      note(L"hive", DeleteRegistryTree(hive.get(), kRegKey, &settingsDeleted));
+      noteHive(DeleteRegistryTree(hive.get(), kRegKey, &settingsDeleted));
       removed = slots[0] || slots[1] || classDeleted || settingsDeleted;
     }
     if (removed) ++result->hivesCleaned;
+    if (left) ++result->hivesLeft;
   }
 }
 
@@ -323,8 +344,9 @@ HRESULT UninstallForAllUsers(const MachineUninstallOptions& options, const Regis
       note(L"legacy-task", result->legacyTask);
     }
   }
-  if (options.users) CleanLoadedHives(options.users, result, note);
 
+  // The install folders before the other users' hives: whatever those users made in their hives,
+  // nothing of the part for all users is left waiting for it.
   const std::filesystem::path trashParent =
       options.trashParent.empty() ? options.machineRoot.parent_path() : options.trashParent;
   if (const HRESULT hr = CheckNoReparsePoints(options.machineRoot, {}); FAILED(hr)) {
@@ -343,6 +365,7 @@ HRESULT UninstallForAllUsers(const MachineUninstallOptions& options, const Regis
                                                options.retryMs, &result->legacyRoot));
     }
   }
+  if (options.users) CleanLoadedHives(options.users, result, note);
   result->restartPending = result->root.restartPending || result->legacyRoot.restartPending;
   return S_OK;
 }
@@ -361,6 +384,10 @@ HRESULT RunMachineUninstall(ElevatedReporter& report, bool* restartPending) noex
   report.Line(L"check tasks hr=" + HResultText(result.tasks) + L", 1.x task hr=" +
               HResultText(result.legacyTask));
   report.Line(L"user hives cleaned: " + std::to_wstring(result.hivesCleaned));
+  if (result.hivesLeft != 0) {
+    report.Line(L"user hives where keys were left (a registry link, or a tree too large): " +
+                std::to_wstring(result.hivesLeft));
+  }
   ReportRoot(report, L"install folder", result.root);
   ReportRoot(report, L"1.x install folder", result.legacyRoot);
   for (const std::wstring& failure : result.failures) report.Line(L"failed " + failure);
@@ -576,12 +603,19 @@ HRESULT UninstallCleanup(const UninstallCleanupOptions& options, const RegistryR
   ProcessContext context;
   RETURN_IF_FAILED(probes.GetProcessContext(ContextProbe::kWrite, &context));
   if (context.probe == ContextProbe::kWrite && !RefusesWrites(context.virtualization)) {
-    GatherOptions gather;
-    gather.liveTest = false;
-    gather.context = context;
-    gather.paths = paths;
     Snapshot snapshot;
-    RETURN_IF_FAILED(GatherSnapshot(roots, gather, probes, &snapshot));
+    if (context.elevated || elevated) {
+      // The removal needs only the context then: it deletes fixed key names and leaves the task
+      // to the step for all users. A gathered snapshot would read paths from the user's own
+      // registry (the per-user class's DLL) and open those files with administrator rights.
+      snapshot.context = context;
+    } else {
+      GatherOptions gather;
+      gather.liveTest = false;
+      gather.context = context;
+      gather.paths = paths;
+      RETURN_IF_FAILED(GatherSnapshot(roots, gather, probes, &snapshot));
+    }
     RETURN_IF_FAILED(RemoveUserRegistration(roots, probes, snapshot, &result->user));
     failures.insert(failures.end(), result->user.failures.begin(), result->user.failures.end());
     result->userPart = true;

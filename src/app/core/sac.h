@@ -5,8 +5,8 @@
 // process, but it does not refuse every unsigned DLL (builds made on the same PC usually load).
 // So the verdict rests on evidence only: an Explorer test that passed (not blocking), an Explorer
 // test that failed with a "load blocked" error, or block events (Code Integrity event 3077) that
-// name the installed build folder. Without evidence either way it says only that the feature is
-// on.
+// name a file in the installed build folder. Without evidence either way it says only that the
+// feature is on.
 //
 // The state is the undocumented value VerifiedAndReputablePolicyState under
 // HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy: 0 off, 1 on, 2 evaluation. It is read through
@@ -15,8 +15,8 @@
 // How a check uses this, in order (the 1.x rules):
 //   1. ReadSacState.
 //   2. The Explorer test, when it runs, gives the probe HRESULT.
-//   3. If ShouldCountBlocks: CountCiBlocks(<the registered DLL's build folder name>,
-//      kSacBlockDays). If ShouldRecountBlocks says so, wait kSacRecountDelayMs and count again,
+//   3. If ShouldCountBlocks: CountCiBlocks(<the registered DLL's folder>, kSacBlockDays).
+//      If ShouldRecountBlocks says so, wait kSacRecountDelayMs and count again,
 //      keeping the second answer: a block the Explorer test itself caused reaches the log within
 //      about a second.
 //   4. DecideSac with the state, the probe (std::nullopt when the test did not run) and the count
@@ -26,6 +26,7 @@
 
 #include <windows.h>
 
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -70,23 +71,44 @@ std::wstring SacValueText(const SacReading& reading);
 inline constexpr int kSacBlockDays = 7;
 inline constexpr DWORD kSacRecountDelayMs = 1500;
 
-// The answer of CountCiBlocks. |readable| is false when the Code Integrity log could not be
-// opened or read to the end (|error| says why); |count| then means nothing. 1.x took an
-// unreadable log for "no blocks"; this keeps the two apart.
+// The answer of CountCiBlocks. |readable| is false when the build folder could not be found or
+// the Code Integrity log could not be opened or read to the end (|error| says why); |count| then
+// means nothing. 1.x took an unreadable log for "no blocks"; this keeps the two apart. An event
+// that cannot be rendered is passed over and does not make the log unreadable, but a log in which
+// no event could be rendered is unreadable (RenderOutcome).
 struct BlockCount {
   bool readable = false;
   int count = 0;
   HRESULT error = S_OK;
 };
 
-// A build folder name CountCiBlocks can look for (pure): not empty, not "." or "..", at most
-// MAX_PATH characters, and without path separators, colons, wildcards or control characters.
-bool IsBuildLeafName(std::wstring_view leaf) noexcept;
+// The folder |folder| as Code Integrity names the files in it: its final path on its NT device
+// (\Device\HarddiskVolumeN\...), with links and junctions followed, short names expanded and no
+// separator at the end. Only an absolute drive path below the drive's root ("X:\...") is opened;
+// anything else (a share, a \\?\ or \\.\ path, a relative one) fails with E_INVALIDARG. Fails
+// with the error of opening it for a folder that does not exist.
+[[nodiscard]] HRESULT DeviceFolderPath(const std::filesystem::path& folder,
+                                       std::wstring* out) noexcept;
 
-// True when the event's "File Name" names a file in a build folder called |leaf|: it contains
-// "\app\<leaf>\", ignoring case (pure). The paths Code Integrity logs start with
-// \Device\HarddiskVolumeN\, not a drive letter, so only the folder names can be compared.
-bool FileNameNamesBuild(std::wstring_view fileName, std::wstring_view leaf) noexcept;
+// True when the event's "File Name" names a file inside |deviceFolder| (as DeviceFolderPath gives
+// it), at any depth: the name starts with that path, ignoring case, then a separator and more
+// (pure). So a file in a folder of the same name elsewhere (another user's "\app\<name>\"), or
+// in a folder whose name only starts the same, does not count. An empty |deviceFolder| matches
+// nothing.
+bool FileNameIsInFolder(std::wstring_view fileName, std::wstring_view deviceFolder) noexcept;
+
+// Whether one event read from the log is a block of the build in |deviceFolder| (pure):
+// |rendered| is how rendering its "File Name" went, and |fileName| the name it gave. An event
+// that could not be rendered never counts, whatever |fileName| holds.
+bool EventCountsAsBlock(HRESULT rendered, std::wstring_view fileName,
+                        std::wstring_view deviceFolder) noexcept;
+
+// How reading the log went, from how many of its events were |rendered| and how many |failed| to
+// render, |lastFailure| the error of the last that failed (pure): S_OK, also when a few events
+// were passed over; but when there were events and none of them could be rendered, that is no
+// answer rather than "no blocks": |lastFailure|, or HRESULT_FROM_WIN32(ERROR_INVALID_DATA) when
+// it holds no error.
+HRESULT RenderOutcome(int rendered, int failed, HRESULT lastFailure) noexcept;
 
 // The event-log query for event 3077 of the last |days| days (pure; |days| between 1 and 365).
 // May throw std::bad_alloc.
@@ -94,10 +116,11 @@ std::wstring CiBlockQuery(int days);
 
 // Counts the events 3077 ("Code Integrity determined that a process attempted to load a file
 // that did not meet the policy") of the last |days| days in the channel
-// Microsoft-Windows-CodeIntegrity/Operational whose "File Name" passes FileNameNamesBuild with
-// |leaf|. A |leaf| that is not IsBuildLeafName, or |days| outside 1-365, gives unreadable with
-// E_INVALIDARG. Read-only; delay-loads wevtapi.dll.
-BlockCount CountCiBlocks(std::wstring_view leaf, int days) noexcept;
+// Microsoft-Windows-CodeIntegrity/Operational that EventCountsAsBlock for the build folder
+// |buildFolder| (the registered DLL's folder, through DeviceFolderPath). |days| outside 1-365
+// gives unreadable with E_INVALIDARG, and a folder DeviceFolderPath refuses or cannot find gives
+// unreadable with its error, before the log is opened. Read-only; delay-loads wevtapi.dll.
+BlockCount CountCiBlocks(const std::filesystem::path& buildFolder, int days) noexcept;
 
 // ---- The verdict --------------------------------------------------------------------------
 
@@ -107,10 +130,11 @@ BlockCount CountCiBlocks(std::wstring_view leaf, int days) noexcept;
 // Control block of PdfThumbnails.dll reaches the Explorer test.
 bool IsLoadBlockedHresult(HRESULT hr) noexcept;
 
-// Whether a check counts blocks at all (pure): Smart App Control is on, a class is registered
-// (otherwise there is no build folder to look for) and the Explorer test did not pass (a passing
-// test settles the question; std::nullopt = it did not run).
-bool ShouldCountBlocks(SacState state, bool classRegistered, std::optional<HRESULT> probe) noexcept;
+// Whether a check counts blocks at all (pure): Smart App Control is on, a class is registered and
+// the DLL it names is there (|dllRegistered|; otherwise there is no build folder to look for, and
+// a count would only fail to find it) and the Explorer test did not pass (a passing test settles
+// the question; std::nullopt = it did not run).
+bool ShouldCountBlocks(SacState state, bool dllRegistered, std::optional<HRESULT> probe) noexcept;
 
 // Whether to wait kSacRecountDelayMs and count again (pure), as 1.x did: the first count found no
 // blocks (none, or the log could not be read), the Explorer test ran and failed, and its error is

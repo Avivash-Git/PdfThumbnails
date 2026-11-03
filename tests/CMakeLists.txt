@@ -62,7 +62,9 @@
 #                             private keys; deleting at restart only checked to be refused
 #                             unelevated; Restart Manager and ending a holder only on its own
 #                             children; the elevation report pipe between itself and its
-#                             children through fake launchers (never a real elevation); the
+#                             children through fake launchers (never a real elevation), with the
+#                             reporter's owner, session and write-time checks, the asking side
+#                             reading on past its cap and a pipe name another process took; the
 #                             settings executable's --elevated step refused outside the install
 #                             folder; deleting files by their contents, the 1.x clean-up (user
 #                             part, file part, machine part), --setup-user, --migrate-v1 (with a
@@ -83,12 +85,16 @@
 #                             deleted afterwards) and, unelevated, the start and end lines that
 #                             every command run appends to the app's log, and its own test tasks
 #   handler.tests             pdft_handler_tests: PdfThumbnails.dll in-process at Medium
-#                             integrity (relaunches itself when elevated) with HKCU redirected to
-#                             a private key: crop table, pixels, COM surface, error HRESULTs,
-#                             where the zoom comes from (preview override, HKCU, settings.ini),
-#                             8-thread stress
-#   handler.refuses_elevated  pdft_refuses_elevated: elevated, the DLL must refuse to render;
-#                             skipped (exit 77) when not elevated
+#                             integrity (relaunches itself as a standard user, Administrators
+#                             deny-only, when elevated or when Administrators is enabled) with
+#                             HKCU redirected to a private key: crop table, pixels, COM surface,
+#                             error HRESULTs, where the zoom comes from (preview override, HKCU,
+#                             settings.ini), 8-thread stress
+#   handler.refuses_elevated  pdft_refuses_elevated: elevated, the DLL must refuse to render, and
+#                             so must a copy of the program started with its token lowered only
+#                             to Medium (Administrators still enabled; that part runs only where
+#                             Administrators is enabled and prints a skip otherwise); skipped
+#                             (exit 77) at Medium
 #   system.tests              pdft_system_tests (label system, never in the test presets): the
 #                             install for all users, --status, --checks, --zoom, --setup-user,
 #                             --setup-machine, --fix's administrator step, --uninstall and

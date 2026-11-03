@@ -69,11 +69,66 @@ bool HasContents(const std::filesystem::path& file, const Sha256Digest& sha) noe
   return IsRegularFile(file) && SUCCEEDED(Sha256File(file, &digest)) && digest == sha;
 }
 
-// |a| and |b| are regular files with the same contents.
-bool SameContents(const std::filesystem::path& a, const std::filesystem::path& b) noexcept {
-  Sha256Digest digest = {};
-  return IsRegularFile(b) && SUCCEEDED(Sha256File(b, &digest)) && HasContents(a, digest);
+// Where CopyBuild reads a file of the build from: its held handle when the folder is held, else
+// its path.
+struct CopySource {
+  std::filesystem::path path;
+  HANDLE held = nullptr;
+};
+
+// The file |relative| of |source| as CopyBuild reads it (CopyBuildOptions::held).
+HRESULT SourceOf(const BuildSource& source, const CopyBuildOptions& options,
+                 const std::filesystem::path& relative, CopySource* from) noexcept try {
+  from->path = source.dir / relative;
+  from->held = nullptr;
+  if (!options.held) return S_OK;
+  from->held = options.held->File(relative);
+  return from->held ? S_OK : PDFT_TRACE_DETAIL(E_UNEXPECTED, relative.filename().native());
 }
+CATCH_RETURN();
+
+HRESULT CopyFrom(const CopySource& from, const std::filesystem::path& to,
+                 Sha256Digest* sha = nullptr) noexcept {
+  return from.held ? CopyOpenFileVerified(from.held, to, sha)
+                   : CopyFileVerified(from.path, to, sha);
+}
+
+// |from| and |to| are regular files with the same contents.
+bool SameContents(const CopySource& from, const std::filesystem::path& to) noexcept {
+  Sha256Digest digest = {};
+  const HRESULT hashed = from.held                  ? Sha256OpenFile(from.held, &digest)
+                         : IsRegularFile(from.path) ? Sha256File(from.path, &digest)
+                                                    : E_FAIL;
+  return SUCCEEDED(hashed) && HasContents(to, digest);
+}
+
+// Takes |source|'s DLL hashes again from what |held| holds, and its notices from the files it
+// holds, so that what is installed is exactly what was checked and is held. A DLL that changed
+// since ReadBuildSource hashed it fails with HRESULT_FROM_WIN32(ERROR_FILE_INVALID).
+HRESULT BindToHeld(const HeldBuildFolder& held, BuildSource* source) noexcept try {
+  const struct {
+    const wchar_t* name;
+    const Sha256Digest* sha;
+  } dlls[] = {{kHandlerDll, &source->dllSha}, {kPdfiumDll, &source->pdfiumSha}};
+  for (const auto& dll : dlls) {
+    const HANDLE file = held.File(dll.name);
+    if (!file) return PDFT_TRACE_DETAIL(E_UNEXPECTED, dll.name);
+    Sha256Digest digest = {};
+    RETURN_IF_FAILED(PDFT_TRACE_DETAIL(Sha256OpenFile(file, &digest), dll.name));
+    if (digest != *dll.sha) {
+      return PDFT_TRACE_DETAIL(HRESULT_FROM_WIN32(ERROR_FILE_INVALID), dll.name);
+    }
+  }
+  source->notices.clear();
+  for (const std::filesystem::path& file : held.files()) {
+    if (std::none_of(std::begin(kBinaries), std::end(kBinaries),
+                     [&](std::wstring_view binary) { return IEquals(file.native(), binary); })) {
+      source->notices.push_back(file);
+    }
+  }
+  return S_OK;
+}
+CATCH_RETURN();
 
 // Every regular file below <base>\<relative>, as paths relative to |base|; links and junctions
 // are skipped, and nothing deeper than kMaxNoticeDepth folders is read.
@@ -129,13 +184,13 @@ bool IsRootOrInside(const std::filesystem::path& child, const std::filesystem::p
 // Copies |from| to |to|, retrying while |to| is in use. Still in use after the retry: elevated
 // with a trash parent, |to| moves into the trash folder (made once per copy, queued for deletion
 // at the next restart) and the copy is made again; otherwise the in-use error.
-HRESULT CopyWithRetry(const std::filesystem::path& from, const std::filesystem::path& to,
+HRESULT CopyWithRetry(const CopySource& from, const std::filesystem::path& to,
                       const CopyBuildOptions& options, CopyBuildResult* result) noexcept try {
   const std::wstring name = to.filename().native();
   const ULONGLONG deadline = GetTickCount64() + options.retryMs;
   HRESULT hr = S_OK;
   for (;;) {
-    hr = CopyFileVerified(from, to);
+    hr = CopyFrom(from, to);
     if (SUCCEEDED(hr)) {
       ++result->copied;
       return S_OK;
@@ -160,7 +215,7 @@ HRESULT CopyWithRetry(const std::filesystem::path& from, const std::filesystem::
   RETURN_IF_FAILED(PDFT_TRACE_DETAIL(MoveIntoTrash(to, result->trash, &moved), name));
   result->restartPending = true;
   LOG_IF_FAILED(ScheduleDeleteAtRestart(moved));
-  RETURN_IF_FAILED(PDFT_TRACE_DETAIL(CopyFileVerified(from, to), name));
+  RETURN_IF_FAILED(PDFT_TRACE_DETAIL(CopyFrom(from, to), name));
   ++result->copied;
   return S_OK;
 }
@@ -199,6 +254,9 @@ HRESULT TakeLock(DWORD waitMs, std::optional<OperationLock>* lock, bool* busy, b
         L"install result=failed named-objects-refused hr=" + HResultText(hr));
     return S_OK;
   }
+  if (SUCCEEDED(hr) && lock->has_value() && (*lock)->sessionOnly()) {
+    Log(LogLevel::kWarning, kLogComponent, L"install lock=session-only");
+  }
   return hr;
 }
 
@@ -233,6 +291,15 @@ void ReportRemoval(ElevatedReporter& report, const MachineRemoval& removal) {
 std::span<const std::wstring_view> BuildBinaries() noexcept { return kBinaries; }
 
 std::span<const std::wstring_view> BuildTopNotices() noexcept { return kTopNotices; }
+
+BuildFolderHoldOptions BuildHoldOptions() noexcept {
+  BuildFolderHoldOptions options;
+  options.files = kBinaries;
+  options.optional = kTopNotices;
+  options.tree = kLicensesFolder;
+  options.treeDepth = kMaxNoticeDepth;
+  return options;
+}
 
 bool IsInstallableVersion(std::wstring_view version) noexcept {
   return IsBuildVersion(version) && CompareFileVersions(version, L"2") >= 0;
@@ -317,9 +384,10 @@ HRESULT CopyBuild(const BuildSource& source, const std::filesystem::path& root,
     const std::filesystem::path target = result->buildDir / dll.name;
     if (HasContents(target, *dll.sha)) continue;
     result->reused = false;
+    CopySource from;
+    RETURN_IF_FAILED(SourceOf(source, options, dll.name, &from));
     Sha256Digest copied = {};
-    RETURN_IF_FAILED(
-        PDFT_TRACE_DETAIL(CopyFileVerified(source.dir / dll.name, target, &copied), dll.name));
+    RETURN_IF_FAILED(PDFT_TRACE_DETAIL(CopyFrom(from, target, &copied), dll.name));
     ++result->copied;
     if (copied != *dll.sha) {
       // The file changed after the build id was computed from it: never install that.
@@ -328,7 +396,11 @@ HRESULT CopyBuild(const BuildSource& source, const std::filesystem::path& root,
     }
   }
 
-  // The executables and the notices at the top.
+  // The executables and the notices at the top. The executables are not bound to a hash like
+  // the DLLs: they come from the folder that passed the access check and is held until the copy
+  // is done, which only the user who asked (and administrators) can change before the step for
+  // all users runs. A developer build trusts that user's folder: the elevated program itself was
+  // started from it.
   std::vector<std::filesystem::path> files = {kSettingsExe, kCliExe};
   files.insert(files.end(), source.notices.begin(), source.notices.end());
   for (const std::filesystem::path& relative : files) {
@@ -337,7 +409,8 @@ HRESULT CopyBuild(const BuildSource& source, const std::filesystem::path& root,
       folder /= part;
       RETURN_IF_FAILED(PDFT_TRACE(MakeRealFolder(folder)));
     }
-    const std::filesystem::path from = source.dir / relative;
+    CopySource from;
+    RETURN_IF_FAILED(SourceOf(source, options, relative, &from));
     const std::filesystem::path to = root / relative;
     if (SameContents(from, to)) continue;
     RETURN_IF_FAILED(
@@ -362,20 +435,21 @@ HRESULT InstallForAllUsers(const MachineInstallOptions& options, const RegistryR
       options.trashParent.empty() ? options.machineRoot.parent_path() : options.trashParent;
 
   // Checked again here: the unelevated side checked before asking, and the folder could have
-  // changed since.
-  if (options.checkSourceAccess) {
-    step.Set(L"folder-access");
-    const std::vector<std::wstring> binaries(kBinaries, kBinaries + std::size(kBinaries));
-    RETURN_IF_FAILED(
-        PDFT_TRACE(FindUnsafeBuildFolderAccess(options.source, binaries, &result->unsafe)));
-    if (result->unsafe) return PDFT_TRACE(kUnsafeBuildFolderHr);
-  }
+  // changed since. Held from here until the copy is done, so that it cannot change again, and
+  // everything is read and copied from what is held.
+  step.Set(L"folder-access");
+  HeldBuildFolder held;
+  BuildFolderHoldOptions hold = BuildHoldOptions();
+  hold.checkAccess = options.checkSourceAccess;
+  RETURN_IF_FAILED(PDFT_TRACE(HoldBuildFolder(options.source, hold, &held, &result->unsafe)));
+  if (result->unsafe) return PDFT_TRACE(kUnsafeBuildFolderHr);
   step.Set(L"read-build");
   RETURN_IF_FAILED(PDFT_TRACE(
       ReadBuildSource(options.source, options.osArch, &result->source, &result->sourceCheck)));
   if (result->sourceCheck.problem != SourceProblem::kNone) {
     return PDFT_TRACE_DETAIL(HRESULT_FROM_WIN32(ERROR_BAD_FORMAT), result->sourceCheck.file);
   }
+  RETURN_IF_FAILED(PDFT_TRACE(BindToHeld(held, &result->source)));
   step.Set(L"machine-root");
   if (IsRootOrInside(result->source.dir, options.machineRoot)) RETURN_HR(PDFT_TRACE(E_INVALIDARG));
   RETURN_IF_FAILED(PDFT_TRACE(CheckNoReparsePoints(options.machineRoot, {})));
@@ -384,7 +458,10 @@ HRESULT InstallForAllUsers(const MachineInstallOptions& options, const RegistryR
   CopyBuildOptions copy;
   copy.trashParent = trashParent;
   copy.retryMs = options.retryMs;
+  copy.held = &held;
   RETURN_IF_FAILED(PDFT_TRACE(CopyBuild(result->source, options.machineRoot, copy, &result->copy)));
+  // What is installed from here on are the copies: the build's folder is let go.
+  held.Release();
   // Again now that every folder on the way exists.
   step.Set(L"build-links");
   RETURN_IF_FAILED(PDFT_TRACE(CheckNoReparsePoints(result->copy.buildDir, {})));
@@ -448,10 +525,12 @@ HRESULT RunMachineInstall(ElevatedReporter& report, bool* restartPending) noexce
   // InstallForAllUsers names its own parts; this one covers what it returns untraced.
   step.Set(L"install");
   const HRESULT hr = PDFT_TRACE(InstallForAllUsers(options, RegistryRoots{}, &result));
-  // No paths: the build's folder lies in the user's profile, and the parent logs these lines.
+  // No paths and no account names: the build's folder lies in the user's profile, another
+  // account's name may be a person's, and the parent logs these lines (diagnostics masks the SID
+  // that stands for the name, not the name).
   if (result.unsafe) {
-    report.Line(L"the build's folder (or a folder above it) can be changed by " +
-                result.unsafe->access.principal);
+    report.Line(L"the build's folder, something in it or a folder above it " +
+                UnsafeAccessReason(*result.unsafe, false));
   }
   if (result.sourceCheck.problem != SourceProblem::kNone) {
     std::wstring line = L"not a build to install: " + result.sourceCheck.file + L" (" +
@@ -536,7 +615,25 @@ HRESULT InstallFromOwnFolder(const InstallOptions& options, const RegistryRoots&
     RETURN_IF_FAILED(GetOwnExe(&own));
     source = own.parent_path();
   }
-  RETURN_IF_FAILED(ReadBuildSource(source, context.osArch, &result->source, &result->sourceCheck));
+  // Before anything here reads the folder: even resolving its name would ask the other computer,
+  // which serves whatever it likes.
+  if (std::optional<UnsafeAccess> network = FindNetworkFolder(source)) {
+    result->source.dir = source;
+    result->unsafe = std::move(network);
+    return refuse(InstallRefusal::kUnsafeFolder);
+  }
+  // A link on the way (a local folder linked to a share) may lead there all the same. Resolving
+  // it opens only the folder's attributes, so nothing is read from the folder before its final
+  // path is judged too.
+  std::filesystem::path canonical;
+  RETURN_IF_FAILED(Canonicalize(source, &canonical));
+  if (std::optional<UnsafeAccess> network = FindNetworkFolder(canonical)) {
+    result->source.dir = canonical;
+    result->unsafe = std::move(network);
+    return refuse(InstallRefusal::kUnsafeFolder);
+  }
+  RETURN_IF_FAILED(
+      ReadBuildSource(canonical, context.osArch, &result->source, &result->sourceCheck));
   if (result->sourceCheck.problem != SourceProblem::kNone) {
     return refuse(InstallRefusal::kNotABuild);
   }
@@ -580,14 +677,14 @@ HRESULT InstallFromOwnFolder(const InstallOptions& options, const RegistryRoots&
       root / kBuildsFolderName / result->source.buildName / kHandlerDll;
   std::vector<std::wstring>& failures = result->failures;
   // Either scope: what another account put in the folder would be registered for all users, or
-  // loaded by this user's thumbnail process and started by their sign-in task.
-  {
-    const std::vector<std::wstring> binaries(kBinaries, kBinaries + std::size(kBinaries));
-    RETURN_IF_FAILED(FindUnsafeBuildFolderAccess(result->source.dir, binaries, &result->unsafe));
-    if (result->unsafe) return refuse(InstallRefusal::kUnsafeFolder);
-  }
+  // loaded by this user's thumbnail process and started by their sign-in task. Held from the
+  // check until a per-user copy is done; the step for all users checks and holds it itself.
+  HeldBuildFolder held;
+  RETURN_IF_FAILED(HoldBuildFolder(result->source.dir, BuildHoldOptions(), &held, &result->unsafe));
+  if (result->unsafe) return refuse(InstallRefusal::kUnsafeFolder);
 
   if (scope == Scope::kMachine) {
+    held.Release();
     // Before the step: the step removes the old builds last, which only works once nothing of
     // this session holds them.
     EndOldHolders(before, targetDll, probes, &result->holdersEnded, &failures);
@@ -611,6 +708,13 @@ HRESULT InstallFromOwnFolder(const InstallOptions& options, const RegistryRoots&
       return S_OK;
     }
   } else {
+    // What is copied is what was checked: a DLL that changed since it was read stops the install
+    // before anything is changed.
+    if (const HRESULT hr = BindToHeld(held, &result->source); FAILED(hr)) {
+      Failed(&failures, L"copy", hr);
+      result->code = ExitCode::kFailed;
+      return S_OK;
+    }
     // A pending sign-in clean-up (1.x's, or one an uninstall left) would delete the per-user
     // folder this install is about to fill: it goes before anything is copied there.
     if (const HRESULT hr = DeleteRunOnceRemovals(roots, &result->runOnceDeleted); FAILED(hr)) {
@@ -624,11 +728,13 @@ HRESULT InstallFromOwnFolder(const InstallOptions& options, const RegistryRoots&
       Failed(&failures, L"v1-files", hr);
     }
     CopyBuildOptions copy;
+    copy.held = &held;
     if (const HRESULT hr = CopyBuild(result->source, root, copy, &result->userCopy); FAILED(hr)) {
       Failed(&failures, L"copy", hr);
       result->code = ExitCode::kFailed;
       return S_OK;
     }
+    held.Release();
     if (const HRESULT hr = WriteClass(roots, Scope::kUser, result->userCopy.dll); FAILED(hr)) {
       Failed(&failures, L"class", hr);
       result->code = ExitCode::kFailed;

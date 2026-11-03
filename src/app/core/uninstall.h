@@ -21,17 +21,21 @@
 //   accepted and said so, and the uninstall goes on.
 //
 // machine-uninstall (elevated): the class for all users; every user's check task (the shared task
-// folder) and 1.x's task; in every user hive that is loaded (HKEY_USERS\S-1-5-21-..., and its
-// _Classes hive) the slots that name the handler, the handler's class key and the product key;
-// then the install folder for all users, files in use (its own executable among them) moved into
-// a trash folder and deleted at the next restart. Users who are not signed in keep their slots
-// and settings; a slot naming a class that is gone shows no thumbnail and hides only other
-// handlers registered for .pdf for all users.
+// folder) and 1.x's task; the install folder for all users, files in use (its own executable
+// among them) moved into a trash folder and deleted at the next restart; then, in every user hive
+// that is loaded (HKEY_USERS\S-1-5-21-..., and its _Classes hive), the slots that name the
+// handler, the handler's class key and the product key. Those keys are deleted without following
+// any link and within DeleteRegistryTree's bounds (registry_roots.h): a link or a tree past them
+// is left as it is and reported ("left"). Users who are not signed in keep their slots and
+// settings; a slot naming a class that is gone shows no thumbnail and hides only other handlers
+// registered for .pdf for all users.
 //
 // --uninstall-cleanup (the installer's uninstall step): the machine-uninstall steps when it runs
 // elevated, the per-user registry part when the registry check shows that writes reach the real
 // hive, and a RunOnce value for the app's data folder (an elevated process never deletes in the
-// user's profile). Never asks anything, and always exits 0.
+// user's profile). Never asks anything, and always exits 0. Elevated, the per-user part gathers
+// nothing first: it deletes fixed key names only, and never reads a path from the user's registry
+// to open it.
 
 #pragma once
 
@@ -75,7 +79,10 @@ struct UserRemoval {
 // The per-user registry part for the user of |snapshot|: slots if ours, the per-user class, the
 // check task (not from an elevated process, where Task Scheduler would not let it act for the
 // user; the step for all users deletes every user's task) and 1.x's, the product key; then
-// Explorer is told. Fails only when out of memory.
+// Explorer is told. Of |snapshot| it reads only the context and the task (taskLocation, task),
+// so an elevated caller passes one with only the context. Keys left as they were (a link, or a
+// tree past DeleteRegistryTree's bounds) are listed in |removal->failures| as "<part> left".
+// Fails only when out of memory.
 [[nodiscard]] HRESULT RemoveUserRegistration(const RegistryRoots& roots, const SystemProbes& probes,
                                              const Snapshot& snapshot,
                                              UserRemoval* removal) noexcept;
@@ -129,6 +136,9 @@ struct MachineUninstallResult {
   HRESULT tasks = S_FALSE;
   HRESULT legacyTask = S_FALSE;
   size_t hivesCleaned = 0;  // hives in which something was removed
+  // Hives in which a key was left as it was (kRegistryTreeLeftHr: a link, or a tree past the
+  // bounds). Also listed in |failures| as "hive left".
+  size_t hivesLeft = 0;
   RemoveOutcome root;
   RemoveOutcome legacyRoot;
   bool restartPending = false;

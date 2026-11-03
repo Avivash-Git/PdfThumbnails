@@ -60,8 +60,9 @@ its PDFium copy (`PdfThumbnails-pdfium.dll`), the PDBs, the [tools](#tools) and 
 
 The two executables are one code base (`src\app`): the settings executable is a Windows program
 that shows no console, the command-line one is a console program that a shell waits for. Both
-are hardened like the handler, import only KnownDLLs statically (anything else is delay-loaded,
-see `cmake\Hardening.cmake`), and embed a manifest and a version resource; the gates check all of
+are hardened like the handler, import only KnownDLLs statically (apart from the settings
+executable's COMCTL32, which its manifest binds side by side to WinSxS; anything else is
+delay-loaded, see `cmake\Hardening.cmake`), and embed a manifest and a version resource; the gates check all of
 that. Every command does its real work except `--refresh` and the thumbnail rebuild
 (`--uninstall --rebuild-thumbnails` says so and uninstalls anyway; `--zoom <n>` saves the zoom
 without refreshing thumbnails), which a later build adds:
@@ -161,10 +162,10 @@ that preset's own name filter.
 
 | Label | What | Where it runs |
 |---|---|---|
-| `gate` | Static checks of the staged files: exports, imports (static C runtime, Windows DLLs only; the app's executables import only KnownDLLs and delay-load the rest), hardening flags, no build paths inside the binaries, no WIL failure cache in the app's executables, version resources, the app's manifests, the 18 PDFium functions the handler binds, the PDFium hash, license files and notices, and the build id. Native builds also run `gate.planting`: copies of the app's executables, next to a canary DLL planted under the names of DLLs they might load, run `--version` and `--help` (elevated, as on CI, also `--status --no-live-test`, which must exit 0, 1 or 6) and must not load any of them | every preset, both architectures (`gate.planting`: native builds only, not cross-compiled ones) |
-| `unit` | The crop math, zoom clamping and generated GUIDs, the test-PDF generator (byte-identical to the 1.x generator), Medium-integrity helpers, temporary folders, the HKCU redirection, and the committed preview samples (`src\app\res`). For the settings app: the command line, text conversions, paths, the log (format, rotation, two writers), output encoding, exit codes, the registry-virtualization verdicts, named-object descriptors, start-up hardening, the COM security descriptor and the executables' string tables; what the checks read, decoded from made-up data (registry values, DLL headers and version resources, build ids, the slots and the zoom, 1.x leftovers, Smart App Control's verdict, the check task's triggers, the Explorer test's probe PDF and `--test-file` paths, Explorer settings, the Windows build); the check's findings, repair plans and exit codes on made-up snapshots; and the reports: the `--status` text line by line (this PC's shape, a per-user install, nothing installed, every problem line with its hint), the `--status --json` output (escaping, every field of schema 1, read back by a strict JSON reader) and the masking in `--diagnostics` (no SID, user, computer or profile path survives). For `pdft-run-outside`: its command line, its request file, the command line it builds and how it turns a run's outcome into an exit code | x64 presets; CI's ARM64 runner |
-| `handler` | `PdfThumbnails.dll` loaded in-process at Medium integrity, with HKCU redirected to an empty private key: the crop table, pixels, the COM surface, error codes, where the zoom comes from (preview override, HKCU, `settings.ini`), an 8-thread stress test. Elevated, the program relaunches itself at Medium; `handler.refuses_elevated` checks that the DLL refuses to render when elevated and is skipped when not | x64 presets; CI's ARM64 runner |
-| `integration` | The settings app's core against the real system: COM calls under the app's COM security (WMI read-only, Explorer's window list), the operation lock and other named objects across processes, the process tree and the registry-virtualization check; read-only: Smart App Control and the Code Integrity log, PdfCraft, the check task and 1.x's task, Explorer settings, the Windows build, DLL headers and build ids of the built DLLs; the registration, settings, 1.x leftovers and the whole check (gathering, repairs, the record, the operation lock) against private registry keys, folders under `%TEMP%` and fakes for everything Windows-wide; the diagnostics' log reader; the check task written in a Task Scheduler folder and under root-folder names of its own (each checkbox combination, the folder or the root-folder name, one copy per user, the check's repair of a task that runs another program, one run of `pdft-run-medium.exe --exit 0` through Task Scheduler; elevated also the protected task folder, a standard user's task in it and the removal of every user's task); `--checks` against private registry keys and a fake Task Scheduler (each value, the program it registers, its refusals); the install side against folders under `%TEMP%`, private registry keys (with made-up user hives) and fake launchers in place of UAC, so no test starts a real elevation: the verified copy, removal without following links, files in use, the trash folder, the build-folder permission check, RunOnce values, the 1.x clean-up by file contents, `--install`, `--uninstall`, `--uninstall-cleanup`, `--migrate-v1`, `--setup-user`, `--setup-machine` (elevated only) and `--fix`'s administrator step (deleting at the restart only checked to be refused unelevated); and both executables run with their output captured: `--version`, `--help`, `--status` and `--status --json` without the Explorer test (exit 0, 1 or 6, whatever this PC has), `--diagnostics` (nothing of the current user unmasked). Safe on a developer PC: no test starts a thumbnail extraction or runs `--check` or `--fix` against the real registry; it writes nothing to the user's profile except the check's volatile probe key and private test keys, which it deletes again, probe PDFs in `%TEMP%`, which it deletes too, and the start and end lines that the commands it runs unelevated (`--status`, `--diagnostics`, `--checks` where nothing is installed, `--setup-machine`) add to the app's log, which may create the app's data folder (not when elevated); in Task Scheduler it writes only its own test tasks and folder, which it deletes, and it never touches the real check task, its folder or 1.x's task. The executables' `--status` runs also delete their own stale probe PDFs (older than an hour) from `%TEMP%`. A writing command of the executables (`--zoom 120`, `--check`, `--fix`, `--fix --take-back`, `--checks` with each value) runs only where the check shows that its writes would be swallowed (a terminal inside a packaged app), where it must be refused (exit 8, or 2 for `--fix --take-back` without `--yes`), and is skipped everywhere else; `--checks` also runs elevated on a PC whose registry is the real one, where it must refuse (exit 8: CI only), and on a PC whose registry is the real one and where nothing is installed, where it must answer "not installed" (exit 6; elevated, as on CI, it runs at Medium integrity with a standard user's token), and a bad `--checks` value is a usage error (exit 2) everywhere; `--install`, `--uninstall --yes`, `--zoom 130`, `--setup-user` and `--migrate-v1` run only where they must be refused (exit 8: in such a terminal, or elevated on CI), `--setup-machine` only unelevated (exit 7), and their wrong command lines are usage errors (exit 2), and the named objects carry a suffix of the run's own, so a running settings app does not disturb the tests | x64 presets; CI's ARM64 runner |
+| `gate` | Static checks of the staged files: exports, imports (static C runtime, Windows DLLs only; the app's executables import only KnownDLLs (and the settings executable COMCTL32, which its manifest binds side by side to WinSxS) and delay-load the rest), hardening flags, no build paths inside the binaries, no WIL failure cache in the app's executables, version resources, the app's manifests, the 18 PDFium functions the handler binds, the PDFium hash, license files and notices, and the build id. Native builds also run `gate.planting`: copies of the app's executables, next to a canary DLL planted under the names of DLLs they might load, run `--version` and `--help` (elevated, as on CI, also `--status --no-live-test`, which must exit 0, 1 or 6) and must not load any of them | every preset, both architectures (`gate.planting`: native builds only, not cross-compiled ones) |
+| `unit` | The crop math, zoom clamping and generated GUIDs, the test-PDF generator (byte-identical to the 1.x generator), Medium-integrity helpers, temporary folders, the HKCU redirection, and the committed preview samples (`src\app\res`). For the settings app: the command line, text conversions, paths, the log (format, rotation, two writers), output encoding and the display filter (control and bidirectional characters shown as U+FFFD; JSON written as is), exit codes, the registry-virtualization verdicts, named-object descriptors, start-up hardening, the COM security descriptor and the executables' string tables; what the checks read, decoded from made-up data (registry values, DLL headers and version resources, build ids, the slots and the zoom, 1.x leftovers, Smart App Control's verdict, the check task's triggers, the Explorer test's probe PDF and `--test-file` paths, Explorer settings, the Windows build); the check's findings, repair plans and exit codes on made-up snapshots; and the reports: the `--status` text line by line (this PC's shape, a per-user install, nothing installed, every problem line with its hint), the `--status --json` output (escaping, every field of schema 1, read back by a strict JSON reader) and the masking in `--diagnostics` (no SID, user, computer or profile path survives). For `pdft-run-outside`: its command line, its request file, the command line it builds and how it turns a run's outcome into an exit code | x64 presets; CI's ARM64 runner |
+| `handler` | `PdfThumbnails.dll` loaded in-process at Medium integrity, with HKCU redirected to an empty private key: the crop table, pixels, the COM surface, error codes, where the zoom comes from (preview override, HKCU, `settings.ini`), an 8-thread stress test. Elevated (above Medium, or with the Administrators group enabled), the program relaunches itself at Medium as a standard user (Administrators deny-only); `handler.refuses_elevated` checks that the DLL refuses to render when elevated, and, where Administrators is enabled, in a copy of itself whose token is lowered only to Medium (Administrators still enabled); it is skipped at Medium | x64 presets; CI's ARM64 runner |
+| `integration` | The settings app's core against the real system: COM calls under the app's COM security (WMI read-only, Explorer's window list), the operation lock (the session lock it always takes first, which keeps a second holder out even when the `Global\` name was another account's for the first holder and is free again, and holds alone when another account made its `Global\` name first, as a mutex with another owner or a descriptor that keeps the user out, as an object of another type, or as a link that leads to itself) and other named objects across processes and threads, the process tree and the registry-virtualization check; read-only: Smart App Control and the Code Integrity log, PdfCraft, the check task and 1.x's task, Explorer settings, the Windows build, DLL headers and build ids of the built DLLs; the sweep of stale probe PDFs (it stops at a folder that is a junction and leaves a junction or file link with a probe's name); the registration, settings, 1.x leftovers and the whole check (gathering, repairs, the record, the operation lock) against private registry keys, folders under `%TEMP%` and fakes for everything Windows-wide; the diagnostics' log reader; the check task written in a Task Scheduler folder and under root-folder names of its own (each checkbox combination, the folder or the root-folder name, one copy per user, never over another account's task (a made-up user whose names this account's tasks hold, unelevated), the check's repair of a task that runs another program, one run of `pdft-run-medium.exe --exit 0` through Task Scheduler; elevated also the protected task folder, a standard user's task in it, another account's tasks in the folder and under the root-folder name, and the removal of every user's task); `--checks` against private registry keys and a fake Task Scheduler (each value, the program it registers, its refusals); the install side against folders under `%TEMP%`, private registry keys (with made-up user hives) and fake launchers in place of UAC, so no test starts a real elevation: the verified copy, removal without following links, registry trees deleted without following registry links (links made inside the private key), within one call's bounds and only through each key's own handle (a key that may not be deleted is an error only when it is empty), the class for all users written into a fresh key, a class path stored as REG_EXPAND_SZ left alone by the steps for all users, files in use, the trash folder, the build-folder permission check (owners and every account an entry names, the notices and `licenses\` included, a link, junction or mount point on the way refused, and everything copied held open until the copy is done), RunOnce values, the 1.x clean-up by file contents, `--install`, `--uninstall`, `--uninstall-cleanup`, `--migrate-v1`, `--setup-user`, `--setup-machine` (elevated only, while another thread holds the operation lock: it takes none) and `--fix`'s administrator step (deleting at the restart only checked to be refused unelevated); the administrator step's report pipe (the reporter refuses a pipe its parent made but another owner owns, elevated only; a parent that never reads holds the step up for about 5 s at most; the asking side reads on past its 256 KiB cap, and stops when it gives up on a client that never stops writing; a pipe name another process took is recorded in the run); and both executables run with their output captured: `--version`, `--help`, `--status` and `--status --json` without the Explorer test (exit 0, 1 or 6, whatever this PC has), `--diagnostics` (nothing of the current user unmasked; elevated, CI only, it leaves out the log, and `--diagnostics --out` is refused with exit 8 without writing a file). Safe on a developer PC: no test starts a thumbnail extraction or runs `--check` or `--fix` against the real registry; it writes nothing to the user's profile except the check's volatile probe key and private test keys, which it deletes again, probe PDFs in `%TEMP%`, which it deletes too, and the start and end lines that the commands it runs unelevated (`--status`, `--diagnostics`, `--checks` where nothing is installed, `--setup-machine`) add to the app's log, which may create the app's data folder (not when elevated); in Task Scheduler it writes only its own test tasks and folder, which it deletes, and it never touches the real check task, its folder or 1.x's task. The executables' `--status` runs also delete their own stale probe PDFs (older than an hour) from `%TEMP%` when not elevated (an elevated process never sweeps `%TEMP%`). A writing command of the executables (`--zoom 120`, `--check`, `--fix`, `--fix --take-back`, `--checks` with each value) runs only where the check shows that its writes would be swallowed (a terminal inside a packaged app), where it must be refused (exit 8, or 2 for `--fix --take-back` without `--yes`), and is skipped everywhere else; `--checks` also runs elevated on a PC whose registry is the real one, where it must refuse (exit 8: CI only), and on a PC whose registry is the real one and where nothing is installed, where it must answer "not installed" (exit 6; elevated, as on CI, it runs at Medium integrity with a standard user's token), and a bad `--checks` value is a usage error (exit 2) everywhere; `--install`, `--uninstall --yes`, `--zoom 130`, `--setup-user` and `--migrate-v1` run only where they must be refused (exit 8: in such a terminal, or elevated on CI), `--setup-machine` only unelevated (exit 7), and their wrong command lines are usage errors (exit 2), and the named objects carry a suffix of the run's own, so a running settings app does not disturb the tests | x64 presets; CI's ARM64 runner |
 | `system` | `system.tests` (`pdft_system_tests`): the install for all users from a staged runtime, for real: HKLM and HKCU, Program Files, the check task, every administrator step through UAC. It runs `--install --machine`, `--status --json` (healthy; the Explorer test may fail on a runner without a desktop, which is only reported), `--checks none` and `default`, `--zoom 130 --no-refresh`, `--setup-user`, `--setup-machine`, `--fix` on a damaged class for all users, `--uninstall --yes`; 1.1's state (installed for all users, and for one user: its class, build folder, per-user files with their shipped contents, `settings.ini` with `Zoom=120`, its task and its sign-in clean-up) replaced by `--install --machine`, and 1.1's leftovers next to an installed 2.0 removed by `--migrate-v1`; `--uninstall-cleanup` as an installer runs it. The user is a local account the program makes for the run: a member of Administrators with a random name (`pdft-sys-` and six hex digits) and a random password that is never shown or stored, logged on interactively with its profile loaded. Its commands run with the limited token of that logon, so every administrator step goes through UAC into the account's full token (without a prompt where `ConsentPromptBehaviorAdmin` is 0), must get administrator rights there, and its report must come back through the asking process's pipe; the installer's administrator commands run with the program's own elevated token. Everything the tests check about the user (HKCU, the slots, RunOnce, the per-user and data folders, the check task) is that account's. After each test nothing may be left (classes, slots, settings, RunOnce values, task folder and tasks, Program Files, the per-user and data folders; trash folders only when queued for deletion at the restart); at the end the account and its profile are deleted, also after a failure (an account a run ended from outside left behind is removed by the next run). The privileges the account needs (backup and restore for its hive, debug to end its programs) are enabled only while used, so the installer's commands run with them disabled, as a real installer's are. The program refuses to run unless `PDFT_SYSTEM_TESTS=1` and either `GITHUB_ACTIONS=true` with `RUNNER_ENVIRONMENT=github-hosted` (set on the runners GitHub hosts) or `PDFT_SYSTEM_TESTS_THROWAWAY_VM=1` (your own throw-away virtual machine), it is elevated, the registry is not virtualized and nothing of 1.x or 2.x is installed (exit 77, CTest's "skipped", or 3) | CI's `system-x64` job, or a throw-away virtual machine; never on a PC you use |
 | `e2e` | Explorer's thumbnail pipeline end to end; added with the thumbnail refresh | — |
 
@@ -187,8 +188,13 @@ Where the task tests run:
   (`SharedFolderStepsRefuseUnelevated`, `UnelevatedCannotMakeAFolderOwnedByAdministrators`), plus
   the `TaskFolderElevated` tests, which create the protected folder, take over one a standard user
   made, register a task in it with a standard user's token, skip a task there that runs as another
-  account, and remove every user's task from it. CI fails the run when one of them did not print
-  its own line in the test log (a skipped test counts as passed otherwise).
+  account, update a user's own task in it where it is, keep another account's task under the
+  user's name there (neither registered over nor deleted) and use the root-folder name instead,
+  answer that both names are taken when another account's tasks hold both (also to a standard
+  user), and remove every user's task from it. CI fails the run when one of them did not print
+  its own line in the test log (a skipped test counts as passed otherwise), for example
+  `[ tasks ] another account's task in the folder kept, the fallback name used: yes` and
+  `[ tasks ] standard user with both names taken: apply-task hr=0x800402E8 elevated=0`.
 - One test lets Task Scheduler start `pdft-run-medium.exe --exit 0` in the signed-in user's
   session (a console window may flash). It is skipped when Application Control blocks that
   program, and when Task Scheduler has no session of the test's account to start a task with an
@@ -215,7 +221,19 @@ test or script does.
    Scheduler itself refuses a standard user a folder owned by Administrators, and
    `UntrustedFolderMeansTheFallbackNameAndOneCopy` that a folder a standard user made instead is
    not used: the task goes under the root-folder name.
-4. Afterwards, as that account, `schtasks /query /fo list | findstr /i "Test"` lists nothing of
+4. Optional, with a second standard account, the one check of two real standard accounts. If
+   PdfThumbnails is installed for the first account already, first run `--checks none` as that
+   account, so that neither name holds its own task (a standard account cannot register over
+   another account's task, so the next step would fail and `--checks default` would exit 0).
+   Then, from the second account, register a task named
+   `\PdfThumbnails check <first account's SID>` in the root folder (and, if the protected folder
+   exists, `Check <first account's SID>` in `\PdfThumbnails`). Then, as the first account,
+   install PdfThumbnails if it is not installed yet (`--install --user`; it reports the task step
+   as not done and exits 1); `--checks default` must exit 5 and say that another account's
+   scheduled tasks hold the names and that an administrator can delete them, and `--status` must
+   show the Checks line as a problem with that hint. Afterwards, delete those tasks again from
+   the second account (or as an administrator).
+5. Afterwards, as that account, `schtasks /query /fo list | findstr /i "Test"` lists nothing of
    the tests. Record the date, the Windows build and the result in the pull request, then remove
    the account if it was made only for this.
 
@@ -322,6 +340,11 @@ set PDFT_SYSTEM_RUNTIME=<the runtime folder>
 ctest --test-dir <folder> -L system -V
 ```
 
+`PDFT_SYSTEM_RUNTIME` must name a folder on a local drive (not a share or a mapped network
+drive), with no link, junction or mount point on the way to it or inside it; the tests refuse it
+otherwise. They copy it with administrator rights, so only administrators should be able to
+change it.
+
 Each administrator step of the test account shows a UAC prompt in your session (approve it), unless
 `ConsentPromptBehaviorAdmin` is 0 as on CI's runners. Without both variables, unelevated, where
 the registry may be virtualized, or on a PC that has 1.x or 2.x installed, the program changes
@@ -354,16 +377,29 @@ a trash folder next to the install folder until the next restart; the status say
 users instead, and where that is 1.x's, it refuses unless `--force`.
 
 `--install` refuses (exit 8, with the reason) when:
-- the build's folder, one of its binaries or a folder above it can be changed by accounts other
-  than you and the administrators (Everyone, Users, Authenticated Users, INTERACTIVE): the
-  elevated step copies from that folder, so another account could swap a file in between, and
-  with `--user` your thumbnail process and sign-in task would run what it put there. A
-  folder inside your user profile, such as `out\` in a clone under `%USERPROFILE%`, passes; a new
-  folder directly under `C:\` does not;
+- the build's folder, anything copied from it (the four binaries, `LICENSE.txt`,
+  `THIRD-PARTY-NOTICES.md` and everything in `licenses\`) or a folder above it is owned by, or can
+  be changed by, any account or group other than you and the administrators (Administrators,
+  SYSTEM, TrustedInstaller, and the built-in Administrator account and Domain Admins of this PC,
+  of the domain it is joined to or of your own domain, not of any other domain).
+  The message names the account or group and its SID. The elevated step copies from that folder,
+  so another account could swap a file in between, and with `--user` your thumbnail process and
+  sign-in task would run what it put there. A folder inside your user profile, such as `out\` in
+  a clone under `%USERPROFILE%`, passes; a new folder directly under `C:\` does not;
+- a link, junction or mount point is on the folder's path or among what is copied (a link in the
+  path you started the command from is resolved first);
+- the folder is on a network drive (a share, a drive letter mapped to one, or a local folder
+  linked to one, which is refused before anything in it is read);
 - the folder is not a complete 2.x build for this PC's architecture (an ARM64 build on an x64 PC,
   for example), or is the install folder itself;
 - an installer has installed PdfThumbnails (its uninstall record exists); uninstall that first;
 - it runs as administrator, or in a terminal whose registry is virtualized.
+
+While it copies, the step keeps the build's folder, every folder above it and everything it
+copies open, so none of it can be renamed, replaced or written until the copy is done. The
+elevated step judges the folder for the account it runs as: approving the prompt with another
+administrator's password (from a standard account) therefore refuses a build folder in the
+standard account's profile.
 
 `--uninstall --yes` removes it again (the part for all users through UAC; files still in use
 wait for the restart). `--migrate-v1` cleans up what 1.x left where 2.0 is already installed;
@@ -446,8 +482,10 @@ or `build (x64-debug)` fails; it fails if `build (ci-arm64)` made no artifact.
 
 Details:
 - **Runners.** GitHub-hosted runners run elevated (High integrity). The handler tests relaunch
-  themselves at Medium integrity, and a check step fails the job unless the test log shows that
-  relaunch, an elevated run of `handler.refuses_elevated` and `gate.planting`'s elevated
+  themselves at Medium integrity as a standard user (Administrators deny-only), and a check step
+  fails the job unless the test log shows that relaunch, an elevated run of
+  `handler.refuses_elevated` and its refusal of a Medium token with Administrators enabled, and
+  `gate.planting`'s elevated
   `--status --no-live-test` runs, and the line of every other test that only an elevated runner
   runs (the protected task folder, the writing commands refused elevated, `--setup-machine` in
   test places). The job log also shows the runner image, the UAC settings and `whoami /groups`.
@@ -506,9 +544,9 @@ On every push to `main` and every pull request, on `ubuntu-24.04`:
 
 ### `pdfium-watch.yml`
 
-Every Monday, it compares the PDFium release pinned in `cmake/Pins.cmake` with the latest
-pdfium-binaries release. While they differ, it keeps one issue open with the label
-`security/pdfium`.
+Every day (05:23 UTC), it compares the PDFium release pinned in `cmake/Pins.cmake` with the
+latest pdfium-binaries release. While they differ, it keeps one issue open with the label
+`security/pdfium`; it edits that issue rather than opening another.
 
 ### Dependabot
 

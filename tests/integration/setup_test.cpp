@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "build_folder.h"
@@ -29,12 +30,14 @@
 #include "elevation.h"
 #include "fake_probes.h"
 #include "file_ops.h"
+#include "instance.h"
 #include "legacy.h"
 #include "migrate_v1.h"
 #include "project_config.h"
 #include "registration.h"
 #include "registry_sandbox.h"
 #include "settings.h"
+#include "status_format.h"
 #include "strings.h"
 #include "temp_dir.h"
 #include "zoom.h"
@@ -670,6 +673,40 @@ TEST_F(Setup, SetupUserWithoutAnySettingsWrites100) {
   EXPECT_EQ(StoredZoom(), 100u);
 }
 
+// Another account's tasks hold every name the user's task may have: the task step fails in words
+// that name those tasks and who can remove them, and the other steps still run.
+TEST_F(Setup, SetupUserSaysWhenAnotherAccountHoldsTheTaskNames) {
+  InstallForAllUsers();
+  probes_.applyError = kTaskTakenHr;
+  SetupUserOptions options;
+  options.context = probes_.context;
+  options.paths = paths_;
+  options.lockWaitMs = 5000;
+  SetupUserResult result;
+  ASSERT_HRESULT_SUCCEEDED(SetupUser(options, roots_, probes_, &result));
+  EXPECT_EQ(result.code, ExitCode::kFailed);
+  EXPECT_TRUE(result.taskTaken);
+  EXPECT_FALSE(result.taskRegistered);
+  EXPECT_EQ(StoredZoom(), 100u);
+  ASSERT_EQ(result.failures.size(), 1u);
+  const std::wstring& failure = result.failures[0];
+  const std::string text = WideToUtf8Lossy(failure);
+  EXPECT_EQ(failure.rfind(L"task: " + TaskTakenText() + L" (" + HResultText(kTaskTakenHr) + L"). " +
+                              L"An administrator can delete ",
+                          0),
+            0u)
+      << text;
+  const TaskLocation& location = result.before.taskLocation;
+  EXPECT_NE(failure.find(location.folder + L"\\" + location.name), std::wstring::npos) << text;
+  EXPECT_NE(failure.find(L"\\" + location.fallbackName), std::wstring::npos) << text;
+
+  // Any other failure of the step keeps its usual line.
+  probes_.applyError = E_ACCESSDENIED;
+  ASSERT_HRESULT_SUCCEEDED(SetupUser(options, roots_, probes_, &result));
+  EXPECT_FALSE(result.taskTaken);
+  EXPECT_EQ(result.failures, std::vector<std::wstring>{L"task: 0x80070005"});
+}
+
 TEST_F(Setup, SetupUserRefusals) {
   PlantRunOnce();
   SetupUserOptions options;
@@ -727,8 +764,11 @@ TEST_F(Setup, SetupMachineNeedsAnAdministrator) {
   EXPECT_TRUE(Exists(unused));
 }
 
-// Elevated (CI): the whole step against a test task folder, folders under %TEMP% and the sandbox.
-// Nothing is in use, so nothing goes to a trash folder or waits for a restart.
+// Elevated (CI): the whole step against a test task folder, folders under %TEMP% and the sandbox,
+// while another thread holds this user's operation lock. The step takes no lock, so neither a
+// holder nor another account that made the lock's names first (in session 0, where a deployment
+// tool may run it, those are the only names) can stop it. Nothing is in use, so nothing goes to
+// a trash folder or waits for a restart.
 TEST_F(Setup, SetupMachineInTestPlaces) {
   if (!Elevated()) GTEST_SKIP() << "needs elevation; runs on CI";
   std::optional<std::wstring> package;
@@ -746,7 +786,25 @@ TEST_F(Setup, SetupMachineInTestPlaces) {
   options.paths = paths_;
   options.taskFolder = L"\\" + std::wstring(kProductName) + L"-Test-" + tail;
   options.trashParent = temp_.path();
-  options.lockWaitMs = 5000;
+  // A mutex is its owning thread's, so the holder is a thread of its own, which keeps the lock
+  // until the step is done.
+  wil::unique_event_nothrow locked;
+  wil::unique_event_nothrow done;
+  ASSERT_HRESULT_SUCCEEDED(locked.create(wil::EventOptions::ManualReset));
+  ASSERT_HRESULT_SUCCEEDED(done.create(wil::EventOptions::ManualReset));
+  HRESULT held = E_UNEXPECTED;
+  std::thread holder([&] {
+    std::optional<OperationLock> lock;
+    held = OperationLock::Acquire(5000, &lock);
+    locked.SetEvent();
+    done.wait();
+  });
+  const auto letGo = wil::scope_exit([&] {
+    done.SetEvent();
+    holder.join();
+  });
+  locked.wait();
+  ASSERT_HRESULT_SUCCEEDED(held);
   SetupMachineResult result;
   ASSERT_HRESULT_SUCCEEDED(SetupMachine(options, roots_, &result));
   for (const std::wstring& failure : result.failures) ADD_FAILURE() << WideToUtf8Lossy(failure);

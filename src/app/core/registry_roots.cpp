@@ -20,6 +20,124 @@ LSTATUS OpenKey(HKEY root, std::wstring_view subKey, REGSAM access, wil::unique_
   return RegOpenKeyExW(root, path.c_str(), 0, access | KEY_WOW64_64KEY, key.put());
 }
 
+// What a key that may be deleted is opened with: enough to list its subkeys and values, to read
+// whether it is a link, and to delete it.
+constexpr REGSAM kDeletableKeyAccess = DELETE | KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE;
+
+// Opens |subKey| below |parent| in the 64-bit view as it is: when the key itself is a link, the
+// link, never the key it names. The path on the way to it is looked up as given.
+LSTATUS OpenKeyItself(HKEY parent, std::wstring_view subKey, wil::unique_hkey& key) {
+  const std::wstring path(subKey);
+  return RegOpenKeyExW(parent, path.c_str(), REG_OPTION_OPEN_LINK,
+                       kDeletableKeyAccess | KEY_WOW64_64KEY, key.put());
+}
+
+// Whether the open |key| (with KEY_QUERY_VALUE) has subkeys or values.
+LSTATUS HasContents(HKEY key, bool* contents) noexcept {
+  DWORD subkeys = 0;
+  DWORD values = 0;
+  const LSTATUS status = RegQueryInfoKeyW(key, nullptr, nullptr, nullptr, &subkeys, nullptr,
+                                          nullptr, &values, nullptr, nullptr, nullptr, nullptr);
+  *contents = subkeys != 0 || values != 0;
+  return status;
+}
+
+// The value in which a registry link holds the full name of the key it leads to (REG_LINK).
+constexpr wchar_t kSymbolicLinkValue[] = L"SymbolicLinkValue";
+
+// Whether |key|, opened by OpenKeyItself, is a registry link. Any key may hold a REG_LINK value
+// of that name, and one that does counts as a link here too: it is only left alone.
+HRESULT IsRegistryLink(HKEY key, bool* link) noexcept {
+  *link = false;
+  DWORD type = REG_NONE;
+  const LSTATUS status =
+      RegQueryValueExW(key, kSymbolicLinkValue, nullptr, &type, nullptr, nullptr);
+  if (IsMissing(status)) return S_OK;
+  RETURN_IF_WIN32_ERROR(status);
+  *link = type == REG_LINK;
+  return S_OK;
+}
+
+// ntdll's NtDeleteKey and its conversion of status codes to Windows errors. No Win32 call deletes
+// the key an open handle refers to: RegDeleteKeyExW opens the key again by a name (an empty one
+// for the handle's own key) without REG_OPTION_OPEN_LINK, so on a link it may reach the key the
+// link names. Every process has ntdll loaded.
+struct NtKeyFunctions {
+  LONG(NTAPI* deleteKey)(HANDLE key) = nullptr;
+  ULONG(NTAPI* toWin32Error)(LONG status) = nullptr;
+};
+
+const NtKeyFunctions& NtKey() noexcept {
+  static const NtKeyFunctions functions = [] {
+    NtKeyFunctions found;
+    if (const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll")) {
+      found.deleteKey = reinterpret_cast<decltype(found.deleteKey)>(
+          reinterpret_cast<void*>(GetProcAddress(ntdll, "NtDeleteKey")));
+      found.toWin32Error = reinterpret_cast<decltype(found.toWin32Error)>(
+          reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlNtStatusToDosError")));
+    }
+    return found;
+  }();
+  return functions;
+}
+
+// One DeleteRegistryTree call's walk: its bounds, and what it did so far.
+struct TreeWalk {
+  RegistryTreeLimits limits;
+  ULONGLONG start = 0;
+  DWORD opened = 0;  // keys opened, the top one included
+  RegistryTreeDeletion* deletion = nullptr;
+
+  bool OutOfTime() const noexcept { return GetTickCount64() - start >= limits.maxMs; }
+  // Returned as it is, never through a WIL macro: it is an answer the callers report, not a
+  // failure of this call worth a log line here.
+  HRESULT Stop() noexcept {
+    deletion->boundReached = true;
+    return kRegistryTreeLeftHr;
+  }
+};
+
+// Deletes |key| (opened by OpenKeyItself), |depth| levels below the top of the tree, with
+// everything below it. Every subkey is opened relative to |key|'s handle and deleted through its
+// own handle once its own subkeys are gone. A link stays, and so does every key above it, while
+// the walk goes on with their siblings; past the bounds it stops at once.
+HRESULT DeleteKeyAndBelow(TreeWalk& walk, HKEY key, DWORD depth) {
+  bool link = false;
+  RETURN_IF_FAILED(IsRegistryLink(key, &link));
+  if (link) {
+    ++walk.deletion->linksLeft;
+    return kRegistryTreeLeftHr;
+  }
+  bool left = false;
+  for (DWORD index = 0;;) {
+    if (walk.OutOfTime()) return walk.Stop();
+    wchar_t name[256] = {};  // key names are at most 255 characters
+    DWORD size = ARRAYSIZE(name);
+    const LSTATUS status =
+        RegEnumKeyExW(key, index, name, &size, nullptr, nullptr, nullptr, nullptr);
+    if (status == ERROR_NO_MORE_ITEMS) break;
+    RETURN_IF_WIN32_ERROR(status);
+    if (depth >= walk.limits.maxDepth || walk.opened >= walk.limits.maxKeys) return walk.Stop();
+    wil::unique_hkey child;
+    const LSTATUS opened = OpenKeyItself(key, std::wstring_view(name, size), child);
+    if (IsMissing(opened)) continue;  // deleted meanwhile: the next one moved up to |index|
+    RETURN_IF_WIN32_ERROR(opened);
+    ++walk.opened;
+    const HRESULT hr = DeleteKeyAndBelow(walk, child.get(), depth + 1);
+    if (hr == kRegistryTreeLeftHr) {
+      if (walk.deletion->boundReached) return hr;
+      left = true;  // it stays where it is: on to the next one
+      ++index;
+      continue;
+    }
+    RETURN_IF_FAILED(hr);
+  }
+  if (left) return kRegistryTreeLeftHr;
+  RETURN_IF_FAILED(DeleteOpenRegistryKey(key));
+  ++walk.deletion->keysDeleted;
+  return S_OK;
+}
+
 HRESULT CreateKey(HKEY root, std::wstring_view subKey, wil::unique_hkey& key) {
   const std::wstring path(subKey);
   RETURN_IF_WIN32_ERROR(RegCreateKeyExW(root, path.c_str(), 0, nullptr, REG_OPTION_NON_VOLATILE,
@@ -207,50 +325,74 @@ HRESULT DeleteRegistryValue(HKEY root, std::wstring_view subKey, std::wstring_vi
 }
 CATCH_RETURN();
 
-HRESULT DeleteRegistryTree(HKEY root, std::wstring_view subKey, bool* deleted) noexcept try {
-  if (deleted) *deleted = false;
+HRESULT DeleteRegistryTree(HKEY root, std::wstring_view subKey, const RegistryTreeLimits& limits,
+                           RegistryTreeDeletion* deletion) noexcept try {
+  *deletion = RegistryTreeDeletion{};
   // Never the root itself: an empty path would empty the whole hive the root stands for.
   RETURN_HR_IF(E_INVALIDARG, root == nullptr || subKey.empty());
-  {
-    wil::unique_hkey key;
-    const LSTATUS status = OpenKey(
-        root, subKey, DELETE | KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE | KEY_SET_VALUE, key);
-    if (IsMissing(status)) return S_OK;
-    RETURN_IF_WIN32_ERROR(status);
-    // Everything below the key (its values and subkeys), then the key itself.
-    RETURN_IF_WIN32_ERROR(RegDeleteTreeW(key.get(), nullptr));
-  }
-  const std::wstring path(subKey);
-  const LSTATUS status = RegDeleteKeyExW(root, path.c_str(), KEY_WOW64_64KEY, 0);
-  if (IsMissing(status)) return S_OK;  // deleted by someone else meanwhile
+  TreeWalk walk{limits, GetTickCount64(), 1, deletion};
+  wil::unique_hkey key;
+  const LSTATUS status = OpenKeyItself(root, subKey, key);
+  if (IsMissing(status)) return S_OK;
   RETURN_IF_WIN32_ERROR(status);
+  deletion->existed = true;
+  const HRESULT hr = DeleteKeyAndBelow(walk, key.get(), 0);
+  if (hr == kRegistryTreeLeftHr) return hr;
+  RETURN_IF_FAILED(hr);
+  deletion->deleted = true;
+  return S_OK;
+}
+CATCH_RETURN();
+
+HRESULT DeleteRegistryTree(HKEY root, std::wstring_view subKey, bool* deleted) noexcept {
+  if (deleted) *deleted = false;
+  RegistryTreeDeletion deletion;
+  const HRESULT hr = DeleteRegistryTree(root, subKey, RegistryTreeLimits{}, &deletion);
+  if (deleted) *deleted = deletion.deleted;
+  return hr;
+}
+
+HRESULT DeleteRegistryKeyIfEmpty(HKEY root, std::wstring_view subKey, bool* deleted) noexcept try {
+  if (deleted) *deleted = false;
+  RETURN_HR_IF(E_INVALIDARG, root == nullptr || subKey.empty());
+  wil::unique_hkey key;
+  const LSTATUS status = OpenKeyItself(root, subKey, key);
+  if (IsMissing(status)) return S_OK;
+  if (status == ERROR_ACCESS_DENIED) {
+    // A key this process may not delete matters only when it is empty: one with subkeys or values
+    // stays anyway, which is no failure of this call. Its permissions are someone's choice.
+    const std::wstring path(subKey);
+    wil::unique_hkey readable;
+    const LSTATUS opened = RegOpenKeyExW(root, path.c_str(), REG_OPTION_OPEN_LINK,
+                                         KEY_QUERY_VALUE | KEY_WOW64_64KEY, readable.put());
+    if (IsMissing(opened)) return S_OK;
+    bool contents = false;
+    if (opened == ERROR_SUCCESS && HasContents(readable.get(), &contents) == ERROR_SUCCESS &&
+        contents) {
+      return S_OK;
+    }
+  }
+  RETURN_IF_WIN32_ERROR(status);
+  bool contents = false;
+  RETURN_IF_WIN32_ERROR(HasContents(key.get(), &contents));
+  if (contents) return S_OK;
+  // Through the handle: a subkey added meanwhile makes the deletion fail, and a key made at the
+  // same path meanwhile is another key, which stays.
+  RETURN_IF_FAILED(DeleteOpenRegistryKey(key.get()));
   if (deleted) *deleted = true;
   return S_OK;
 }
 CATCH_RETURN();
 
-HRESULT DeleteRegistryKeyIfEmpty(HKEY root, std::wstring_view subKey, bool* deleted) noexcept try {
-  if (deleted) *deleted = false;
-  RETURN_HR_IF(E_INVALIDARG, root == nullptr || subKey.empty());
-  {
-    wil::unique_hkey key;
-    const LSTATUS status = OpenKey(root, subKey, KEY_QUERY_VALUE, key);
-    if (IsMissing(status)) return S_OK;
-    RETURN_IF_WIN32_ERROR(status);
-    DWORD subkeys = 0;
-    DWORD values = 0;
-    RETURN_IF_WIN32_ERROR(RegQueryInfoKeyW(key.get(), nullptr, nullptr, nullptr, &subkeys, nullptr,
-                                           nullptr, &values, nullptr, nullptr, nullptr, nullptr));
-    if (subkeys != 0 || values != 0) return S_OK;
-  }
-  // RegDeleteKeyExW deletes only a key without subkeys; one added meanwhile makes it fail.
-  const std::wstring path(subKey);
-  const LSTATUS status = RegDeleteKeyExW(root, path.c_str(), KEY_WOW64_64KEY, 0);
-  if (IsMissing(status)) return S_OK;
-  RETURN_IF_WIN32_ERROR(status);
-  if (deleted) *deleted = true;
-  return S_OK;
+HRESULT DeleteOpenRegistryKey(HKEY key) noexcept {
+  RETURN_HR_IF(E_INVALIDARG, key == nullptr);
+  const NtKeyFunctions& nt = NtKey();
+  RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND), !nt.deleteKey || !nt.toWin32Error);
+  const LONG status = nt.deleteKey(key);
+  if (status >= 0) return S_OK;  // NT_SUCCESS
+  const ULONG error = nt.toWin32Error(status);
+  if (error == ERROR_KEY_DELETED) return S_OK;  // by someone else meanwhile: gone all the same
+  RETURN_WIN32(error);
 }
-CATCH_RETURN();
 
 }  // namespace pdft

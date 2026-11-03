@@ -39,7 +39,6 @@
 #include "build_folder.h"
 #include "child_process.h"
 #include "file_ops.h"
-#include "instance.h"
 #include "json_check.h"
 #include "legacy.h"
 #include "medium_il.h"
@@ -97,6 +96,57 @@ bool MakeDirs(const path& p) {
   std::error_code error;
   std::filesystem::create_directories(p, error);
   return !error;
+}
+
+// Whether a link, a junction or a mount point is at |p| itself (a reparse tag that names another
+// place), not looking at where it leads. One whose tag cannot be read counts as one.
+bool LeadsElsewhere(const path& p) {
+  const wil::unique_hfile handle(CreateFileW(
+      p.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+  FILE_ATTRIBUTE_TAG_INFO info = {};
+  if (!handle ||
+      !GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo, &info, sizeof(info))) {
+    return true;
+  }
+  return (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+         IsReparseTagNameSurrogate(info.ReparseTag) != 0;
+}
+
+// Why the staged runtime |runtime| must not be copied with this process's administrator rights;
+// empty when it may. The copy reads what is there with those rights, so the folder must be on a
+// local drive (a share, or a drive letter mapped to one, is served by another computer), and no
+// link, junction or mount point may send it somewhere else: not on the way to the folder, not
+// the folder itself, not anything in it. Whoever can change the folder can still change what is
+// installed, so nobody but administrators should be able to (system_env.h; not checked here).
+std::string RuntimeSourceProblem(const path& runtime) {
+  const path source = runtime.lexically_normal();
+  const std::wstring& text = source.native();
+  const bool drive = text.size() > 3 &&
+                     ((text[0] >= L'A' && text[0] <= L'Z') || (text[0] >= L'a' && text[0] <= L'z'));
+  if (!drive || text[1] != L':' || text[2] != L'\\') {
+    return "is not a folder on a drive (X:\\...); shares and \\\\?\\ paths are refused";
+  }
+  const UINT type = GetDriveTypeW(text.substr(0, 3).c_str());
+  if (type == DRIVE_REMOTE || type == DRIVE_UNKNOWN || type == DRIVE_NO_ROOT_DIR) {
+    return "is not on a local drive (drive type " + std::to_string(type) + ")";
+  }
+  for (path p = source; p.has_relative_path(); p = p.parent_path()) {
+    if (LeadsElsewhere(p)) {
+      return "leads through a link, junction or mount point: " + Text(p.native());
+    }
+  }
+  // The walk lists links but never enters them.
+  std::error_code error;
+  const std::filesystem::recursive_directory_iterator end;
+  for (std::filesystem::recursive_directory_iterator entry(source, error); !error && entry != end;
+       entry.increment(error)) {
+    if (LeadsElsewhere(entry->path())) {
+      return "holds a link, junction or mount point: " + Text(entry->path().native());
+    }
+  }
+  if (error) return "cannot be listed: " + error.message();
+  return {};
 }
 
 // Gives |folder| a protected DACL that lets only the accounts |sids|, SYSTEM and Administrators
@@ -192,33 +242,40 @@ class System : public ::testing::Test {
     userRoot_ = user.userRoot;
     dataDir_ = user.dataDir;
     ASSERT_HRESULT_SUCCEEDED(GetMachineRoot(&machineRoot_));
-    std::wstring self;
-    ASSERT_HRESULT_SUCCEEDED(GetCurrentUserSid(&self));
     const std::vector<std::string> left = Leftovers();
     ASSERT_TRUE(left.empty()) << "not a clean start:" << Lines(left);
 
     // The staged runtime, copied into the test account's temp folder: it can read that folder
     // and every folder above it (the install's permission check reads their permissions as the
-    // user), and only it, this account, SYSTEM and Administrators can change the copy.
+    // user), and only it, SYSTEM and Administrators can change the copy. This elevated program
+    // copies as an administrator; its own account is left out, which the check would trust only
+    // where it is the built-in Administrator (as on GitHub's runners), not on a VM of your own.
     const std::wstring runtime = EnvironmentValue(kRuntimeEnv);
     ASSERT_FALSE(runtime.empty())
         << Text(kRuntimeEnv)
         << " must name the staged runtime (cmake --install <build> --prefix <folder> "
            "--component runtime)";
+    const std::string problem = RuntimeSourceProblem(runtime);
+    ASSERT_TRUE(problem.empty()) << Text(kRuntimeEnv) << " (" << Text(runtime) << ") " << problem;
     static int count = 0;
     scratch_ = account->tempDir() / (L"pdft-system-" + std::to_wstring(GetCurrentProcessId()) +
                                      L"-" + std::to_wstring(++count));
     stage_ = scratch_ / L"runtime";
     ASSERT_TRUE(MakeDirs(stage_));
-    ASSERT_TRUE(ProtectFolder(stage_, {sid_, self}));
+    ASSERT_TRUE(ProtectFolder(stage_, {sid_}));
+    // Links and junctions that appear after the check are left out of the copy, not followed.
     std::error_code error;
-    std::filesystem::copy(runtime, stage_, std::filesystem::copy_options::recursive, error);
+    std::filesystem::copy(
+        runtime, stage_,
+        std::filesystem::copy_options::recursive | std::filesystem::copy_options::skip_symlinks,
+        error);
     ASSERT_FALSE(error) << error.message();
     const std::vector<std::wstring> binaries = {kSettingsExe, kCliExe, kHandlerDll, kPdfiumDll};
+    // Judged for the test account, whose --install the tests start: it trusts only itself and
+    // the administrators.
     std::optional<UnsafeAccess> unsafe;
-    ASSERT_HRESULT_SUCCEEDED(FindUnsafeBuildFolderAccess(stage_, binaries, &unsafe));
-    ASSERT_FALSE(unsafe) << "other accounts could change " << Text(unsafe->object.native()) << " ("
-                         << Text(unsafe->access.principal) << "), so --install would refuse";
+    ASSERT_HRESULT_SUCCEEDED(FindUnsafeBuildFolderAccess(stage_, binaries, sid_, &unsafe));
+    ASSERT_FALSE(unsafe) << Text(UnsafeAccessText(*unsafe)) << ", so --install would refuse";
     ASSERT_HRESULT_SUCCEEDED(
         ComputeBuildId(stage_ / kHandlerDll, stage_ / kPdfiumDll, &buildName_));
   }
@@ -520,7 +577,10 @@ class System : public ::testing::Test {
                           step.summary.find(" no-report") == std::string::npos;
     std::printf("[ system ] %s reported through the asking process's pipe: %s\n",
                 Text(verb).c_str(), reported ? "yes" : "no");
-    EXPECT_TRUE(reported) << "the elevated step's report did not reach the unelevated process";
+    const bool taken = step.summary.find("(taken by another process)") != std::string::npos;
+    EXPECT_TRUE(reported) << (taken ? "another process had made the report pipe's name first"
+                                    : "the elevated step's report did not reach the unelevated "
+                                      "process");
   }
 
   // Nothing of the product is left; trash folders only where they are queued for deletion at the

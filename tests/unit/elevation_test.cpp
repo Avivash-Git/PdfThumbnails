@@ -1,8 +1,9 @@
 // The pure parts of the elevation boundary (elevation.h): the step names and the one accepted
 // command line, the elevated side's entry checks in their order (administrator rights in every
-// combination of the token's facts), how an elevated run's exit is read, and how the report
-// pipe's bytes become lines. Also the installer's records (inno.h) and which holders of a DLL may
-// be ended (processes.h).
+// combination of the token's facts), how an elevated run's exit is read, how the report pipe's
+// bytes become lines, which pipe the elevated side writes to, and a report channel another
+// process took. Also the installer's records (inno.h) and which holders of a DLL may be ended
+// (processes.h).
 
 #include <windows.h>
 
@@ -293,6 +294,57 @@ TEST(ElevatedReport, Bounded) {
   std::string many;
   for (size_t i = 0; i < kMaxReportLines + 10; ++i) many += "l\n";
   EXPECT_EQ(SplitReportLines(many).size(), kMaxReportLines);
+}
+
+ReportServerFacts ParentsPipe() {
+  ReportServerFacts facts;
+  facts.parentId = 4242;
+  facts.parentSession = 1;
+  facts.serverId = 4242;
+  facts.serverSession = 1;
+  facts.ownerIsParentsUser = true;
+  return facts;
+}
+
+// The elevated side writes only to a pipe its parent made, in the parent's session, owned by the
+// parent's user: each of the three alone is not enough.
+TEST(ElevatedReport, OnlyThePipeOfTheParent) {
+  EXPECT_TRUE(TrustReportServer(ParentsPipe()));
+
+  ReportServerFacts facts = ParentsPipe();
+  facts.serverId = 4243;
+  EXPECT_FALSE(TrustReportServer(facts));
+  facts = ParentsPipe();
+  facts.serverSession = 2;  // another signed-in user's process that once had the parent's id
+  EXPECT_FALSE(TrustReportServer(facts));
+  facts = ParentsPipe();
+  facts.ownerIsParentsUser = false;
+  EXPECT_FALSE(TrustReportServer(facts));
+  facts = ParentsPipe();
+  facts.parentSession = 0;
+  EXPECT_FALSE(TrustReportServer(facts));
+
+  // Without a parent nothing is its pipe, even a server whose id reads as 0.
+  facts = ParentsPipe();
+  facts.parentId = 0;
+  facts.serverId = 0;
+  EXPECT_FALSE(TrustReportServer(facts));
+}
+
+// A pipe of the report's name that another process made first: the step runs without a report,
+// and the run says why, apart from every other reason there was no pipe.
+TEST(ElevatedReport, AChannelTakenByAnotherProcess) {
+  ElevatedRun run;
+  EXPECT_FALSE(ReportChannelTaken(run));
+  run.reportServer = HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+  EXPECT_TRUE(ReportChannelTaken(run));
+  run.reportServer = HRESULT_FROM_WIN32(ERROR_PIPE_BUSY);
+  EXPECT_TRUE(ReportChannelTaken(run));
+  for (const HRESULT other :
+       {E_OUTOFMEMORY, HRESULT_FROM_WIN32(ERROR_INVALID_OWNER), E_FAIL, S_FALSE}) {
+    run.reportServer = other;
+    EXPECT_FALSE(ReportChannelTaken(run)) << std::hex << static_cast<unsigned long>(other);
+  }
 }
 
 // ---- the installer's records ----

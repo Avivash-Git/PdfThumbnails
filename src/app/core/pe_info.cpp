@@ -156,9 +156,12 @@ HRESULT ParsePeMachine(std::span<const BYTE> head, std::uint64_t fileSize,
 
 HRESULT OpenFileForReading(const std::filesystem::path& file, HANDLE* handle) noexcept {
   *handle = INVALID_HANDLE_VALUE;
-  wil::unique_hfile opened(CreateFileW(file.c_str(), GENERIC_READ,
-                                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+  // A path from the registry could name a pipe that someone else serves: it may learn who opened
+  // it, but never act as them (identification only).
+  wil::unique_hfile opened(CreateFileW(
+      file.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+      nullptr));
   if (!opened) {
     // A missing file is an answer for the callers, not a failure worth logging.
     const DWORD error = GetLastError();

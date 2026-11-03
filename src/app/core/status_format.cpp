@@ -157,8 +157,9 @@ std::wstring SacText(const Snapshot& s) {
       return text;
     }
     case SacVerdictKind::kOn:
-      // Blocks are counted only when a class is registered: without one there is nothing to say.
-      if (s.ActiveClass() == nullptr) return L"On";
+      // Blocks are counted only when a class is registered and its DLL is there: without a count
+      // there is nothing to say about them.
+      if (s.ActiveClass() == nullptr || !s.blocks) return L"On";
       return L"On; Code Integrity logged no blocks of the installed DLLs in the last " +
              std::to_wstring(kSacBlockDays) + L" days";
     case SacVerdictKind::kOnUnknown:
@@ -241,6 +242,27 @@ std::wstring ChecksCommandHint(const Snapshot& s, std::wstring_view value, std::
   std::wstring hint = L"--checks " + std::wstring(value) + L" " + std::wstring(what);
   if (s.context.elevated) hint += L" (from a normal, not administrator, prompt)";
   return hint;
+}
+
+// Whether another account's tasks hold every name the user's check task may have: the gathering
+// keeps ReadTask's answer, kTaskTakenHr, among its issues.
+bool TaskNamesTaken(const Snapshot& s) {
+  return std::any_of(s.issues.begin(), s.issues.end(),
+                     [](const GatherIssue& issue) { return issue.hr == kTaskTakenHr; });
+}
+
+// What the Checks line suggests while another account's tasks hold the names: an administrator
+// removes them, then --checks turns the checks on where it can.
+std::wstring TaskTakenChecksHint(const Snapshot& s) {
+  const std::wstring then = ChecksCommandHint(s, L"default", L"turns them on");
+  return TaskTakenHint(s.taskLocation) + (then.empty() ? std::wstring() : L"; then " + then);
+}
+
+// A task's path as Task Scheduler shows it: "\folder\name", or "\name" in the root folder.
+std::wstring TaskPathText(std::wstring_view folder, std::wstring_view name) {
+  std::wstring path(folder);
+  if (!path.ends_with(L'\\')) path += L'\\';
+  return path + std::wstring(name);
 }
 
 // A new install for all users: what a machine-wide part needs that --fix cannot repair.
@@ -385,6 +407,7 @@ std::wstring FindingText(const Snapshot& s, const Finding& f) {
              whom;
     }
     case FindingId::kChecksOff:
+      if (TaskNamesTaken(s)) return L"no scheduled check: " + TaskTakenText();
       if (s.legacy.legacyTask) {
         return L"no scheduled check; the 1.x task " + std::wstring(kLegacyTask) +
                L" is still there";
@@ -534,6 +557,8 @@ std::wstring HintFor(const Snapshot& s, std::span<const Finding> findings, const
       return L"Ask whoever manages this PC, or turn the policy off in the Local Group Policy "
              L"Editor";
     case FindingId::kChecksOff:
+      // --checks alone would fail: only an administrator can free the names.
+      if (TaskNamesTaken(s)) return TaskTakenChecksHint(s);
       // Nothing to say where --checks cannot turn them on (a 1.x build is installed): the
       // Checks line shows them off, and installing this version brings them.
       return ChecksCommandHint(s, L"default", L"turns them on");
@@ -671,6 +696,9 @@ std::wstring RepairOutcomeText(const RepairOutcome& outcome) {
       }
       return L"Not done: " + what;
     case RepairResult::kFailed:
+      if (outcome.hr == kTaskTakenHr) {
+        return L"Failed, " + TaskTakenText() + L" (" + Hex(outcome.hr) + L"): " + what;
+      }
       return L"Failed (" + Hex(outcome.hr) + L"): " + what;
   }
   return what;
@@ -722,6 +750,12 @@ ScheduleReport ScheduleResultReport(const ScheduleResult& result) {
     case ScheduleRefusal::kNone:
       break;
   }
+  if (result.error == kTaskTakenHr) {
+    report.error = L"Could not register the check task: " + TaskTakenText() + L" (" +
+                   Hex(result.error) + L"). " + TaskTakenHint(s.taskLocation) +
+                   L"; then run --checks again.";
+    return report;
+  }
   if (FAILED(result.error)) {
     report.error =
         result.error == kSomeTriggersFailed
@@ -743,7 +777,13 @@ ScheduleReport ScheduleResultReport(const ScheduleResult& result) {
     report.out.push_back(L"Checks: " +
                          ChecksStateText(result.after.afterPdfCraft, result.after.atSignIn));
   }
-  if (FAILED(result.readError)) {
+  if (result.readError == kTaskTakenHr) {
+    // Nothing of this user's was there to change or to read back (checks turned off where there
+    // was no task): another account's tasks hold the names, which the line says in words, with
+    // the way out.
+    report.out.push_back(L"The check task cannot be registered while " + TaskTakenText() + L" (" +
+                         Hex(result.readError) + L"). " + TaskTakenHint(s.taskLocation) + L".");
+  } else if (FAILED(result.readError)) {
     report.out.push_back(L"The check task was changed but could not be read back: " +
                          Hex(result.readError));
   } else if (result.after.exists) {
@@ -755,6 +795,21 @@ ScheduleReport ScheduleResultReport(const ScheduleResult& result) {
                          L" is still there; it was left as it is.");
   }
   return report;
+}
+
+std::wstring TaskTakenText() {
+  return L"another account's scheduled tasks hold the names of this user's check task";
+}
+
+std::wstring TaskTakenHint(const TaskLocation& location) {
+  std::vector<std::wstring> names;
+  if (!location.name.empty()) names.push_back(TaskPathText(location.folder, location.name));
+  if (!location.fallbackName.empty()) {
+    names.push_back(TaskPathText(location.fallbackFolder, location.fallbackName));
+  }
+  const std::wstring which = names.empty() ? std::wstring(L"them") : Joined(names, L" and ");
+  return L"An administrator can delete " + which + L" in Task Scheduler (uninstalling " +
+         kProductName + L" for all users deletes them too)";
 }
 
 std::wstring ElevatedVerbText(ElevatedVerb verb) {
@@ -1014,9 +1069,12 @@ std::vector<StatusLine> FormatStatus(const Snapshot& s, std::span<const Finding>
       if (s.legacy.legacyTask) {
         text += L" (the 1.x task " + std::wstring(kLegacyTask) + L" is still there)";
       }
-      if (!last.empty()) text += kDot + last;
       const Finding* off = has(FindingId::kChecksOff);
-      line(' ', kLabelChecks, std::move(text), off ? hint(*off) : std::wstring());
+      // Not the user's choice: another account's tasks keep theirs from being registered.
+      const bool taken = off != nullptr && TaskNamesTaken(s);
+      if (taken) text += L"; " + TaskTakenText();
+      if (!last.empty()) text += kDot + last;
+      line(taken ? '!' : ' ', kLabelChecks, std::move(text), off ? hint(*off) : std::wstring());
     }
   }
 

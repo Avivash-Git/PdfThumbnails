@@ -131,16 +131,22 @@ class ScopedDefaultDacl {
 
 TEST(MediumIl, DecideRelaunch) {
   using enum RelaunchDecision;
-  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_LOW_RID, false), kRunHere);
-  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_MEDIUM_RID, false), kRunHere);
-  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_MEDIUM_RID, true), kRunHere);
-  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_MEDIUM_PLUS_RID, false), kRelaunch);
-  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_HIGH_RID, false), kRelaunch);
-  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_SYSTEM_RID, false), kRelaunch);
-  EXPECT_EQ(DecideRelaunch(kUnknownIntegrity, false), kRelaunch);
-  // A relaunched process that is still above Medium must not relaunch again.
-  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_HIGH_RID, true), kRefuse);
-  EXPECT_EQ(DecideRelaunch(kUnknownIntegrity, true), kRefuse);
+  // Arguments: integrity, Administrators enabled, already relaunched.
+  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_LOW_RID, false, false), kRunHere);
+  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_MEDIUM_RID, false, false), kRunHere);
+  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_MEDIUM_RID, false, true), kRunHere);
+  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_MEDIUM_PLUS_RID, false, false), kRelaunch);
+  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_HIGH_RID, false, false), kRelaunch);
+  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_HIGH_RID, true, false), kRelaunch);
+  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_SYSTEM_RID, true, false), kRelaunch);
+  EXPECT_EQ(DecideRelaunch(kUnknownIntegrity, false, false), kRelaunch);
+  // The handler refuses to render where Administrators is enabled, also at Medium.
+  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_MEDIUM_RID, true, false), kRelaunch);
+  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_LOW_RID, true, false), kRelaunch);
+  // A relaunched process that the handler would still refuse must not relaunch again.
+  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_HIGH_RID, false, true), kRefuse);
+  EXPECT_EQ(DecideRelaunch(SECURITY_MANDATORY_MEDIUM_RID, true, true), kRefuse);
+  EXPECT_EQ(DecideRelaunch(kUnknownIntegrity, false, true), kRefuse);
 }
 
 TEST(MediumIl, QuoteArgumentRoundTrips) {
@@ -174,6 +180,14 @@ TEST(MediumIl, CurrentIntegrityIsReadable) {
   std::printf("[ info     ] this process runs at integrity 0x%04lX\n", rid);
 }
 
+TEST(MediumIl, CurrentAdministratorsAgreesWithCheckTokenMembership) {
+  const Sid administrators = WellKnown(WinBuiltinAdministratorsSid);
+  ASSERT_FALSE(administrators.empty());
+  BOOL member = FALSE;
+  ASSERT_TRUE(CheckTokenMembership(nullptr, const_cast<BYTE*>(administrators.data()), &member));
+  EXPECT_EQ(CurrentTokenHasEnabledAdministrators(), member != FALSE);
+}
+
 TEST(MediumIl, LabelOnlyTokenIsMedium) {
   OwnedHandle token;
   ASSERT_EQ(CreateMediumTokenForSelf(MediumToken::kLabelOnly, &token.handle), S_OK);
@@ -184,6 +198,9 @@ TEST(MediumIl, LabelOnlyTokenIsMedium) {
   EXPECT_EQ(type, TokenPrimary);
   EXPECT_EQ(DefaultDaclAllows(token.handle, TokenSid(token.handle, TokenUser)),
             static_cast<ACCESS_MASK>(GENERIC_ALL));
+  // Only the label changes: where this process has Administrators enabled (CI), so does the
+  // copy, and the handler must refuse to render in it.
+  EXPECT_EQ(TokenHasEnabledAdministrators(token.handle), CurrentTokenHasEnabledAdministrators());
 }
 
 TEST(MediumIl, FilteredTokenIsMediumWithoutAdministrators) {
@@ -259,9 +276,11 @@ TEST(MediumIl, NeverRaisesALowToken) {
   EXPECT_EQ(CreateMediumToken(low.handle, MediumToken::kLabelOnly, nullptr), E_POINTER);
 }
 
-// At Medium (a developer's prompt) the handler tests run in-process: no relaunch.
+// At Medium without Administrators enabled (a developer's prompt) the handler tests run
+// in-process: no relaunch.
 TEST(MediumIl, NoRelaunchWhenAlreadyMedium) {
-  if (CurrentIntegrityRid() > SECURITY_MANDATORY_MEDIUM_RID) {
+  if (CurrentIntegrityRid() > SECURITY_MANDATORY_MEDIUM_RID ||
+      CurrentTokenHasEnabledAdministrators()) {
     GTEST_SKIP() << "running elevated: the relaunch itself is exercised by pdft_handler_tests";
   }
   int code = 12345;

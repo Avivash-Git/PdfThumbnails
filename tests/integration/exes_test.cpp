@@ -32,6 +32,7 @@
 #include "snapshot.h"
 #include "strings.h"
 #include "system_probes.h"
+#include "temp_dir.h"
 
 namespace pdft {
 namespace {
@@ -258,6 +259,39 @@ TEST_P(Exes, DiagnosticsMaskThisUser) {
       EXPECT_EQ(report.find(lower(WideToUtf8Lossy(name))), std::string::npos);
     }
   }
+}
+
+// Elevated (CI), --diagnostics does not read the log, which lies in a folder the user's
+// unelevated programs control, and says so where its lines would be; --out is refused (exit 8)
+// before anything is read, and no file is made. Both runs only read.
+TEST_P(Exes, ElevatedDiagnosticsReadNoLogAndWriteNoFile) {
+  ProcessContext context;
+  ASSERT_HRESULT_SUCCEEDED(GetProcessContext(ContextProbe::kNone, &context));
+  if (!context.elevated) GTEST_SKIP() << "not elevated here (CI runs elevated)";
+
+  test::CapturedRun run;
+  RUN_OR_SKIP(L"--diagnostics", run);
+  EXPECT_EQ(run.exitCode, 0u) << run.err;
+  EXPECT_EQ(run.err, "");
+  RedactContext redact;
+  ASSERT_HRESULT_SUCCEEDED(GetRedactContext(context, &redact));
+  // The line as the report masks it (an account named like a word of it would be masked too).
+  const std::string notRead =
+      WideToUtf8Lossy(Redact(L"  " + std::wstring(kLogNotReadElevated), redact));
+  EXPECT_NE(run.out.find("Log (last 30 lines)\r\n" + notRead + "\r\n"), std::string::npos)
+      << run.out;
+
+  test::TempDir dir(L"diagnostics");
+  ASSERT_TRUE(dir.ok());
+  const std::wstring file = dir.File(L"report.txt");
+  RUN_OR_SKIP(L"--diagnostics --out " + test::QuoteArgument(file), run);
+  std::printf("%ls --diagnostics --out (elevated) -> exit %lu: %s", GetParam(), run.exitCode,
+              run.err.c_str());
+  EXPECT_EQ(run.exitCode, 8u);
+  EXPECT_EQ(run.err.rfind(WideToUtf8Lossy(DiagnosticsOutElevatedRefusalMessage()), 0), 0u)
+      << run.err;
+  EXPECT_EQ(run.out, "");
+  EXPECT_EQ(GetFileAttributesW(file.c_str()), INVALID_FILE_ATTRIBUTES);
 }
 
 // --check and --fix write, so they run only where the guard refuses them (exit 8) before they

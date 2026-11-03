@@ -1,6 +1,7 @@
 // The pure parts of the Smart App Control verdict (sac.h): the state value, the load-blocked
-// errors, which event file names count, when to count and recount, and every row of the verdict
-// table. Reading the real state and the Code Integrity log is in the integration tests.
+// errors, which events count, when to count and recount, and every row of the verdict table;
+// and the build folder's path as Code Integrity names it, on folders in a private temporary
+// folder. Reading the real state and the Code Integrity log is in the integration tests.
 
 #include <windows.h>
 
@@ -9,9 +10,12 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "temp_dir.h"
 
 namespace pdft {
 namespace {
@@ -87,33 +91,107 @@ TEST(SacLoadBlocked, ExactlyThe1xSet) {
   EXPECT_FALSE(IsLoadBlockedHresult(static_cast<HRESULT>(0x00070241)));
 }
 
-TEST(SacBlockEvents, FileNamesThatCount) {
-  const std::wstring leaf = L"2.0.0.0-1a2b3c4d";
-  EXPECT_TRUE(FileNameNamesBuild(
-      L"\\Device\\HarddiskVolume3\\Program Files\\PdfThumbnails\\app\\2.0.0.0-1a2b3c4d\\"
-      L"PdfThumbnails.dll",
-      leaf));
-  EXPECT_TRUE(FileNameNamesBuild(
-      L"\\Device\\HarddiskVolume3\\Users\\a\\AppData\\Local\\Programs\\PdfThumbnails\\APP\\"
-      L"2.0.0.0-1A2B3C4D\\PdfThumbnails-pdfium.dll",
-      leaf));
-  // Another build, a longer name that starts the same, no separator after the leaf, not below
-  // an app folder.
-  EXPECT_FALSE(
-      FileNameNamesBuild(L"\\Device\\X\\PdfThumbnails\\app\\1.1.0.0-67a1323e\\a.dll", leaf));
-  EXPECT_FALSE(
-      FileNameNamesBuild(L"\\Device\\X\\PdfThumbnails\\app\\2.0.0.0-1a2b3c4dX\\a.dll", leaf));
-  EXPECT_FALSE(FileNameNamesBuild(L"\\Device\\X\\PdfThumbnails\\app\\2.0.0.0-1a2b3c4d", leaf));
-  EXPECT_FALSE(FileNameNamesBuild(L"\\Device\\X\\myapp\\2.0.0.0-1a2b3c4d\\a.dll", leaf));
-  EXPECT_FALSE(FileNameNamesBuild(L"", leaf));
-  EXPECT_FALSE(FileNameNamesBuild(L"\\app\\\\", L""));
+// The build folder of a machine-wide install, as Code Integrity names it.
+constexpr wchar_t kBuildFolder[] =
+    L"\\Device\\HarddiskVolume3\\Program Files\\PdfThumbnails\\app\\2.0.0.0-1a2b3c4d";
 
-  EXPECT_TRUE(IsBuildLeafName(leaf));
-  EXPECT_TRUE(IsBuildLeafName(L"1.1.0.0-67a1323e"));
-  for (const wchar_t* bad : {L"", L".", L"..", L"a\\b", L"a/b", L"C:", L"a*", L"a?", L"a\nb"}) {
-    EXPECT_FALSE(IsBuildLeafName(bad)) << bad;
+TEST(SacBlockEvents, FileNamesThatCount) {
+  const std::wstring folder = kBuildFolder;
+  EXPECT_TRUE(FileNameIsInFolder(folder + L"\\PdfThumbnails.dll", folder));
+  EXPECT_TRUE(FileNameIsInFolder(folder + L"\\licenses\\a.dll", folder));  // at any depth
+  EXPECT_TRUE(FileNameIsInFolder(
+      L"\\DEVICE\\HarddiskVolume3\\PROGRAM FILES\\PdfThumbnails\\APP\\2.0.0.0-1A2B3C4D\\"
+      L"PdfThumbnails-pdfium.dll",
+      folder));
+  EXPECT_TRUE(FileNameIsInFolder(folder + L"\\a.dll", folder + L"\\"));
+
+  // A folder of the same name somewhere else: another user's, on another volume, or the same
+  // path further down.
+  EXPECT_FALSE(FileNameIsInFolder(
+      L"\\Device\\HarddiskVolume3\\Users\\someone\\app\\2.0.0.0-1a2b3c4d\\PdfThumbnails.dll",
+      folder));
+  EXPECT_FALSE(FileNameIsInFolder(
+      L"\\Device\\HarddiskVolume4\\Program Files\\PdfThumbnails\\app\\2.0.0.0-1a2b3c4d\\a.dll",
+      folder));
+  EXPECT_FALSE(FileNameIsInFolder(
+      L"\\Device\\HarddiskVolume3\\x\\Program Files\\PdfThumbnails\\app\\2.0.0.0-1a2b3c4d\\a.dll",
+      folder));
+  // Another build, a longer name that starts the same, the folder itself, nothing after the
+  // separator.
+  EXPECT_FALSE(FileNameIsInFolder(
+      L"\\Device\\HarddiskVolume3\\Program Files\\PdfThumbnails\\app\\1.1.0.0-67a1323e\\a.dll",
+      folder));
+  EXPECT_FALSE(FileNameIsInFolder(folder + L"X\\a.dll", folder));
+  EXPECT_FALSE(FileNameIsInFolder(folder, folder));
+  EXPECT_FALSE(FileNameIsInFolder(folder + L"\\", folder));
+  EXPECT_FALSE(FileNameIsInFolder(L"", folder));
+  // No folder matches nothing, not everything.
+  EXPECT_FALSE(FileNameIsInFolder(folder + L"\\a.dll", L""));
+  EXPECT_FALSE(FileNameIsInFolder(folder + L"\\a.dll", L"\\"));
+}
+
+TEST(SacBlockEvents, EventsThatCount) {
+  const std::wstring folder = kBuildFolder;
+  // An event under the build folder counts.
+  EXPECT_TRUE(EventCountsAsBlock(S_OK, folder + L"\\PdfThumbnails.dll", folder));
+  // One under another "\app\<the same name>\" does not.
+  EXPECT_FALSE(EventCountsAsBlock(
+      S_OK, L"\\Device\\HarddiskVolume3\\Users\\someone\\app\\2.0.0.0-1a2b3c4d\\a.dll", folder));
+  // One that could not be rendered is skipped, whatever the name it was given.
+  EXPECT_FALSE(EventCountsAsBlock(Win32(ERROR_INSUFFICIENT_BUFFER), folder + L"\\PdfThumbnails.dll",
+                                  folder));
+  EXPECT_FALSE(EventCountsAsBlock(Win32(ERROR_INVALID_DATA), L"", folder));
+}
+
+TEST(SacBlockEvents, ALogNoEventOfWhichRendersIsUnreadable) {
+  // An empty log, and one where a single odd event was passed over: read.
+  EXPECT_EQ(RenderOutcome(0, 0, S_OK), S_OK);
+  EXPECT_EQ(RenderOutcome(5, 1, Win32(ERROR_INSUFFICIENT_BUFFER)), S_OK);
+  EXPECT_EQ(RenderOutcome(5, 0, S_OK), S_OK);
+  // Events, none of which rendered: no answer, with the error when there is one.
+  EXPECT_EQ(RenderOutcome(0, 3, Win32(ERROR_NOT_ENOUGH_MEMORY)), Win32(ERROR_NOT_ENOUGH_MEMORY));
+  EXPECT_EQ(RenderOutcome(0, 3, S_OK), Win32(ERROR_INVALID_DATA));
+}
+
+TEST(SacBlockEvents, BuildFolderAsCodeIntegrityNamesIt) {
+  test::TempDir dir(L"sac");
+  ASSERT_TRUE(dir.ok());
+  const std::wstring build = dir.File(L"app\\2.0.0.0-1a2b3c4d");
+  ASSERT_TRUE(CreateDirectoryW(dir.File(L"app").c_str(), nullptr)) << GetLastError();
+  ASSERT_TRUE(CreateDirectoryW(build.c_str(), nullptr)) << GetLastError();
+  std::wstring device;
+  ASSERT_HRESULT_SUCCEEDED(DeviceFolderPath(build, &device));
+  EXPECT_TRUE(device.starts_with(L"\\Device\\")) << device;
+  EXPECT_TRUE(device.ends_with(L"\\app\\2.0.0.0-1a2b3c4d")) << device;
+  EXPECT_TRUE(FileNameIsInFolder(device + L"\\PdfThumbnails.dll", device));
+
+  // A trailing separator, and a junction that leads to the folder, give the same path.
+  std::wstring again;
+  ASSERT_HRESULT_SUCCEEDED(DeviceFolderPath(build + L"\\", &again));
+  EXPECT_EQ(again, device);
+  ASSERT_TRUE(CreateDirectoryW(dir.File(L"link").c_str(), nullptr)) << GetLastError();
+  ASSERT_TRUE(test::MakeJunction(dir.File(L"link"), build)) << GetLastError();
+  ASSERT_HRESULT_SUCCEEDED(DeviceFolderPath(dir.File(L"link"), &again));
+  EXPECT_EQ(again, device);
+
+  // A missing folder, before the log is read.
+  EXPECT_EQ(DeviceFolderPath(dir.File(L"missing"), &again),
+            HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND));
+  EXPECT_TRUE(again.empty());
+  const BlockCount missing = CountCiBlocks(dir.File(L"missing"), kSacBlockDays);
+  EXPECT_FALSE(missing.readable);
+  EXPECT_EQ(missing.error, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND));
+}
+
+TEST(SacBlockEvents, OnlyDriveFoldersAreOpened) {
+  for (const wchar_t* refused :
+       {L"", L"2.0.0.0-1a2b3c4d", L"app\\2.0.0.0-1a2b3c4d", L"\\Windows", L"C:", L"C:\\",
+        L"C:Windows", L"C:\\Windows:stream", L"\\\\server\\share\\app", L"\\\\?\\C:\\Windows",
+        L"\\\\.\\pipe\\x", L"\\\\?\\GLOBALROOT\\Device\\x"}) {
+    std::wstring device = L"left over";
+    EXPECT_EQ(DeviceFolderPath(refused, &device), E_INVALIDARG) << refused;
+    EXPECT_TRUE(device.empty()) << refused;
   }
-  EXPECT_FALSE(IsBuildLeafName(std::wstring(MAX_PATH + 1, L'a')));
 }
 
 TEST(SacBlockEvents, QueryOfTheDesign) {
@@ -124,18 +202,24 @@ TEST(SacBlockEvents, QueryOfTheDesign) {
 }
 
 TEST(SacBlockEvents, BadArgumentsAreUnreadable) {
-  const BlockCount noLeaf = CountCiBlocks(L"..", kSacBlockDays);
-  EXPECT_FALSE(noLeaf.readable);
-  EXPECT_EQ(noLeaf.error, E_INVALIDARG);
-  EXPECT_FALSE(CountCiBlocks(L"2.0.0.0-1a2b3c4d", 0).readable);
-  EXPECT_FALSE(CountCiBlocks(L"2.0.0.0-1a2b3c4d", 366).readable);
+  // A build folder's name alone (what 1.x matched) is not a folder.
+  const BlockCount nameOnly = CountCiBlocks(L"2.0.0.0-1a2b3c4d", kSacBlockDays);
+  EXPECT_FALSE(nameOnly.readable);
+  EXPECT_EQ(nameOnly.error, E_INVALIDARG);
+  const std::filesystem::path folder = L"C:\\Program Files\\PdfThumbnails\\app\\2.0.0.0-1a2b3c4d";
+  for (const int days : {0, 366}) {
+    const BlockCount count = CountCiBlocks(folder, days);
+    EXPECT_FALSE(count.readable) << days;
+    EXPECT_EQ(count.error, E_INVALIDARG) << days;
+  }
 }
 
 TEST(SacCounting, WhenToCount) {
   // On, a class, and the test failed or did not run.
   EXPECT_TRUE(ShouldCountBlocks(SacState::kOn, true, std::nullopt));
   EXPECT_TRUE(ShouldCountBlocks(SacState::kOn, true, E_FAIL));
-  // A passing test settles it; no class means no build folder; other states never count.
+  // A passing test settles it; no class, or a class whose DLL is gone, means no build folder to
+  // look for; other states never count.
   EXPECT_FALSE(ShouldCountBlocks(SacState::kOn, true, S_OK));
   EXPECT_FALSE(ShouldCountBlocks(SacState::kOn, false, E_FAIL));
   for (const SacState state :

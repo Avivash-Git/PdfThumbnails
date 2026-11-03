@@ -10,7 +10,9 @@
 #include "project_config.h"
 #include "registration.h"
 #include "settings.h"
+#include "status_format.h"
 #include "strings.h"
+#include "tasks.h"
 #include "zoom.h"
 
 namespace pdft {
@@ -538,7 +540,13 @@ HRESULT MigrateV1User(const RegistryRoots& roots, const SystemProbes& probes,
           hr = probes.ApplyTaskOptions(snapshot.taskLocation, TaskOptions{}, *program,
                                        snapshot.context);
           result->taskRegistered = SUCCEEDED(hr);
-          if (FAILED(hr)) failed(L"task", hr);
+          if (hr == kTaskTakenHr) {
+            // Only an administrator can free the names: the line says so, and which tasks.
+            result->failures.push_back(L"task: " + TaskTakenText() + L" (" + HResultText(hr) +
+                                       L"). " + TaskTakenHint(snapshot.taskLocation));
+          } else if (FAILED(hr)) {
+            failed(L"task", hr);
+          }
           // 1.x's task goes either way: its script is about to go too, and it must not repair
           // against this version.
           mayDelete = true;
@@ -681,14 +689,20 @@ CATCH_RETURN();
 
 namespace {
 
-// The machine-wide class's DLL as roots.machine has it, and whether that build is complete.
+// The machine-wide class's DLL as roots.machine stores it, and whether that build is complete.
+// A path stored to be expanded (REG_EXPAND_SZ) is never expanded here: these steps run elevated,
+// with the user's environment, which the user's own programs can change. Such a class is foreign
+// (*foreign): which build it loads is not known, so no build folder may go.
 HRESULT MachineClassDll(const RegistryRoots& roots, std::optional<std::wstring>* dll,
-                        bool* complete) {
+                        bool* complete, bool* foreign) {
   dll->reset();
   *complete = false;
+  *foreign = false;
   std::optional<ClassReg> reg;
-  RETURN_IF_FAILED(ReadClass(roots, Scope::kMachine, &reg));
-  if (reg && !reg->dll.empty()) {
+  RETURN_IF_FAILED(ReadClass(roots, Scope::kMachine, &reg, ClassPathExpansion::kNever));
+  if (reg && reg->dllExpandable) {
+    *foreign = true;
+  } else if (reg && !reg->dll.empty()) {
     *dll = reg->dll;
     *complete = reg->dllExists && reg->pdfiumExists;
   }
@@ -703,7 +717,8 @@ HRESULT MigrateV1Machine(const RegistryRoots& roots, const std::filesystem::path
   *result = {};
   std::optional<std::wstring> dll;
   bool complete = false;
-  RETURN_IF_FAILED(MachineClassDll(roots, &dll, &complete));
+  RETURN_IF_FAILED(MachineClassDll(roots, &dll, &complete, &result->classForeign));
+  if (result->classForeign) return S_OK;  // every 1.x build stays
   result->classInV1 = dll && IsInV1BuildFolder(*dll, legacyMachineRoot);
   std::vector<FolderEntry> app;
   if (SUCCEEDED(CheckRealFolder(legacyMachineRoot))) {
@@ -720,7 +735,8 @@ HRESULT RemoveOldMachineBuilds(const RegistryRoots& roots, const std::filesystem
   *result = {};
   std::optional<std::wstring> dll;
   bool complete = false;
-  RETURN_IF_FAILED(MachineClassDll(roots, &dll, &complete));
+  RETURN_IF_FAILED(MachineClassDll(roots, &dll, &complete, &result->classForeign));
+  if (result->classForeign) return S_OK;  // every build stays
   std::vector<FolderEntry> app;
   if (SUCCEEDED(CheckRealFolder(machineRoot))) {
     RETURN_IF_FAILED(ListFolderEntries(machineRoot / kBuildsFolderName, &app));
@@ -736,8 +752,9 @@ HRESULT MachineV1RemovalNeeded(const RegistryRoots& roots,
   *needed = false;
   std::optional<std::wstring> dll;
   bool complete = false;
-  RETURN_IF_FAILED(MachineClassDll(roots, &dll, &complete));
-  if (FAILED(CheckRealFolder(legacyMachineRoot))) return S_OK;
+  bool foreign = false;
+  RETURN_IF_FAILED(MachineClassDll(roots, &dll, &complete, &foreign));
+  if (foreign || FAILED(CheckRealFolder(legacyMachineRoot))) return S_OK;
   std::vector<FolderEntry> app;
   RETURN_IF_FAILED(ListFolderEntries(legacyMachineRoot / kBuildsFolderName, &app));
   *needed = !PlanMachineV1Removal(app, legacyMachineRoot, dll).remove.empty();

@@ -1,13 +1,17 @@
 // Running test code at Medium integrity.
 //
-// The handler refuses to render above Medium (as in 1.1), and CI jobs run as an administrator
-// at High integrity. The handler tests therefore relaunch themselves at Medium with a copy of
-// their own token whose integrity label is lowered (DuplicateTokenEx + SetTokenInformation +
-// CreateProcessAsUserW: no privilege needed, the shipped DLL gets no bypass).
+// The handler refuses to render above Medium (as in 1.1) and wherever the Administrators group is
+// enabled, and CI jobs run as an administrator at High integrity. The handler tests therefore
+// relaunch themselves as a standard user: a *filtered* copy of their own token (Administrators
+// deny-only, no privileges) whose integrity label is lowered to Medium (CreateRestrictedToken +
+// SetTokenInformation + CreateProcessAsUserW: no privilege needed, the shipped DLL gets no
+// bypass). A copy with only the label lowered keeps Administrators enabled, and the handler
+// refuses it. (On CI, whose account is the built-in Administrator, the filtered token still
+// counts as elevated by TokenElevation; the handler does not go by that.)
 //
-// pdft-run-medium runs any command that way, by default with a *filtered* token (Administrators
-// deny-only, no privileges), so a child that writes machine state fails like a standard user's
-// process would, also where UAC is on but the job token is a full administrator token.
+// pdft-run-medium runs any command at Medium, by default with the same filtered token, so a child
+// that writes machine state fails like a standard user's process would, also where UAC is on but
+// the job token is a full administrator token.
 
 #pragma once
 
@@ -30,6 +34,8 @@ DWORD CurrentIntegrityRid();
 // True when |token| (opened with TOKEN_QUERY | TOKEN_DUPLICATE) has the Administrators group
 // enabled (not deny-only). False when it cannot tell.
 bool TokenHasEnabledAdministrators(HANDLE token);
+// The same for this process's token.
+bool CurrentTokenHasEnabledAdministrators();
 // Prints this process's integrity level, whether Administrators is enabled, the elevation type,
 // whether the token counts as elevated (TokenElevation), and the token's owner and default DACL
 // as SDDL; returns 0 when it runs at Medium without Administrators enabled, else 3.
@@ -41,8 +47,9 @@ int ReportOwnToken();
 bool IsApplicationControlBlock(HRESULT hr);
 
 enum class MediumToken {
-  kLabelOnly,  // the same token with the Medium label (what the handler tests use)
+  kLabelOnly,  // the same token with the Medium label; Administrators stays as it was
   kFiltered,   // also Administrators deny-only and every privilege but SeChangeNotify removed
+               // (what the handler tests use)
 };
 
 // A primary token like |source| at Medium integrity. |source| needs TOKEN_QUERY,
@@ -65,16 +72,18 @@ HRESULT RunWithToken(HANDLE token, const std::wstring& application, const std::w
 std::wstring QuoteArgument(const std::wstring& argument);
 
 enum class RelaunchDecision {
-  kRunHere,   // at or below Medium: nothing to do
-  kRelaunch,  // above Medium: run again at Medium
-  kRefuse,    // above Medium although already relaunched: stop (no relaunch loop)
+  kRunHere,   // at or below Medium without Administrators enabled: nothing to do
+  kRelaunch,  // above Medium or Administrators enabled: run again as a standard user at Medium
+  kRefuse,    // still so although already relaunched: stop (no relaunch loop)
 };
-RelaunchDecision DecideRelaunch(DWORD integrityRid, bool alreadyRelaunched);
+RelaunchDecision DecideRelaunch(DWORD integrityRid, bool administratorsEnabled,
+                                bool alreadyRelaunched);
 
-// For test mains (call first). Above Medium, runs this program again with the same command
-// line at Medium (label-only token, kRelaunchedEnv=1), sets |exitCode| to its exit code and
-// returns true: the caller returns that code. Otherwise returns false and the caller runs its
-// tests here; a relaunched child prints "relaunched at Medium integrity" first.
+// For test mains (call first). Where the handler would refuse to render (above Medium, or the
+// Administrators group enabled), runs this program again with the same command line as a
+// standard user at Medium (filtered token, kRelaunchedEnv=1), sets |exitCode| to its exit code
+// and returns true: the caller returns that code. Otherwise returns false and the caller runs
+// its tests here; a relaunched child prints "relaunched at Medium integrity" first.
 bool RelaunchAtMediumIfElevated(int* exitCode);
 
 }  // namespace pdft::test

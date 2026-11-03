@@ -48,6 +48,10 @@ class Sha256Stream {
 [[nodiscard]] HRESULT Sha256Bytes(std::span<const BYTE> bytes, Sha256Digest* digest) noexcept;
 [[nodiscard]] HRESULT Sha256File(const std::filesystem::path& file, Sha256Digest* digest) noexcept;
 
+// SHA-256 of the whole contents of the open file |file| (a file held open, so that what is
+// hashed is what is copied next), read from its start; the file pointer is left at its end.
+[[nodiscard]] HRESULT Sha256OpenFile(HANDLE file, Sha256Digest* digest) noexcept;
+
 // The text the build id hashes: the two digests in upper-case hex, DLL first (pure; 128
 // characters). May throw std::bad_alloc.
 std::string BuildIdHashInput(std::span<const BYTE, kSha256Bytes> dll,

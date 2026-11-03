@@ -37,22 +37,36 @@ inline constexpr wchar_t kApartmentThreading[] = L"Apartment";
 std::wstring ClassKeyPath();
 
 struct ClassReg {
-  std::wstring name;          // the class key's default value; empty when it has none
-  std::wstring dll;           // InprocServer32's default value (REG_EXPAND_SZ expanded); empty when
-                              // that value is not a string
-  std::wstring threading;     // ThreadingModel; empty when missing
-  bool dllExists = false;     // |dll| is an absolute path to a file
-  bool pdfiumExists = false;  // and the PDFium DLL is next to it
+  std::wstring name;                // the class key's default value; empty when it has none
+  std::wstring dll;                 // InprocServer32's default value (REG_EXPAND_SZ expanded, see
+                                    // dllExpandable); empty when that value is not a string
+  std::wstring threading;           // ThreadingModel; empty when missing
+  bool dllExists = false;           // |dll| is an absolute path to a file
+  bool pdfiumExists = false;        // and the PDFium DLL is next to it
   std::optional<USHORT> peMachine;  // the DLL's PE machine, when it could be read
   std::wstring fileVersion;         // its FileVersion, when it could be read
+  // InprocServer32's default value is REG_EXPAND_SZ: |dll| is that value expanded, or as stored
+  // when ReadClass was told not to expand it.
+  bool dllExpandable = false;
+};
+
+// How ReadClass reads a DLL path stored as REG_EXPAND_SZ.
+enum class ClassPathExpansion {
+  // With this process's environment, as the process that loads the class does with its own.
+  kExpand,
+  // Never: the path stays as stored, and no file is looked at for it (dllExists false). For the
+  // elevated steps, whose environment is the user's: the user's own programs can change it, and
+  // must not choose which folder such a step acts on. They treat such a class as foreign.
+  kNever,
 };
 
 // The class registered in |scope| (kUser: roots.user, kMachine: roots.machine), or std::nullopt
 // when InprocServer32 has no default value, as 1.x decided. A default value of the wrong type
 // counts as registered but broken (dll empty, dllExists false). Reads the DLL's headers and
 // version without loading it (pe_info.h).
-[[nodiscard]] HRESULT ReadClass(const RegistryRoots& roots, Scope scope,
-                                std::optional<ClassReg>* reg) noexcept;
+[[nodiscard]] HRESULT ReadClass(
+    const RegistryRoots& roots, Scope scope, std::optional<ClassReg>* reg,
+    ClassPathExpansion expansion = ClassPathExpansion::kExpand) noexcept;
 
 // Registers the class per user, exactly as 1.x did: the class name, the DLL path |dll| (absolute,
 // REG_SZ) and ThreadingModel=Apartment. Only Scope::kUser: the machine-wide class is written by
@@ -73,7 +87,9 @@ bool IsMachineClassPath(const std::filesystem::path& machineRoot,
 // The machine-wide class, written only by the elevated steps, which compute |dll| from the files
 // they put under |machineRoot| and never take it from anyone else: it must pass
 // IsMachineClassPath, and the DLL and PDFium next to it must be files (E_INVALIDARG otherwise).
-// Written like WriteClass, under roots.machine.
+// Written like WriteClass, under roots.machine, into a fresh key: the class key found there is
+// deleted first with everything in it (DeleteRegistryTree, whose failures this returns), so no
+// value or subkey another tool left there (TreatAs, LocalServer32, ...) stays with the class.
 [[nodiscard]] HRESULT WriteMachineClass(const RegistryRoots& roots,
                                         const std::filesystem::path& machineRoot,
                                         const std::filesystem::path& dll) noexcept;
@@ -134,7 +150,9 @@ inline constexpr const wchar_t* kSlotParentKeys[] = {
 
 // Deletes each per-user slot key that names the handler (a slot naming something else stays),
 // then each of kSlotParentKeys that is left without subkeys and values, in that order. A key
-// holding only a default value is not empty. |removed| (optional) says which slots went.
+// holding only a default value is not empty. |removed| (optional) says which slots went. A slot
+// key DeleteRegistryTree leaves (kRegistryTreeLeftHr: a link, or a tree past its bounds) does not
+// stop the others: the clean-up goes on, and that code is returned at the end.
 [[nodiscard]] HRESULT RemoveSlotsIfOurs(const RegistryRoots& roots,
                                         std::array<bool, kSlotCount>* removed = nullptr) noexcept;
 
@@ -147,7 +165,8 @@ struct ClassesHiveRemoval {
 // The same clean-up in a user's classes hive loaded on its own (HKEY_USERS\<SID>_Classes, whose
 // keys have no "Software\Classes" in front): each slot key that names the handler (one naming
 // something else stays), the parent keys left empty, in RemoveSlotsIfOurs' order, and the
-// handler's class key.
+// handler's class key. Like RemoveSlotsIfOurs, a key left goes on to the end and returns
+// kRegistryTreeLeftHr.
 [[nodiscard]] HRESULT RemoveFromClassesHive(HKEY classes, ClassesHiveRemoval* removal) noexcept;
 
 // "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}" with hex digits of either case (pure). Values read

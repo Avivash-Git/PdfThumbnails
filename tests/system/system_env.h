@@ -21,7 +21,9 @@ namespace pdft::systest {
 inline constexpr wchar_t kEnableEnv[] = L"PDFT_SYSTEM_TESTS";
 // The staged runtime they install from (cmake --install <build> --prefix <folder> --component
 // runtime): copied into a private folder first, which only the test account, this account,
-// SYSTEM and Administrators can change.
+// SYSTEM and Administrators can change. The copy is made with administrator rights, so the
+// folder must be on a local drive, with no link, junction or mount point on the way to it or in
+// it (the tests refuse it otherwise), and nobody but administrators should be able to change it.
 inline constexpr wchar_t kRuntimeEnv[] = L"PDFT_SYSTEM_RUNTIME";
 // The folder with 1.x's shipped files the migration tests plant; empty: system-fixture next to
 // this program (the build copies them there, and the test bundle carries them).

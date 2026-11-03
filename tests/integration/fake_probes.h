@@ -67,8 +67,9 @@ class FakeProbes final : public SystemProbes {
     *reading = sac;
     return S_OK;
   }
-  BlockCount CountCiBlocks(std::wstring_view leaf, int days) const noexcept override {
-    countedLeaf = leaf;
+  BlockCount CountCiBlocks(const std::filesystem::path& buildFolder,
+                           int days) const noexcept override {
+    countedFolder = buildFolder;
     countedDays = days;
     const size_t call = countCalls++;
     return call < counts.size() ? counts[call] : BlockCount{true, 0, S_OK};
@@ -163,7 +164,7 @@ class FakeProbes final : public SystemProbes {
   bool endWorks = true;  // EndHolder succeeds
 
   mutable size_t countCalls = 0;
-  mutable std::wstring countedLeaf;
+  mutable std::filesystem::path countedFolder;
   mutable int countedDays = 0;
   mutable int liveRuns = 0;
   mutable UINT liveSize = 0;

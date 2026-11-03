@@ -10,6 +10,15 @@ namespace {
 constexpr std::wstring_view kRed = L"\x1b[31m";
 constexpr std::wstring_view kReset = L"\x1b[0m";
 
+// U+FFFD, the replacement character: shown where DisplayText takes a control character out.
+constexpr wchar_t kReplacement = L'\xFFFD';
+
+// A character a console acts on instead of showing it, TAB and the line ends aside.
+bool IsHiddenControl(wchar_t c) noexcept {
+  return (c < L' ' && c != L'\t') || (c >= 0x7F && c <= 0x9F) || (c >= 0x202A && c <= 0x202E) ||
+         (c >= 0x2066 && c <= 0x2069);
+}
+
 // NO_COLOR set to anything but an empty string (https://no-color.org).
 bool NoColorSet() noexcept {
   wchar_t value[2] = {};
@@ -49,6 +58,17 @@ std::wstring Red(std::wstring_view text) {
   std::wstring result(kRed);
   result += text;
   result += kReset;
+  return result;
+}
+
+std::wstring DisplayText(std::wstring_view text) {
+  std::wstring result(text);
+  for (size_t i = 0; i < result.size(); ++i) {
+    // The line ends WithCrLf turns into CR LF; a "\r" on its own would go back over the line.
+    const bool lineEnd = result[i] == L'\n' ||
+                         (result[i] == L'\r' && i + 1 < result.size() && result[i + 1] == L'\n');
+    if (!lineEnd && IsHiddenControl(result[i])) result[i] = kReplacement;
+  }
   return result;
 }
 
@@ -117,17 +137,19 @@ void Output::AttachParentConsole() noexcept {
   }
 }
 
-void Output::Write(Stream& stream, std::wstring_view text, bool error) noexcept {
+void Output::Write(Stream& stream, std::wstring_view text, bool error, bool asGiven) noexcept {
   if (attachPending_) AttachParentConsole();
   if (!stream.handle) return;
   try {
+    // Filtered before the colour is added, so that the colour's own escape sequences stay.
+    const std::wstring shown = asGiven ? std::wstring(text) : DisplayText(text);
     DWORD written = 0;
     if (stream.console) {
-      const std::wstring line = WithCrLf(error && stream.color ? Red(text) : std::wstring(text));
+      const std::wstring line = WithCrLf(error && stream.color ? Red(shown) : shown);
       if (line.size() > INT_MAX) return;
       WriteConsoleW(stream.handle, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
     } else {
-      const std::string bytes = EncodeLine(text);
+      const std::string bytes = EncodeLine(shown);
       if (bytes.size() > INT_MAX) return;
       WriteFile(stream.handle, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
     }
@@ -136,8 +158,10 @@ void Output::Write(Stream& stream, std::wstring_view text, bool error) noexcept 
   }
 }
 
-void Output::Line(std::wstring_view text) noexcept { Write(out_, text, false); }
+void Output::Line(std::wstring_view text) noexcept { Write(out_, text, false, false); }
 
-void Output::Error(std::wstring_view text) noexcept { Write(err_, text, true); }
+void Output::Error(std::wstring_view text) noexcept { Write(err_, text, true, false); }
+
+void Output::Json(std::wstring_view text) noexcept { Write(out_, text, false, true); }
 
 }  // namespace pdft

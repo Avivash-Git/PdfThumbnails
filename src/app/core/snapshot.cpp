@@ -357,13 +357,13 @@ HRESULT GatherSnapshot(const RegistryRoots& roots, const GatherOptions& options,
   const std::optional<HRESULT> probe =
       s.live ? std::optional<HRESULT>(s.live->hr) : std::optional<HRESULT>();
   const ClassReg* active = s.ActiveClass();
-  if (ShouldCountBlocks(s.sac.state, active != nullptr, probe)) {
-    const std::wstring leaf = std::filesystem::path(active->dll).parent_path().filename().native();
-    s.blocks = probes.CountCiBlocks(leaf, kSacBlockDays);
+  if (ShouldCountBlocks(s.sac.state, active != nullptr && active->dllExists, probe)) {
+    const std::filesystem::path buildFolder = std::filesystem::path(active->dll).parent_path();
+    s.blocks = probes.CountCiBlocks(buildFolder, kSacBlockDays);
     if (ShouldRecountBlocks(probe, *s.blocks)) {
       // A block the Explorer test itself caused reaches the log within about a second.
       probes.Wait(kSacRecountDelayMs);
-      s.blocks = probes.CountCiBlocks(leaf, kSacBlockDays);
+      s.blocks = probes.CountCiBlocks(buildFolder, kSacBlockDays);
     }
   }
   s.sacVerdict = DecideSac(s.sac.state, probe, s.blocks);
