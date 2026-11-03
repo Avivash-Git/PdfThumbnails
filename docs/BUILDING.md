@@ -74,23 +74,26 @@ without refreshing thumbnails), which a later build adds:
 | `--uninstall [--yes]` | removes the install for all users (through UAC) and this user's part: registration, check task, settings, files; with an installer's record, runs that installer's uninstaller instead (`/SILENT` with `--yes`) |
 | `--migrate-v1 [--user-only \| --machine-only]` | removes what 1.x left, once 2.0 is installed (exit 6 otherwise, and 1.x stays usable): only 1.x's own files, recognized by their contents, its task, settings file and sign-in clean-up; its build folders for all users through UAC |
 | `--zoom [<100-200>] [--no-refresh]` | shows the zoom and where it comes from, or saves a new one for this user |
-| `--setup-user`, `--setup-machine`, `--uninstall-cleanup` | the steps an installer runs: per user (quiet, refuses an administrator process), for all users (must already run as administrator; exit 8 below an app package where its test writes do not reach Windows, see below), and the clean-up before an uninstall (always exit 0; what it left out goes to its error output) |
+| `--setup-user`, `--setup-machine`, `--uninstall-cleanup` | the steps an installer runs: per user (quiet, refuses an administrator process), for all users (must already run as administrator; exit 8 below an app package where its test writes do not reach Windows, see below), and the clean-up before an uninstall (always exit 0; unelevated, it leaves out the part for all users without saying so; anything else it left out goes to its error output) |
 
 A command that would change settings first checks where it runs: it writes a test value into
 your registry and reads it back through WMI. Where the value does not come back (a terminal whose
 programs get a private copy of the registry, as inside some packaged apps), it refuses with exit
 code 8 before it changes anything or asks for administrator rights, because its changes would not
-reach Windows. A step for all users (the administrator step of `--install`, `--fix`,
-`--migrate-v1` and `--uninstall`, and `--setup-machine` and `--uninstall-cleanup`) that finds an
-app package above it, or cannot read the processes above it, makes the same test itself before it
-changes anything: under `HKEY_LOCAL_MACHINE\Software\Classes` and in its own user's registry.
-Where either value does not come back, it changes nothing and the command exits 8
-(`--uninstall-cleanup` leaves out the part for all users, says so on its error output and exits
-0). The commands that change the signed-in user's own settings and files (`--check`, `--fix`,
-`--checks`, `--zoom <n>`, `--install`, `--uninstall`, `--migrate-v1`, `--setup-user`) also
-refuse with exit code 8 from an administrator prompt; the install, the uninstall, `--fix` and
-`--migrate-v1` ask for administrator rights themselves when they need them. `pdft-run-outside`
-(below) runs a program outside such a terminal.
+reach Windows. Two of the installer's steps differ: `--setup-machine` does not change your
+registry and makes only the test below, and `--uninstall-cleanup` makes this test only for the
+part for this account, after the part for all users, and leaves that part out where the value
+does not come back (it says so on its error output and exits 0). A step for all users (the
+administrator step of `--install`, `--fix`, `--migrate-v1` and `--uninstall`, and
+`--setup-machine` and `--uninstall-cleanup`) that finds an app package above it, or cannot read
+the processes above it, makes the same test itself before it changes anything: under
+`HKEY_LOCAL_MACHINE\Software\Classes` and in its own user's registry. Where either value does not
+come back, it changes nothing and the command exits 8 (`--uninstall-cleanup` leaves out the part
+for all users, says so on its error output and exits 0). The commands that change the signed-in
+user's own settings and files (`--check`, `--fix`, `--checks`, `--zoom <n>`, `--install`,
+`--uninstall`, `--migrate-v1`, `--setup-user`) also refuse with exit code 8 from an administrator
+prompt; the install, the uninstall, `--fix` and `--migrate-v1` ask for administrator rights
+themselves when they need them. `pdft-run-outside` (below) runs a program outside such a terminal.
 
 ### Presets
 
@@ -382,11 +385,11 @@ when there is no 2.0 value), the `.pdf` slots, the check task (both triggers by 
 Explorer test (one thumbnail made in a fresh thumbnail process, the way File Explorer makes it),
 and exits 0 when it is healthy and that test passed. It exits 1 when it is installed but
 something is wrong; when the test could not run (the status then ends "Result: no problem found,
-but not confirmed", and `--status` runs the test again); or when a part of the step for all
-users after the class did not complete (the task folder, queuing a file that was in use for
-deletion at the restart, removing 1.x's or the older build folders) or its report did not come
-back (unless another process had taken the name of its report channel, which the output then
-says). Such a part does not undo the install: it is printed as
+but not confirmed (the Explorer test did not run)", and `--status` runs the test again); or when
+a part of the step for all users after the class did not complete (the task folder, queuing a
+file that was in use for deletion at the restart, removing 1.x's or the older build folders) or
+its report did not come back (unless another process had taken the name of its report channel,
+which the output then says). Such a part does not undo the install: it is printed as
 `Not done: machine-install <part>: <error code>` after the step's report. The log line
 `install ... result=<result> live=<HRESULT> live-ms=<ms>` (or `live=could-not-start
 live-hr=<HRESULT>`, or `live=skipped live-skip=<reason>`) in
@@ -427,20 +430,23 @@ elevated step judges the folder for the account it runs as: approving the prompt
 administrator's password (from a standard account) therefore refuses a build folder in the
 standard account's profile.
 
-`--uninstall --yes` removes it again (the part for all users through UAC; files still in use
-wait for the restart). A part for all users that fails is printed as
-`Not done: machine <part>: <error code>` and the command exits 5 (as one line,
-`Not done: machine: <error code>`, when the settings executable installed for all users comes
-from an older build). `--migrate-v1` cleans up what 1.x left where 2.0 is already installed;
-`--install` does the same by itself.
+`--uninstall --yes` removes it again. For an install for all users, the part for all users is
+removed through UAC by the `PdfThumbnailsSettings.exe` installed in
+`C:\Program Files\PdfThumbnails` (not the staged one); its files still in use, that running
+executable among them, wait in a trash folder until the next restart. A part for all users that
+fails is printed as `Not done: machine <part>: <error code>` and the command exits 5. When that
+installed executable comes from an older build, its failures are one line,
+`Not done: machine: <error code>` with the first one's code (`machine left: 0x800402F0` when that
+code means registry keys left as they were). `--migrate-v1` cleans up what 1.x left where 2.0 is
+already installed; `--install` does the same by itself.
 
 ### Manual check: replacing 1.1 on your own PC
 
 The system tests prove the migration on CI. On a PC that has 1.1 installed (the maintainer's),
 the first `--install --machine` replaces it for real, so back up 1.1's state first:
 
-1. From a normal prompt (`<GUID>` is `{0C3534C4-5B7A-48AB-828D-1CD660DC447F}`; `reg export` of
-   HKLM works unelevated):
+1. From a normal `cmd` prompt (the commands in this section are `cmd` syntax, not PowerShell;
+   `<GUID>` is `{0C3534C4-5B7A-48AB-828D-1CD660DC447F}`; `reg export` of HKLM works unelevated):
 
    ```bat
    mkdir "%USERPROFILE%\pdft-backup"
@@ -453,18 +459,54 @@ the first `--install --machine` replaces it for real, so back up 1.1's state fir
 2. Build and stage `x64-release` as above, then run
    `out\stage\runtime\PdfThumbnailsCli.exe --install --machine` from a normal prompt. A terminal
    whose registry is virtualized refuses it with exit code 8 before the UAC prompt; from there,
-   run it through `pdft-run-outside -- "%CD%\out\stage\runtime\PdfThumbnailsCli.exe" --install --machine`.
-3. Expect one UAC prompt and exit 0 (the log line
-   `install ... result=healthy live=0x00000000 live-ms=<n>` shows that the Explorer test passed),
-   and then `PdfThumbnailsCli --status`: healthy, your 1.1
-   zoom kept (origin "saved setting"), the check task `\PdfThumbnails\Check <SID>` with both
-   triggers, no `PdfThumbnails auto-repair` task, 1.1's build folder under
-   `C:\Program Files\PdfThumbnails\app` gone (or in a trash folder until the restart), and in
-   `%LOCALAPPDATA%\Programs\PdfThumbnails` none of 1.1's files.
-4. To go back, from a normal prompt in the clone:
+   run it through `pdft-run-outside` with a longer time limit (its default, 120 s, can stop it
+   while the prompt waits):
 
    ```bat
+   out\build\x64-release\bin\pdft-run-outside.exe --timeout 600 -- "%CD%\out\stage\runtime\PdfThumbnailsCli.exe" --install --machine
+   ```
+
+3. Expect one UAC prompt and exit 0 (the log line
+   `install ... result=healthy live=0x00000000 live-ms=<n>` shows that the Explorer test passed),
+   and then `PdfThumbnailsCli --status`: healthy, your 1.1 zoom kept (the Zoom line ends in
+   "(registry)"; `--zoom` calls the same value "saved setting"), the check task
+   `\PdfThumbnails\Check <SID>` with both triggers, no `PdfThumbnails auto-repair` task, 1.1's
+   build folder under `C:\Program Files\PdfThumbnails\app` gone (or in a trash folder until the
+   restart), and in `%LOCALAPPDATA%\Programs\PdfThumbnails` none of 1.1's files.
+4. To go back, from a normal `cmd` prompt in the clone (in a terminal whose registry is
+   virtualized, `--uninstall` refuses with exit code 8 before it removes anything), first save
+   2.0's log, which `--uninstall` deletes, then uninstall 2.0:
+
+   ```bat
+   copy "%LOCALAPPDATA%\PdfThumbnails\Logs\PdfThumbnails.log*" "%USERPROFILE%\pdft-backup\"
    out\stage\runtime\PdfThumbnailsCli.exe --uninstall --yes
+   ```
+
+   It removes your part first (the `.pdf` slots, the check task, the zoom), then asks for
+   administrator rights once, for the `PdfThumbnailsSettings.exe` installed in
+   `C:\Program Files\PdfThumbnails` (not the staged one), which removes the part for all users.
+   That executable runs from the folder it removes, so it ends up in a trash folder next to that
+   folder (`C:\Program Files\PdfThumbnails.trash-` and 32 hex digits), which Windows deletes at
+   the next restart. Last, it deletes `%LOCALAPPDATA%\PdfThumbnails`, the log and its own log
+   lines included, so its output is the only record of the run. Expect exit 0 and these two
+   lines:
+
+   ```
+   Removed the part for all users; files that were in use are deleted at the next restart.
+   PdfThumbnails removed. PDF files show their app icon again.
+   ```
+
+   If it prints `PDF thumbnails are off for you, but the part for all users is still installed.`
+   (exit 1, 5, 7 or 8) or a `Not done:` line instead, stop: 2.0 is not fully removed. Deal with
+   what the output says (a declined prompt, for example) and run `--uninstall --yes` again until
+   it exits 0 with `PdfThumbnails removed. PDF files show their app icon again.` as its last line
+   (once the part for all users is gone, a rerun prints only that line). A rerun starts the step
+   for all users again only while the class for all users or `C:\Program Files\PdfThumbnails` is
+   still there, as the `PDF thumbnails are off ...` line says, so a `Not done: machine <part>`
+   line printed without that line is not retried: remove what it names by hand (the step's
+   report, indented above it, says what was left). Only then restore 1.1:
+
+   ```bat
    mkdir "%LOCALAPPDATA%\Programs\PdfThumbnails"
    copy "%USERPROFILE%\pdft-backup\settings.ini" "%LOCALAPPDATA%\Programs\PdfThumbnails\"
    PdfThumbnails.cmd install -Machine -AutoRepair
@@ -473,9 +515,16 @@ the first `--install --machine` replaces it for real, so back up 1.1's state fir
    The installed copy of 1.1's manager is gone by then (the migration removed it), so it is the
    clone's `PdfThumbnails.cmd`, which installs the build in `dist\PdfThumbnails\bin`. Restore
    `settings.ini` first: 1.1 keeps its zoom only there and writes 100 when the file is missing,
-   and `--uninstall` has removed 2.0's copy of the zoom. The install writes the class and the
+   and `--uninstall` has removed 2.0's copy of the zoom. 1.1's install asks for administrator
+   rights again (a second UAC prompt, for `powershell.exe`). The install writes the class and the
    slots again, so the `.reg` files are needed only if something still differs: the two HKCU ones
    import from a normal prompt, `clsid.reg` (an HKLM export) only from an administrator prompt.
+   1.1's `repair.log` is not restored: the migration deleted it, and step 1 does not back it up.
+
+   Once 1.1 is back, never run 2.0's `--uninstall`: 1.1 uses the same class and `.pdf` slots, so
+   it would remove 1.1's slots and its `PdfThumbnails auto-repair` task, and, while 2.0's
+   `PdfThumbnailsSettings.exe` is still in `C:\Program Files\PdfThumbnails`, 1.1's class for all
+   users and that whole folder too. Remove 1.1 with its own `PdfThumbnails.cmd uninstall`.
 
 ## Formatting
 
@@ -519,8 +568,10 @@ Details:
   `handler.refuses_elevated` and its refusal of a Medium token with Administrators enabled, and
   `gate.planting`'s elevated
   `--status --no-live-test` runs, and the line of every other test that only an elevated runner
-  runs (the protected task folder, the writing commands refused elevated, `--setup-machine` in
-  test places). The job log also shows the runner image, the UAC settings and `whoami /groups`.
+  runs (the protected task folder, the writing commands refused elevated, `--setup-machine` and
+  `--uninstall-cleanup` in test places, the registry check under
+  `HKEY_LOCAL_MACHINE\Software\Classes`). The job log also shows the runner image, the UAC
+  settings and `whoami /groups`.
 - **System tests.** `system-x64` builds nothing: it downloads the `tests-x64` bundle and the
   staged runtime and runs `ctest -L system` with `PDFT_SYSTEM_TESTS=1` (GitHub Actions sets
   `GITHUB_ACTIONS=true` and `RUNNER_ENVIRONMENT=github-hosted`, the tests' second opt-in). The
