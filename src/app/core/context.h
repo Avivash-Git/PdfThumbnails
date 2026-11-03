@@ -102,10 +102,12 @@ struct ProcessContext {
 
 // The canary, for commands that write. Creates the volatile key
 // HKCU\Software\<Product>.probe-<GUID> holding a random value, reads it back through WMI from
-// HKEY_USERS\<|userSid|>, and deletes it again on every path. Volatile keys never reach the disk,
-// so even a crash leaves nothing after the next sign-in. |failure| (optional) receives the first
-// failure behind a kUnknown verdict (creating or setting the key, connecting to WMI, reading it
-// back), else S_OK; |probeKey| (optional) the key's name under HKCU.
+// HKEY_USERS\<|userSid|>, and deletes it again on every path, through the handle it made it with
+// and never by its name: a key someone else put at that name meanwhile, a link included, stays as
+// it is. Volatile keys never reach the disk, so even a crash leaves nothing after the next
+// sign-in. |failure| (optional) receives the first failure behind a kUnknown verdict (creating or
+// setting the key, connecting to WMI, reading it back), else S_OK; |probeKey| (optional) the
+// key's name under HKCU.
 [[nodiscard]] HRESULT ProbeRegistryVirtualization(const std::wstring& userSid,
                                                   Virtualization* result,
                                                   HRESULT* failure = nullptr,
@@ -113,8 +115,9 @@ struct ProcessContext {
 
 // Like ProbeRegistryVirtualization, under HKEY_LOCAL_MACHINE: the volatile key
 // Software\Classes\<Product>.probe-<GUID> (64-bit view), read back through WMI from
-// HKEY_LOCAL_MACHINE, deleted on every path. Without administrator rights the key cannot be made:
-// kUnknown with that failure. |probeKey| (optional): the key's path under HKEY_LOCAL_MACHINE.
+// HKEY_LOCAL_MACHINE, deleted the same way on every path. Without administrator rights the key
+// cannot be made: kUnknown with that failure. |probeKey| (optional): the key's path under
+// HKEY_LOCAL_MACHINE.
 [[nodiscard]] HRESULT ProbeMachineRegistryVirtualization(Virtualization* result,
                                                          HRESULT* failure = nullptr,
                                                          std::wstring* probeKey = nullptr) noexcept;

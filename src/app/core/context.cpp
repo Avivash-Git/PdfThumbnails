@@ -14,6 +14,7 @@
 #include "paths.h"
 #include "pe_info.h"
 #include "project_config.h"
+#include "registry_roots.h"
 #include "strings.h"
 #include "wmi_registry.h"
 #include "zoom.h"
@@ -261,7 +262,8 @@ namespace {
 
 // A canary under |root| (opened in the registry view |view|): the volatile key
 // <|keyPrefix|>.probe-<GUID> holding a random value, read back through WMI from |wmiRoot| at
-// |wmiPrefix| + the key's name, and deleted again on every path (ProbeRegistryVirtualization).
+// |wmiPrefix| + the key's name, and deleted again on every path (ProbeRegistryVirtualization)
+// through the handle it was made with.
 HRESULT RunCanary(HKEY root, REGSAM view, DWORD wmiRoot, std::wstring_view wmiPrefix,
                   std::wstring_view keyPrefix, Virtualization* result, HRESULT* failure,
                   std::wstring* probeKey) noexcept try {
@@ -276,12 +278,15 @@ HRESULT RunCanary(HKEY root, REGSAM view, DWORD wmiRoot, std::wstring_view wmiPr
   if (probeKey) *probeKey = keyName;
 
   wil::unique_hkey key;
-  const LSTATUS created = RegCreateKeyExW(root, keyName.c_str(), 0, nullptr, REG_OPTION_VOLATILE,
-                                          KEY_SET_VALUE | view, nullptr, key.put(), nullptr);
-  // From here on the key goes away on every path, whatever happened.
+  const LSTATUS created =
+      RegCreateKeyExW(root, keyName.c_str(), 0, nullptr, REG_OPTION_VOLATILE,
+                      KEY_SET_VALUE | DELETE | view, nullptr, key.put(), nullptr);
+  // From here on the key goes away on every path, whatever happened. The handle stays open until
+  // then, and the key is deleted through it, never by its name: under HKCU\Software, which its
+  // user may change, the key at that name may meanwhile be another one, or a link to a key that
+  // only an administrator may delete. Such a key stays as it is.
   const auto remove = wil::scope_exit([&]() noexcept {
-    key.reset();
-    RegDeleteKeyExW(root, keyName.c_str(), view, 0);
+    if (key) (void)DeleteOpenRegistryKey(key.get());
   });
   // The first failure, kept for when the verdict is "unknown": the log is not on yet while the
   // context is read, so WIL's own reports of these failures go nowhere.
@@ -293,7 +298,6 @@ HRESULT RunCanary(HKEY root, REGSAM view, DWORD wmiRoot, std::wstring_view wmiPr
     if (set != ERROR_SUCCESS) firstFailure = FromStatus(set);
   }
   const bool probeWritten = SUCCEEDED(firstFailure);
-  key.reset();
 
   bool wmiAnswered = false;
   std::optional<std::wstring> seen;
