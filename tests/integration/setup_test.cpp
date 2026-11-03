@@ -539,6 +539,42 @@ TEST_F(Setup, MigrateV1AsksForTheMachinePartOnlyWhenNeeded) {
   EXPECT_EQ(result.code, ExitCode::kProblems);
 }
 
+// The step for all users failed after naming the part it went on after, and ended with that
+// part's HRESULT: the part is the failure, in place of that HRESULT alone. An older build's
+// report names none and leaves that one entry as it was. The step's report comes back through
+// the real pipe from this test program's child.
+TEST_F(Setup, MigrateV1ListsThePartsOfItsStepForAllUsers) {
+  InstallForAllUsers();
+  MakeBuild(paths_.machineRoot, L"1.1.0.0-67a1323e");
+  MigrateOptions options;
+  options.scope = MigrateScope::kMachineOnly;
+  options.context = probes_.context;
+  options.paths = paths_;
+  options.lockWaitMs = 5000;
+  std::wstring arguments =
+      L"report-step machine-migrate-v1 0x80070020 0 \"migrate-v1: 0x80070020\"";
+  options.launcher = [&](const ElevationRequest&, DWORD* processId, DWORD* exitCode) {
+    return test::RunSelfChild(arguments, processId, exitCode);
+  };
+  MigrateResult result;
+  ASSERT_HRESULT_SUCCEEDED(MigrateV1(options, roots_, probes_, &result));
+  EXPECT_TRUE(result.machineNeeded);
+  ASSERT_TRUE(result.run);
+  EXPECT_EQ(result.run->outcome, ElevatedOutcome::kFailed);
+  EXPECT_EQ(result.failures, std::vector<std::wstring>{L"machine migrate-v1: 0x80070020"});
+  EXPECT_EQ(result.code, ExitCode::kFailed);
+
+  arguments =
+      L"report 0x80070020 \"failed 1.1.0.0-67a1323e\" \"elevated machine-migrate-v1 end "
+      L"hr=0x80070020\"";
+  ASSERT_HRESULT_SUCCEEDED(MigrateV1(options, roots_, probes_, &result));
+  ASSERT_TRUE(result.run);
+  EXPECT_TRUE(result.run->parts.ended);
+  EXPECT_FALSE(result.run->parts.counted);
+  EXPECT_EQ(result.failures, std::vector<std::wstring>{L"machine: 0x80070020"});
+  EXPECT_EQ(result.code, ExitCode::kFailed);
+}
+
 TEST_F(Setup, MachinePartRemoves1xFoldersButTheClasses) {
   const path used = MakeBuild(paths_.machineRoot, L"1.1.0.0-67a1323e");
   const path unused = MakeBuild(paths_.machineRoot, L"1.0.0.0-0badf00d");

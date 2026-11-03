@@ -26,9 +26,10 @@
 // that is loaded (HKEY_USERS\S-1-5-21-..., and its _Classes hive), the slots that name the
 // handler, the handler's class key and the product key. Those keys are deleted without following
 // any link and within DeleteRegistryTree's bounds (registry_roots.h): a link or a tree past them
-// is left as it is and reported ("left"). Users who are not signed in keep their slots and
-// settings; a slot naming a class that is gone shows no thumbnail and hides only other handlers
-// registered for .pdf for all users.
+// is left as it is and reported ("left"). Each part that fails is reported as not done and the
+// step goes on; it exits with the first one's HRESULT. Users who are not signed in keep their
+// slots and settings; a slot naming a class that is gone shows no thumbnail and hides only other
+// handlers registered for .pdf for all users.
 //
 // --uninstall-cleanup (the installer's uninstall step): the machine-uninstall steps when it runs
 // elevated, the per-user registry part when the registry check shows that writes reach the real
@@ -153,7 +154,9 @@ struct MachineUninstallResult {
                                            MachineUninstallResult* result) noexcept;
 
 // The elevated process's step machine-uninstall, against the real registry and folders.
-[[nodiscard]] HRESULT RunMachineUninstall(ElevatedReporter& report, bool* restartPending) noexcept;
+// |notDone| receives MachineUninstallResult::failures.
+[[nodiscard]] HRESULT RunMachineUninstall(ElevatedReporter& report, bool* restartPending,
+                                          std::vector<std::wstring>* notDone) noexcept;
 
 // ---- --uninstall ----------------------------------------------------------------------------
 
@@ -202,6 +205,8 @@ struct UninstallResult {
   bool machineLeft = false;
   UserFilesRemoval files;
   bool rebuildNotAvailable = false;
+  // "<step>: <HRESULT>", and "machine <part>: <HRESULT>" for each part of the step for all users
+  // that failed
   std::vector<std::wstring> failures;
 };
 

@@ -181,6 +181,13 @@ bool IsRootOrInside(const std::filesystem::path& child, const std::filesystem::p
   return false;
 }
 
+// Queues |path| (in a trash folder) for deletion at the next restart. The first that cannot be
+// queued is kept in |result|: it stays where it is, and the step lists it as a part not done.
+void DeleteAtRestart(const std::filesystem::path& path, CopyBuildResult* result) noexcept {
+  const HRESULT hr = ScheduleDeleteAtRestart(path);
+  if (FAILED(hr) && SUCCEEDED(result->restartDelete)) result->restartDelete = hr;
+}
+
 // Copies |from| to |to|, retrying while |to| is in use. Still in use after the retry: elevated
 // with a trash parent, |to| moves into the trash folder (made once per copy, queued for deletion
 // at the next restart) and the copy is made again; otherwise the in-use error.
@@ -214,7 +221,7 @@ HRESULT CopyWithRetry(const CopySource& from, const std::filesystem::path& to,
   std::filesystem::path moved;
   RETURN_IF_FAILED(PDFT_TRACE_DETAIL(MoveIntoTrash(to, result->trash, &moved), name));
   result->restartPending = true;
-  LOG_IF_FAILED(ScheduleDeleteAtRestart(moved));
+  DeleteAtRestart(moved, result);
   RETURN_IF_FAILED(PDFT_TRACE_DETAIL(CopyFrom(from, to), name));
   ++result->copied;
   return S_OK;
@@ -417,7 +424,7 @@ HRESULT CopyBuild(const BuildSource& source, const std::filesystem::path& root,
         PDFT_TRACE_DETAIL(CopyWithRetry(from, to, options, result), relative.filename().native()));
   }
   // The trash folder goes once its files went.
-  if (!result->trash.empty()) LOG_IF_FAILED(ScheduleDeleteAtRestart(result->trash));
+  if (!result->trash.empty()) DeleteAtRestart(result->trash, result);
   return S_OK;
 }
 CATCH_RETURN();
@@ -471,6 +478,11 @@ HRESULT InstallForAllUsers(const MachineInstallOptions& options, const RegistryR
   step.Set(L"after-class");
 
   std::vector<std::wstring>& failures = result->failures;
+  // A file in use that the copy moved to a trash folder but could not queue for deletion: it
+  // stays there after the restart.
+  if (FAILED(result->copy.restartDelete)) {
+    Failed(&failures, L"restart-delete", result->copy.restartDelete);
+  }
   if (!options.taskFolder.empty()) {
     result->taskFolder = EnsureTaskFolder(options.taskFolder);
     if (FAILED(result->taskFolder)) Failed(&failures, L"task-folder", result->taskFolder);
@@ -511,8 +523,10 @@ HRESULT RepairMachineClass(const RegistryRoots& roots, const std::filesystem::pa
 }
 CATCH_RETURN();
 
-HRESULT RunMachineInstall(ElevatedReporter& report, bool* restartPending) noexcept try {
+HRESULT RunMachineInstall(ElevatedReporter& report, bool* restartPending,
+                          std::vector<std::wstring>* notDone) noexcept try {
   *restartPending = false;
+  notDone->clear();
   TraceStep step(L"own-paths");
   std::filesystem::path own;
   RETURN_IF_FAILED(PDFT_TRACE(GetOwnExe(&own)));
@@ -544,12 +558,11 @@ HRESULT RunMachineInstall(ElevatedReporter& report, bool* restartPending) noexce
     report.Line(L"class for all users -> app\\" + result.source.buildName);
   }
   if (result.copy.restartPending) report.Line(L"a program in use went to a trash folder");
-  if (FAILED(result.taskFolder)) {
-    report.Line(L"task folder failed hr=" + HResultText(result.taskFolder));
-  }
   ReportRemoval(report, result.v1);
   ReportRemoval(report, result.old);
   *restartPending = result.restartPending;
+  // Each part after the class that did not complete; EndElevatedStep reports them.
+  *notDone = result.failures;
   return hr;
 }
 CATCH_RETURN();
@@ -698,13 +711,25 @@ HRESULT InstallFromOwnFolder(const InstallOptions& options, const RegistryRoots&
                                  options.owner, options.launcher, &run));
     const std::optional<ExitCode> stop = InstallStepExitCode(run.outcome, run.failure);
     result->restartPending = run.outcome == ElevatedOutcome::kRestartPending;
+    if (stop == ExitCode::kFailed) Failed(&failures, L"machine-install", run.failure);
+    // The parts of the step that did not complete are this install's failures, also when the
+    // step as a whole is done (the install then exits 1).
+    for (std::wstring& failure : NotDoneFailures(run, L"machine-install")) {
+      failures.push_back(std::move(failure));
+    }
+    // Done, but its report did not come back whole: its exit code cannot carry such parts. Not
+    // when another process took the report channel's name (the output says so): that process
+    // must not be able to turn this install into a failure.
+    if (!stop && ReportIncomplete(run) && !ReportChannelTaken(run)) {
+      failures.push_back(L"machine-install: no complete report came back (see the log)");
+    }
     result->run = std::move(run);
     if (stop) {
       if (*stop == ExitCode::kWrongContext) result->refusal = InstallRefusal::kUnsafeFolder;
-      if (*stop == ExitCode::kFailed) Failed(&failures, L"machine-install", result->run->failure);
       result->code = *stop;
       Log(LogLevel::kWarning, kLogComponent,
-          L"install scope=machine result=" + std::wstring(CheckResultName(*stop)));
+          L"install scope=machine result=" + std::wstring(CheckResultName(*stop)) + L" failures=" +
+              std::to_wstring(failures.size()));
       return S_OK;
     }
   } else {

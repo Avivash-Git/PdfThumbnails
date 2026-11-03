@@ -32,6 +32,9 @@ constexpr wchar_t kLogComponent[] = L"elevated";
 
 constexpr std::wstring_view kElevatedOption = L"--elevated";
 
+// How a report line about a part the step did not complete starts (NotDoneLine).
+constexpr std::wstring_view kNotDonePrefix = L"not done: ";
+
 // Once the elevated process has ended, the rest of its lines are already in the pipe: this is
 // how long Finish waits for the reader to get them.
 constexpr DWORD kFinishWaitMs = 3000;
@@ -127,7 +130,9 @@ void ReportRemoval(ElevatedReporter& report, const MachineRemoval& removal) {
 
 // machine-migrate-v1: 1.x's build folders for all users, except the one the machine-wide class
 // still uses. In-use files go to a trash folder next to the install folder (same volume).
-HRESULT RunMachineMigrateV1(ElevatedReporter& report, bool* restartPending) noexcept try {
+HRESULT RunMachineMigrateV1(ElevatedReporter& report, bool* restartPending,
+                            std::vector<std::wstring>* notDone) noexcept try {
+  notDone->clear();
   TraceStep step(L"legacy-root");
   std::filesystem::path legacyRoot;
   RETURN_IF_FAILED(PDFT_TRACE(GetLegacyMachineRoot(&legacyRoot)));
@@ -142,8 +147,12 @@ HRESULT RunMachineMigrateV1(ElevatedReporter& report, bool* restartPending) noex
                 std::wstring(kProductName) + L" for all users repoints it");
   }
   *restartPending = removal.restartPending;
+  if (FAILED(removal.firstError)) {
+    notDone->push_back(L"migrate-v1: " + HResultText(removal.firstError));
+  }
   RETURN_IF_FAILED(hr);
-  // The failures it went on after are listed above (ReportRemoval).
+  // The failures it went on after are listed above (ReportRemoval) and reported as not done; it
+  // ends with the first one's HRESULT, as before.
   return PDFT_TRACE(removal.firstError);
 }
 CATCH_RETURN();
@@ -385,39 +394,29 @@ int ElevatedMain() noexcept {
     return static_cast<int>(FAILED(hr) ? hr : E_OUTOFMEMORY);
   }
   bool restartPending = false;
+  std::vector<std::wstring> notDone;
   // Where the step's failure started: the functions on its way note it (failure_trace.h).
   FailureTrace trace;
-  hr = RunElevatedStep(*facts.verb, report, &restartPending);
-  try {
-    if (FAILED(hr)) {
-      std::wstring where = trace.failure() ? TracedFailureText(*trace.failure())
-                                           : std::wstring(L"at a place not traced");
-      // A caller may pass a failure on as another HRESULT; the end line says which.
-      if (trace.failure() && trace.failure()->hr != hr) where += L" (end hr differs)";
-      report.Line(L"elevated " + std::wstring(name) + L" failed " + where);
-    }
-    report.Line(L"elevated " + std::wstring(name) + L" end hr=" + HResultText(hr) +
-                (restartPending ? L" restart-pending" : L""));
-  } catch (...) {
-  }
-  if (FAILED(hr)) return static_cast<int>(hr);
-  return restartPending ? 1 : 0;
+  hr = RunElevatedStep(*facts.verb, report, &restartPending, &notDone);
+  return EndElevatedStep(report, *facts.verb, hr, restartPending, notDone, trace);
 }
 
-HRESULT RunElevatedStep(ElevatedVerb verb, ElevatedReporter& report,
-                        bool* restartPending) noexcept {
+HRESULT RunElevatedStep(ElevatedVerb verb, ElevatedReporter& report, bool* restartPending,
+                        std::vector<std::wstring>* notDone) noexcept {
   *restartPending = false;
+  notDone->clear();
   switch (verb) {
     case ElevatedVerb::kMachineMigrateV1:
-      return RunMachineMigrateV1(report, restartPending);
+      return RunMachineMigrateV1(report, restartPending, notDone);
     case ElevatedVerb::kMachineInstall:
       // The parser and the entry checks keep it out of builds without the developer install.
       if (!kDevInstall) break;
-      return RunMachineInstall(report, restartPending);
+      return RunMachineInstall(report, restartPending, notDone);
     case ElevatedVerb::kMachineRepairClass:
+      // One action, no parts: it is done or it failed.
       return RunMachineRepairClass(report);
     case ElevatedVerb::kMachineUninstall:
-      return RunMachineUninstall(report, restartPending);
+      return RunMachineUninstall(report, restartPending, notDone);
   }
   return E_NOTIMPL;
 }
@@ -695,6 +694,143 @@ std::vector<std::wstring> SplitReportLines(std::string_view bytes) {
   return lines;
 }
 
+// ---- parts a step did not complete ----
+
+namespace {
+
+// The longest part name a report line may give.
+constexpr size_t kMaxPartChars = 64;
+
+// "0x" and exactly 8 hex digits, in either case: HResultText's form.
+std::optional<HRESULT> ParseHResultText(std::wstring_view text) noexcept {
+  if (text.size() != 10 || !text.starts_with(L"0x")) return std::nullopt;
+  unsigned long value = 0;
+  for (const wchar_t c : text.substr(2)) {
+    unsigned long digit = 0;
+    if (c >= L'0' && c <= L'9') {
+      digit = static_cast<unsigned long>(c - L'0');
+    } else if (c >= L'a' && c <= L'f') {
+      digit = static_cast<unsigned long>(c - L'a') + 10;
+    } else if (c >= L'A' && c <= L'F') {
+      digit = static_cast<unsigned long>(c - L'A') + 10;
+    } else {
+      return std::nullopt;
+    }
+    value = value * 16 + digit;
+  }
+  return static_cast<HRESULT>(value);
+}
+
+// A part's name as a report line may give it: 1 to kMaxPartChars characters of a-z, 0-9, "-"
+// and space, with no space first or last. Nothing else reaches the command's failures.
+bool IsPartName(std::wstring_view name) noexcept {
+  if (name.empty() || name.size() > kMaxPartChars || name.front() == L' ' || name.back() == L' ') {
+    return false;
+  }
+  return std::all_of(name.begin(), name.end(), [](wchar_t c) {
+    return (c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9') || c == L'-' || c == L' ';
+  });
+}
+
+// The part |line| names as not done (a NotDoneLine whose part and HRESULT are well formed, the
+// HRESULT a failure); std::nullopt for any other line. May throw std::bad_alloc.
+std::optional<NotDonePart> ParseNotDoneLine(std::wstring_view line) {
+  if (!line.starts_with(kNotDonePrefix)) return std::nullopt;
+  line.remove_prefix(kNotDonePrefix.size());
+  // At the last ": ": the HRESULT is the last word.
+  const size_t split = line.rfind(L": ");
+  if (split == std::wstring_view::npos) return std::nullopt;
+  const std::wstring_view part = line.substr(0, split);
+  const std::optional<HRESULT> hr = ParseHResultText(line.substr(split + 2));
+  if (!IsPartName(part) || !hr || SUCCEEDED(*hr)) return std::nullopt;
+  return NotDonePart{std::wstring(part), *hr};
+}
+
+// Whether |line| is the end line of the step |verb| (ReadReportParts says how it is read), with
+// its not-done count, when it has one, in |counted|. May throw std::bad_alloc.
+bool ParseEndLine(std::wstring_view line, ElevatedVerb verb, std::optional<size_t>* counted) {
+  counted->reset();
+  const std::wstring start = L"elevated " + std::wstring(ElevatedVerbName(verb)) + L" end hr=";
+  if (!line.starts_with(start)) return false;
+  line.remove_prefix(start.size());
+  if (!ParseHResultText(line.substr(0, 10))) return false;
+  line.remove_prefix(10);
+  constexpr std::wstring_view kCount = L"not-done=";
+  std::optional<size_t> count;
+  // The words after it, each after a space; those this build does not know are skipped.
+  while (!line.empty()) {
+    if (line.front() != L' ') return false;
+    line.remove_prefix(1);
+    const std::wstring_view word = line.substr(0, line.find(L' '));
+    line.remove_prefix(word.size());
+    if (!word.starts_with(kCount)) continue;
+    const std::wstring_view digits = word.substr(kCount.size());
+    if (digits.empty() || digits.size() > 9 ||
+        !std::all_of(digits.begin(), digits.end(),
+                     [](wchar_t c) { return c >= L'0' && c <= L'9'; })) {
+      continue;
+    }
+    size_t value = 0;
+    for (const wchar_t c : digits) value = value * 10 + static_cast<size_t>(c - L'0');
+    // A count past what a report can hold names no more parts than that.
+    count = std::min(value, kMaxReportLines);
+  }
+  *counted = count;
+  return true;
+}
+
+// A step that never ran: declined, not launched, or refused for want of administrator rights.
+// What came back from it is not a part of it.
+bool StepNeverRan(const ElevatedRun& run) noexcept {
+  return run.outcome == ElevatedOutcome::kCancelled || FAILED(run.launched) ||
+         LackedAdministratorRights(run);
+}
+
+}  // namespace
+
+std::wstring NotDoneLine(std::wstring_view failure) {
+  return std::wstring(kNotDonePrefix) + std::wstring(failure);
+}
+
+std::wstring ElevatedEndLine(ElevatedVerb verb, HRESULT hr, bool restartPending, size_t notDone) {
+  return L"elevated " + std::wstring(ElevatedVerbName(verb)) + L" end hr=" + HResultText(hr) +
+         (restartPending ? L" restart-pending" : L"") + L" not-done=" + std::to_wstring(notDone);
+}
+
+int EndElevatedStep(ElevatedReporter& report, ElevatedVerb verb, HRESULT hr, bool restartPending,
+                    std::span<const std::wstring> notDone, const FailureTrace& trace) noexcept {
+  try {
+    for (const std::wstring& failure : notDone) report.Line(NotDoneLine(failure));
+    if (FAILED(hr)) {
+      std::wstring where = trace.failure() ? TracedFailureText(*trace.failure())
+                                           : std::wstring(L"at a place not traced");
+      // A caller may pass a failure on as another HRESULT; the end line says which.
+      if (trace.failure() && trace.failure()->hr != hr) where += L" (end hr differs)";
+      report.Line(L"elevated " + std::wstring(ElevatedVerbName(verb)) + L" failed " + where);
+    }
+    report.Line(ElevatedEndLine(verb, hr, restartPending, notDone.size()));
+  } catch (...) {
+  }
+  if (FAILED(hr)) return static_cast<int>(hr);
+  return restartPending ? 1 : 0;
+}
+
+ReportParts ReadReportParts(ElevatedVerb verb, std::span<const std::wstring> lines) {
+  ReportParts parts;
+  std::span<const std::wstring> before = lines;
+  // Only as the last line: what came after an end line is not this step's report.
+  if (!lines.empty() && ParseEndLine(lines.back(), verb, &parts.counted)) {
+    parts.ended = true;
+    before = lines.first(lines.size() - 1);
+  }
+  for (const std::wstring& line : before) {
+    if (std::optional<NotDonePart> part = ParseNotDoneLine(line)) {
+      parts.named.push_back(std::move(*part));
+    }
+  }
+  return parts;
+}
+
 // ---- starting the elevated process ----
 
 HRESULT LaunchElevatedWithShell(const ElevationRequest& request, DWORD* processId,
@@ -769,6 +905,61 @@ bool ReportChannelTaken(const ElevatedRun& run) noexcept {
          run.reportServer == HRESULT_FROM_WIN32(ERROR_PIPE_BUSY);
 }
 
+size_t CountPartsNotDone(const ElevatedRun& run) noexcept {
+  if (StepNeverRan(run)) return 0;
+  return std::max(run.parts.named.size(), run.parts.counted.value_or(0));
+}
+
+bool PartsNotDone(const ElevatedRun& run) noexcept { return CountPartsNotDone(run) > 0; }
+
+std::vector<std::wstring> NotDoneFailures(const ElevatedRun& run, std::wstring_view step) {
+  std::vector<std::wstring> failures;
+  if (StepNeverRan(run)) return failures;
+  for (const NotDonePart& part : run.parts.named) {
+    failures.push_back(std::wstring(step) + L" " + part.part + L": " + HResultText(part.hr));
+  }
+  // Counted, but without a line this build can read (a later build's part, or a line lost): one
+  // entry for all of them, so that none goes unsaid.
+  const size_t unnamed = CountPartsNotDone(run) - run.parts.named.size();
+  if (unnamed > 0) {
+    failures.push_back(std::wstring(step) + L" unnamed parts: " + std::to_wstring(unnamed) +
+                       L" (see the step's report)");
+  }
+  return failures;
+}
+
+bool NeedsStepFailure(const ElevatedRun& run) noexcept {
+  if (run.outcome != ElevatedOutcome::kFailed || LackedAdministratorRights(run)) return false;
+  // A launch that failed ran nothing, so nothing it reported is a part of it.
+  if (FAILED(run.launched) || run.parts.named.empty()) return true;
+  return run.parts.named.front().hr != run.failure;
+}
+
+bool ReportIncomplete(const ElevatedRun& run) noexcept {
+  return (run.outcome == ElevatedOutcome::kDone ||
+          run.outcome == ElevatedOutcome::kRestartPending) &&
+         !run.parts.ended;
+}
+
+std::wstring ElevatedRunSummary(ElevatedVerb verb, const ElevatedRun& run) {
+  std::wstring summary = std::wstring(ElevatedVerbName(verb)) + L" launch=" +
+                         HResultText(run.launched) + L" exit=" +
+                         HResultText(static_cast<HRESULT>(run.exitCode));
+  if (FAILED(run.reportServer)) {
+    summary += L" report-channel=" + HResultText(run.reportServer) +
+               (ReportChannelTaken(run) ? L" (taken by another process)" : L"");
+  }
+  if (!run.reportChannel) {
+    summary += L" no-report";
+  } else if (ReportIncomplete(run)) {
+    summary += L" report-incomplete";
+  }
+  if (const size_t count = CountPartsNotDone(run); count > 0) {
+    summary += L" not-done=" + std::to_wstring(count);
+  }
+  return summary;
+}
+
 HRESULT RunElevated(ElevatedVerb verb, const std::filesystem::path& exe, HWND owner,
                     const ElevationLauncher& launcher, ElevatedRun* run) noexcept try {
   *run = ElevatedRun{};
@@ -790,23 +981,20 @@ HRESULT RunElevated(ElevatedVerb verb, const std::filesystem::path& exe, HWND ow
   DWORD exitCode = 0;
   const HRESULT launched = launcher(request, &processId, &exitCode);
   if (server) run->report = server->Finish(processId, &run->reportChannel);
+  run->parts = ReadReportParts(verb, run->report);
   run->exitCode = exitCode;
   run->launched = launched;
   run->outcome = ClassifyElevatedExit(launched, exitCode, &run->failure);
 
-  // The elevated process writes no log of its own: this process logs what it reported.
-  for (const std::wstring& line : run->report) Log(LogLevel::kInfo, kLogComponent, line);
-  std::wstring summary = std::wstring(ElevatedVerbName(verb)) + L" launch=" +
-                         HResultText(launched) + L" exit=" +
-                         HResultText(static_cast<HRESULT>(exitCode));
-  const bool taken = ReportChannelTaken(*run);
-  if (FAILED(run->reportServer)) {
-    summary += L" report-channel=" + HResultText(run->reportServer) +
-               (taken ? L" (taken by another process)" : L"");
+  // The elevated process writes no log of its own: this process logs what it reported, a part it
+  // did not complete as a warning.
+  for (const std::wstring& line : run->report) {
+    Log(line.starts_with(kNotDonePrefix) ? LogLevel::kWarning : LogLevel::kInfo, kLogComponent,
+        line);
   }
-  if (!run->reportChannel) summary += L" no-report";
-  Log((run->outcome == ElevatedOutcome::kFailed || taken) ? LogLevel::kWarning : LogLevel::kInfo,
-      kLogComponent, summary);
+  const bool warn = run->outcome == ElevatedOutcome::kFailed || ReportChannelTaken(*run) ||
+                    PartsNotDone(*run) || ReportIncomplete(*run);
+  Log(warn ? LogLevel::kWarning : LogLevel::kInfo, kLogComponent, ElevatedRunSummary(verb, *run));
   return S_OK;
 }
 CATCH_RETURN();

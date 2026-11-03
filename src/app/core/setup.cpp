@@ -384,9 +384,11 @@ HRESULT MigrateV1(const MigrateOptions& options, const RegistryRoots& roots,
             FAILED(hr)) {
           Failed(&failures, L"machine", hr);
         } else {
-          // A step that did not get administrator rights has an exit code of its own.
-          if (run.outcome == ElevatedOutcome::kFailed && !LackedAdministratorRights(run)) {
-            Failed(&failures, L"machine", run.failure);
+          // A step that did not get administrator rights has an exit code of its own. One that
+          // names its parts lists them instead of the HRESULT it ended with.
+          if (NeedsStepFailure(run)) Failed(&failures, L"machine", run.failure);
+          for (std::wstring& failure : NotDoneFailures(run, L"machine")) {
+            failures.push_back(std::move(failure));
           }
           result->run = std::move(run);
         }

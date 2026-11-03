@@ -129,6 +129,12 @@ std::wstring UninstallElevatedRefusalMessage();
 // (pure). Not the line of a declined prompt (exit 3).
 std::wstring NoAdministratorRightsMessage();
 
+// The line for an administrator step that is done (pure): "<what> is done.", "<what> is done;
+// files that were in use are deleted at the next restart.", or, when it reported parts it did not
+// complete (PartsNotDone), "<what> is done, but some of its parts did not complete; its report:"
+// (the report follows; the parts are listed as "Not done:"). May throw std::bad_alloc.
+std::wstring ElevatedDoneText(std::wstring_view what, const ElevatedRun& run);
+
 // What --install, --fix, --migrate-v1 and --uninstall add when another process had taken the
 // name of their administrator step's report pipe (ReportChannelTaken), so the step's own report
 // could not come back (pure). The exit code is the step's own all the same.

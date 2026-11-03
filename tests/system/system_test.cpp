@@ -221,10 +221,13 @@ struct Status {
 
 // What the asking process's log says about the last run of an administrator step: its report's
 // first line ("elevated <step> start (token: ...)", or "... refused hr=<HRESULT>: <why> (token:
-// ...)") and the line RunElevated logs after the report ("<step> launch=<HRESULT>
-// exit=<HRESULT>", with " no-report" when nothing came through the pipe). Empty when missing.
+// ...)"), its end line ("elevated <step> end hr=<HRESULT>[ restart-pending] not-done=<n>") and
+// the line RunElevated logs after the report ("<step> launch=<HRESULT> exit=<HRESULT>", with
+// " no-report" when nothing came through the pipe, " report-incomplete" when its end did not,
+// and " not-done=<n>" when it did not complete some of its parts). Empty when missing.
 struct StepLog {
   std::string first;
+  std::string end;
   std::string summary;
 };
 
@@ -415,6 +418,8 @@ class System : public ::testing::Test {
       }
     }
     if (first != std::string::npos) step.first = LineAt(text, first);
+    const size_t end = text.rfind("elevated " + name + " end hr=", summary);
+    if (end != std::string::npos && end >= from) step.end = LineAt(text, end);
     return step;
   }
 
@@ -610,11 +615,14 @@ class System : public ::testing::Test {
   // line reached the log of the unelevated process, and the summary line after it does not say
   // "no-report". That pipe takes lines only from the elevated process if its parent is the
   // pipe's server, so this proves that UAC makes the asking process the parent. The first line
-  // is printed too: it tells what token UAC gave the step.
+  // is printed too: it tells what token UAC gave the step. Its report came back whole, with every
+  // part done: the end line counts none ("not-done=0"), which the elevated step writes itself,
+  // and the summary says neither "not-done=" nor "report-incomplete".
   void ExpectReportThroughThePipe(std::wstring_view verb) {
     ASSERT_TRUE(Exists(UserLog())) << Text(UserLog().native());
     const StepLog step = ReadStepLog(verb);
     if (!step.first.empty()) std::printf("[ system ] log: %s\n", step.first.c_str());
+    if (!step.end.empty()) std::printf("[ system ] log: %s\n", step.end.c_str());
     if (!step.summary.empty()) std::printf("[ system ] log: %s\n", step.summary.c_str());
     const bool reported = !step.first.empty() && !step.summary.empty() &&
                           step.summary.find(" no-report") == std::string::npos;
@@ -624,6 +632,10 @@ class System : public ::testing::Test {
     EXPECT_TRUE(reported) << (taken ? "another process had made the report pipe's name first"
                                     : "the elevated step's report did not reach the unelevated "
                                       "process");
+    EXPECT_TRUE(step.end.ends_with(" not-done=0"))
+        << "the step's end line: " << (step.end.empty() ? "(none)" : step.end);
+    EXPECT_EQ(step.summary.find(" not-done="), std::string::npos) << step.summary;
+    EXPECT_EQ(step.summary.find(" report-incomplete"), std::string::npos) << step.summary;
   }
 
   // Nothing of the product is left; trash folders only where they are queued for deletion at the

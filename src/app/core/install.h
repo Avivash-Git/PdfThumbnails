@@ -26,7 +26,9 @@
 //      copies the build from what it holds into <Program Files>\<Product>, writes the class for
 //      all users, makes the shared task folder, then removes 1.x's and the old 2.x build folders
 //      for all users, last, after a short retry for files still in use (those go to a trash
-//      folder and are deleted at the next restart);
+//      folder and are deleted at the next restart). A part after the class that does not
+//      complete does not undo the step: it is reported as not done, --install lists it as
+//      "machine-install <part>: <HRESULT>" and exits 1;
 //   5. the installer's per-user step (setup.h SetupUser);
 //   6. the status, with the Explorer test, whose answer the result needs: exit 0 when healthy and
 //      the test passed, 1 when installed but not healthy or when the test did not run (could not
@@ -143,6 +145,9 @@ struct CopyBuildResult {
   size_t copied = 0;               // files written
   bool restartPending = false;     // a file in use went into a trash folder
   std::filesystem::path trash;
+  // The first deletion at the restart that could not be queued: that file stays in its trash
+  // folder.
+  HRESULT restartDelete = S_OK;
 };
 
 // Copies |source| into |root| (made when missing): the DLLs into app\<build name> (an existing
@@ -177,7 +182,9 @@ struct MachineInstallResult {
   MachineRemoval v1;   // 1.x's build folders for all users
   MachineRemoval old;  // old 2.x builds
   bool restartPending = false;
-  std::vector<std::wstring> failures;  // the steps after the class that did not complete
+  // The parts after the class that did not complete, "<part>: <HRESULT>" (task-folder,
+  // restart-delete, migrate-v1, old-builds; reported as not done)
+  std::vector<std::wstring> failures;
 };
 
 // The step for all users of --install, in this order: the folder checked and held
@@ -185,7 +192,8 @@ struct MachineInstallResult {
 // (HRESULT_FROM_WIN32(ERROR_BAD_FORMAT) when it is not one to install; its DLLs hashed again from
 // what is held), no link on the way to |machineRoot|, CopyBuild from what is held, the class
 // (WriteMachineClass), the task folder, then 1.x's and the old 2.x build folders. S_OK once the
-// class is written (later steps that fail are listed); the failure otherwise. Never throws.
+// class is written (the parts after it that fail are listed, and so is a file in use that the
+// copy could not queue for deletion at the restart); the failure otherwise. Never throws.
 [[nodiscard]] HRESULT InstallForAllUsers(const MachineInstallOptions& options,
                                          const RegistryRoots& roots,
                                          MachineInstallResult* result) noexcept;
@@ -198,9 +206,10 @@ struct MachineInstallResult {
                                          std::filesystem::path* dll = nullptr) noexcept;
 
 // The elevated process's steps (ElevatedMain, after its entry checks), against the real
-// registry and folders: machine-install with its own folder as the build, and
-// machine-repair-class.
-[[nodiscard]] HRESULT RunMachineInstall(ElevatedReporter& report, bool* restartPending) noexcept;
+// registry and folders: machine-install with its own folder as the build (|notDone| receives
+// MachineInstallResult::failures), and machine-repair-class.
+[[nodiscard]] HRESULT RunMachineInstall(ElevatedReporter& report, bool* restartPending,
+                                        std::vector<std::wstring>* notDone) noexcept;
 [[nodiscard]] HRESULT RunMachineRepairClass(ElevatedReporter& report) noexcept;
 
 // ---- --install ------------------------------------------------------------------------------
@@ -257,7 +266,9 @@ struct InstallResult {
   bool restartPending = false;
   Snapshot after;
   std::vector<Finding> findings;
-  std::vector<std::wstring> failures;  // "<step>: <HRESULT>"
+  // "<step>: <HRESULT>", and "machine-install <part>: <HRESULT>" for each part of the step for
+  // all users that did not complete
+  std::vector<std::wstring> failures;
 };
 
 // The exit code of the administrator step for --install (pure): std::nullopt when it is done (a

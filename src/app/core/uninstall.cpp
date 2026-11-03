@@ -371,8 +371,10 @@ HRESULT UninstallForAllUsers(const MachineUninstallOptions& options, const Regis
 }
 CATCH_RETURN();
 
-HRESULT RunMachineUninstall(ElevatedReporter& report, bool* restartPending) noexcept try {
+HRESULT RunMachineUninstall(ElevatedReporter& report, bool* restartPending,
+                            std::vector<std::wstring>* notDone) noexcept try {
   *restartPending = false;
+  notDone->clear();
   TraceStep step(L"own-paths");
   MachineUninstallOptions options;
   RETURN_IF_FAILED(PDFT_TRACE(GetMachineRoot(&options.machineRoot)));
@@ -390,10 +392,10 @@ HRESULT RunMachineUninstall(ElevatedReporter& report, bool* restartPending) noex
   }
   ReportRoot(report, L"install folder", result.root);
   ReportRoot(report, L"1.x install folder", result.legacyRoot);
-  for (const std::wstring& failure : result.failures) report.Line(L"failed " + failure);
   *restartPending = result.restartPending;
-  // Its failures are listed above, each with its part: the trace names this place, never one of
-  // them that was tolerated.
+  *notDone = result.failures;
+  // Its failures are reported as not done, each with its part, and it ends with the first one's
+  // HRESULT, as before. The trace names this place, never one of them that was tolerated.
   return PDFT_TRACE(result.firstError);
 }
 CATCH_RETURN();
@@ -530,9 +532,11 @@ HRESULT Uninstall(const UninstallOptions& options, const RegistryRoots& roots,
       ElevatedRun run;
       RETURN_IF_FAILED(
           RunElevated(ElevatedVerb::kMachineUninstall, exe, options.owner, options.launcher, &run));
-      // A step that did not get administrator rights has an exit code of its own.
-      if (run.outcome == ElevatedOutcome::kFailed && !LackedAdministratorRights(run)) {
-        Failed(&failures, L"machine", run.failure);
+      // A step that did not get administrator rights has an exit code of its own. One that
+      // names its parts lists them instead of the HRESULT it ended with.
+      if (NeedsStepFailure(run)) Failed(&failures, L"machine", run.failure);
+      for (std::wstring& failure : NotDoneFailures(run, L"machine")) {
+        failures.push_back(std::move(failure));
       }
       result->run = std::move(run);
     }

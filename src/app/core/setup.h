@@ -30,10 +30,11 @@
 // --migrate-v1 [--user-only | --machine-only]: refused like --setup-user; needs an installed
 // program (6), and leaves 1.x as it is without one. The user part runs here; the machine part, when
 // 1.x's build folders for all users are left, through the administrator step machine-migrate-v1
-// of the settings executable installed for all users (a prompt; declined: 3). Exit 0, 1 when
-// something waits (for a restart, for a process to let go, or for an install for all users), 5
-// when a step failed, 7 when nothing else failed but the administrator step did not get
-// administrator rights.
+// of the settings executable installed for all users (a prompt; declined: 3); a part of the step
+// for all users that failed is listed as "machine <part>: <HRESULT>". Exit 0, 1 when something
+// waits (for a restart, for a process to let go, or for an install for all users), 5 when a step
+// failed, 7 when nothing else failed but the administrator step did not get administrator
+// rights.
 
 #pragma once
 

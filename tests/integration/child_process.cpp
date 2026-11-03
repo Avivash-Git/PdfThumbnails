@@ -135,6 +135,27 @@ CapturedRun RunCaptured(const std::wstring& exe, const std::wstring& arguments, 
   return run;
 }
 
+HRESULT RunSelfChild(const std::wstring& arguments, DWORD* processId, DWORD* exitCode) {
+  std::wstring commandLine = QuoteArgument(SelfPath()) + L" --pdft-child " + arguments;
+  STARTUPINFOW startup = {sizeof(startup)};
+  PROCESS_INFORMATION process = {};
+  if (!CreateProcessW(SelfPath().c_str(), commandLine.data(), nullptr, nullptr, FALSE,
+                      CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
+    return LastError();
+  }
+  CloseHandle(process.hThread);
+  HRESULT hr = S_OK;
+  if (WaitForSingleObject(process.hProcess, 30000) != WAIT_OBJECT_0) {
+    TerminateProcess(process.hProcess, 1);
+    hr = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+  } else if (!GetExitCodeProcess(process.hProcess, exitCode)) {
+    hr = LastError();
+  }
+  *processId = process.dwProcessId;
+  CloseHandle(process.hProcess);
+  return hr;
+}
+
 PipedChild::~PipedChild() {
   CloseInput();
   if (process_ && Wait(10000) == MAXDWORD) {

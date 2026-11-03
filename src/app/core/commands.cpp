@@ -220,22 +220,27 @@ int RunStatus(const CliArgs& args, const ProcessContext& context, Output& out) {
   return Code(code);
 }
 
+void PrintFailures(const std::vector<std::wstring>& failures, Output& out) {
+  for (const std::wstring& failure : failures) out.Error(L"Not done: " + failure);
+}
+
 // The step's own report, indented: the elevated process writes no log of its own.
 void PrintReport(const ElevatedRun& run, Output& out) {
   for (const std::wstring& line : run.report) out.Error(L"  " + line);
 }
 
-// How an administrator step (|what|, "The administrator step") went. On a failure the step's own
-// report follows.
+// How an administrator step (|what|, "The administrator step") went. On a failure, and when it is
+// done but reported parts it did not complete, the step's own report follows.
 void PrintElevatedRun(const ElevatedRun& run, std::wstring_view what, Output& out) {
   switch (run.outcome) {
     case ElevatedOutcome::kDone:
-      out.Line(std::wstring(what) + L" is done.");
-      if (ReportChannelTaken(run)) out.Error(ReportChannelTakenMessage());
-      return;
     case ElevatedOutcome::kRestartPending:
-      out.Line(std::wstring(what) +
-               L" is done; files that were in use are deleted at the next restart.");
+      if (PartsNotDone(run)) {
+        out.Error(ElevatedDoneText(what, run));
+        PrintReport(run, out);
+      } else {
+        out.Line(ElevatedDoneText(what, run));
+      }
       if (ReportChannelTaken(run)) out.Error(ReportChannelTakenMessage());
       return;
     case ElevatedOutcome::kCancelled:
@@ -268,6 +273,7 @@ int ReportCheck(HRESULT hr, const CheckResult& result, const ProcessContext& con
   if (quiet) return Code(result.code);
   for (const RepairOutcome& outcome : result.repairs) out.Line(RepairOutcomeText(outcome));
   if (result.elevated) PrintElevatedRun(*result.elevated, L"The administrator step", out);
+  PrintFailures(result.machineNotDone, out);
   if (!result.repairs.empty() || result.elevated) out.Line(L"");
   out.Line(RenderStatus(FormatStatus(result.after, result.findings)));
   if (result.adminStepNeeded && result.plan.machine && !result.elevated) {
@@ -402,10 +408,6 @@ int ReportSetupRefusal(SetupRefusal refusal, std::wstring_view command,
   return Code(ExitCode::kFailed);
 }
 
-void PrintFailures(const std::vector<std::wstring>& failures, Output& out) {
-  for (const std::wstring& failure : failures) out.Error(L"Not done: " + failure);
-}
-
 int RunSetupUserCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
   SetupUserOptions options;
   options.checks = args.checks;
@@ -535,11 +537,15 @@ int RunMigrateV1Command(const CliArgs& args, const ProcessContext& context, Outp
         out.Line(L"The administrator prompt was declined; 1.x's files for all users stay.");
         break;
       case ElevatedOutcome::kFailed:
-        // Other failures are listed with the rest (PrintFailures).
+        // Other failures are listed with the rest (PrintFailures); the step's report names the
+        // folders.
         if (LackedAdministratorRights(*result.run)) {
           out.Error(NoAdministratorRightsMessage());
           PrintReport(*result.run, out);
           out.Line(L"1.x's files for all users stay.");
+        } else {
+          out.Error(L"The administrator step failed: " + HResultText(result.run->failure));
+          PrintReport(*result.run, out);
         }
         break;
     }
@@ -979,6 +985,19 @@ std::wstring UninstallElevatedRefusalMessage() {
 std::wstring NoAdministratorRightsMessage() {
   return L"The step for all users did not get administrator rights (Windows started it without "
          L"them), so it changed nothing.";
+}
+
+std::wstring ElevatedDoneText(std::wstring_view what, const ElevatedRun& run) {
+  // Without the restart's clause: a part not done may be a file in use that could not be queued
+  // for deletion at the restart.
+  if (PartsNotDone(run)) {
+    return std::wstring(what) + L" is done, but some of its parts did not complete; its report:";
+  }
+  if (run.outcome == ElevatedOutcome::kRestartPending) {
+    return std::wstring(what) +
+           L" is done; files that were in use are deleted at the next restart.";
+  }
+  return std::wstring(what) + L" is done.";
 }
 
 std::wstring ReportChannelTakenMessage() {

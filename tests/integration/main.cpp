@@ -42,6 +42,12 @@
 //                                elevated process does (ElevatedReporter), prints "connected=1"
 //                                or "connected=0", writes each <line> to the pipe and exits with
 //                                <exit code> (decimal, or hexadecimal with 0x)
+//   report-step <step> <hr> <restart 0|1> <failure>...
+//                                connects like "report" (prints "connected=1" or "connected=0")
+//                                and ends the step <step> the way the elevated process does
+//                                (EndElevatedStep): a "not done" line per <failure> ("<part>:
+//                                <HRESULT>"), then its end line; exits with what EndElevatedStep
+//                                returns for <hr> (decimal, or hexadecimal with 0x)
 //   pipe-squat <process id>      creates the elevation report pipe named after <process id>, as
 //                                someone else would, prints "ready", waits up to 10 s for a
 //                                client and prints "got=<bytes it sent>" or "got=none"
@@ -59,11 +65,13 @@
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "child_process.h"
 #include "com_security.h"
 #include "context.h"
 #include "elevation.h"
+#include "failure_trace.h"
 #include "instance.h"
 #include "medium_il.h"
 #include "processes.h"
@@ -226,6 +234,22 @@ int Report(int argc, wchar_t** argv) {
   return static_cast<int>(exitCode);
 }
 
+// The end of a step's report, through the elevated side's own code, after a step that returned
+// argv[4] and went on after the parts argv[6...].
+int ReportStep(int argc, wchar_t** argv) {
+  const std::optional<pdft::ElevatedVerb> verb = pdft::ElevatedVerbFromName(argv[3], true);
+  if (!verb) return 2;
+  const HRESULT hr = static_cast<HRESULT>(wcstoul(argv[4], nullptr, 0));
+  const bool restartPending = std::wstring(argv[5]) == L"1";
+  std::vector<std::wstring> notDone;
+  for (int i = 6; i < argc; ++i) notDone.emplace_back(argv[i]);
+  // No step ran here, so no failure was traced.
+  const pdft::FailureTrace trace;
+  pdft::ElevatedReporter reporter = pdft::ElevatedReporter::Connect();
+  Print(reporter.connected() ? "connected=1\n" : "connected=0\n");
+  return pdft::EndElevatedStep(reporter, *verb, hr, restartPending, notDone, trace);
+}
+
 int PipeSquat(const wchar_t* processId) {
   const std::wstring name = pdft::ElevationPipeName(wcstoul(processId, nullptr, 10));
   wil::unique_hfile pipe(CreateNamedPipeW(
@@ -294,6 +318,7 @@ int wmain(int argc, wchar_t** argv) {
     if (mode == L"hold-file" && argc == 4) return HoldFile(argv[3]);
     if (mode == L"parent" && argc == 3) return Parent();
     if (mode == L"report" && argc >= 4) return Report(argc, argv);
+    if (mode == L"report-step" && argc >= 6) return ReportStep(argc, argv);
     if (mode == L"pipe-squat" && argc == 4) return PipeSquat(argv[3]);
     return 2;
   }

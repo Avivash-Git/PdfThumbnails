@@ -4,8 +4,10 @@
 // HKEY_USERS with made-up user hives), and every Windows-wide question and write (the process
 // context, the tasks, the processes holding files) through the fake probes. The administrator
 // steps run in this process through fake launchers, unelevated, against the same private places;
-// no test starts a real elevation, deletes a task or queues a deletion at the restart. The
-// build's folder holds copies of the built binaries, which are never started.
+// machine-install's report, with the parts it did not complete, comes back through the real pipe
+// from this test program's child "report-step" (main.cpp). No test starts a real elevation,
+// deletes a task or queues a deletion at the restart. The build's folder holds copies of the
+// built binaries, which are never started.
 
 #include <windows.h>
 
@@ -19,6 +21,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -34,6 +37,7 @@
 #include "instance.h"
 #include "legacy.h"
 #include "log.h"
+#include "medium_il.h"
 #include "paths.h"
 #include "project_config.h"
 #include "registration.h"
@@ -220,22 +224,58 @@ class Install : public ::testing::Test {
   }
 
   // The administrator step machine-install, run in this process against the private places,
-  // the way the elevated settings executable would run it from its own folder.
-  ElevationLauncher MachineInstallLauncher() {
-    return [this](const ElevationRequest& request, DWORD* processId, DWORD* exitCode) {
-      requests_.push_back(request);
-      MachineInstallOptions options;
-      options.source = request.exe.parent_path();
-      options.machineRoot = paths_.machineRoot;
-      options.legacyMachineRoot = paths_.legacyMachineRoot;
-      options.trashParent = temp_.path();
-      options.taskFolder.clear();
-      options.osArch = probes_.context.osArch;
+  // the way the elevated settings executable would run it from its own folder (|adjust| may
+  // change its options first).
+  HRESULT RunMachineInstallStep(const ElevationRequest& request,
+                                const std::function<void(MachineInstallOptions*)>& adjust,
+                                MachineInstallResult* result) {
+    requests_.push_back(request);
+    MachineInstallOptions options;
+    options.source = request.exe.parent_path();
+    options.machineRoot = paths_.machineRoot;
+    options.legacyMachineRoot = paths_.legacyMachineRoot;
+    options.trashParent = temp_.path();
+    options.taskFolder.clear();
+    options.osArch = probes_.context.osArch;
+    if (adjust) adjust(&options);
+    return InstallForAllUsers(options, roots_, result);
+  }
+
+  // That step (RunMachineInstallStep), with its report and exit code from this test program's
+  // child "report-step", which ends the step the way the elevated process does
+  // (EndElevatedStep), with the parts it did not complete, through the real pipe.
+  ElevationLauncher MachineInstallLauncher(
+      std::function<void(MachineInstallOptions*)> adjust = {}) {
+    return [this, adjust](const ElevationRequest& request, DWORD* processId, DWORD* exitCode) {
       MachineInstallResult result;
-      const HRESULT hr = InstallForAllUsers(options, roots_, &result);
+      const HRESULT hr = RunMachineInstallStep(request, adjust, &result);
+      std::wstring arguments = L"report-step machine-install " + HResultText(hr) +
+                               (result.restartPending ? L" 1" : L" 0");
+      for (const std::wstring& failure : result.failures) {
+        arguments += L" " + test::QuoteArgument(failure);
+      }
+      return test::RunSelfChild(arguments, processId, exitCode);
+    };
+  }
+
+  // The same step, but without a report: the step's exit code comes back, and nothing through
+  // the pipe.
+  ElevationLauncher MachineInstallLauncherWithoutReport() {
+    return [this](const ElevationRequest& request, DWORD* processId, DWORD* exitCode) {
+      MachineInstallResult result;
+      const HRESULT hr = RunMachineInstallStep(request, {}, &result);
       *processId = 0;
       *exitCode = FAILED(hr) ? static_cast<DWORD>(hr) : (result.restartPending ? 1u : 0u);
       return S_OK;
+    };
+  }
+
+  // A launcher whose step is this test program's child "<arguments>" ("report-step ..." or
+  // "report ...", main.cpp): its report and exit code are what the child is told.
+  ElevationLauncher ReportingLauncher(const std::wstring& arguments) {
+    return [this, arguments](const ElevationRequest& request, DWORD* processId, DWORD* exitCode) {
+      requests_.push_back(request);
+      return test::RunSelfChild(arguments, processId, exitCode);
     };
   }
 
@@ -728,6 +768,79 @@ TEST_F(Install, TheStepForAllUsersDeclinedOrFailed) {
   EXPECT_TRUE(probes_.applied.empty());
 }
 
+// Parts of the step for all users after the class that did not complete (the task folder, and
+// 1.x's and the old build folders, which a trash parent off their path keeps from going) do not
+// undo the install: the step reports each as not done, and --install lists them as its failures
+// and exits 1.
+TEST_F(Install, PartsOfTheStepForAllUsersThatDidNotComplete) {
+  if (const auto why = StageUnsafe()) GTEST_SKIP() << *why;
+  const path v1 = MakeBuild(paths_.machineRoot, L"1.1.0.0-67a1323e");
+  const path old = MakeBuild(paths_.machineRoot, L"2.0.0.0-00000001");
+  const path elsewhere = path(temp_.path()) / L"elsewhere";
+  ASSERT_TRUE(MakeDirs(elsewhere));
+  InstallOptions options = MakeInstallOptions(Scope::kMachine);
+  options.launcher = MachineInstallLauncher([&](MachineInstallOptions* step) {
+    // Not above machine-root\app: both removals refuse it (E_INVALIDARG) before anything goes.
+    step->trashParent = elsewhere;
+    // Not a top-level folder's name: refused before Task Scheduler is asked.
+    step->taskFolder = L"not-top-level";
+  });
+  InstallResult result;
+  ASSERT_HRESULT_SUCCEEDED(InstallFromOwnFolder(options, roots_, probes_, &result));
+  EXPECT_EQ(result.code, ExitCode::kProblems);
+  EXPECT_TRUE(HealthyFromFindings(result.findings));
+  EXPECT_EQ(MachineClassDll(), (paths_.machineRoot / L"app" / BuildName() / kHandlerDll).native());
+  EXPECT_FALSE(probes_.applied.empty());  // the per-user step ran
+  EXPECT_TRUE(Exists(v1));
+  EXPECT_TRUE(Exists(old));
+  ASSERT_TRUE(result.run);
+  EXPECT_EQ(result.run->outcome, ElevatedOutcome::kDone);
+  EXPECT_TRUE(result.run->parts.ended);
+  EXPECT_EQ(result.run->parts.counted, 3u);
+  ASSERT_FALSE(result.run->report.empty());
+  EXPECT_EQ(result.run->report.back(),
+            ElevatedEndLine(ElevatedVerb::kMachineInstall, S_OK, false, 3));
+  std::string listed;
+  for (const std::wstring& failure : result.failures) listed += WideToUtf8Lossy(failure) + "\n";
+  ASSERT_EQ(result.failures.size(), 3u) << listed;
+  EXPECT_EQ(result.failures[0].rfind(L"machine-install task-folder: 0x8", 0), 0u) << listed;
+  EXPECT_EQ(result.failures[1], L"machine-install migrate-v1: 0x80070057") << listed;
+  EXPECT_EQ(result.failures[2], L"machine-install old-builds: 0x80070057") << listed;
+}
+
+// Done, but without its report: the step's exit code cannot carry the parts it did not
+// complete, so nothing shows that the install is whole, and it says so (exit 1). Not where
+// another process took the report pipe's name: that process cannot make the install fail.
+TEST_F(Install, AStepDoneWithoutItsReport) {
+  if (const auto why = StageUnsafe()) GTEST_SKIP() << *why;
+  InstallOptions options = MakeInstallOptions(Scope::kMachine);
+  options.launcher = MachineInstallLauncherWithoutReport();
+  InstallResult result;
+  ASSERT_HRESULT_SUCCEEDED(InstallFromOwnFolder(options, roots_, probes_, &result));
+  EXPECT_EQ(result.code, ExitCode::kProblems);
+  EXPECT_EQ(result.failures, std::vector<std::wstring>{
+                                 L"machine-install: no complete report came back (see the log)"});
+  ASSERT_TRUE(result.run);
+  EXPECT_TRUE(ReportIncomplete(*result.run));
+  EXPECT_TRUE(HealthyFromFindings(result.findings));
+  EXPECT_EQ(MachineClassDll(), (paths_.machineRoot / L"app" / BuildName() / kHandlerDll).native());
+
+  test::PipedChild squatter;
+  ASSERT_EQ(squatter.Start(test::SelfPath(),
+                           L"--pdft-child pipe-squat " + std::to_wstring(GetCurrentProcessId())),
+            S_OK);
+  ASSERT_EQ(squatter.ReadLine(), "ready");
+  options.launcher = MachineInstallLauncher();
+  ASSERT_HRESULT_SUCCEEDED(InstallFromOwnFolder(options, roots_, probes_, &result));
+  ASSERT_TRUE(result.run);
+  EXPECT_TRUE(ReportChannelTaken(*result.run));
+  EXPECT_TRUE(ReportIncomplete(*result.run));
+  for (const std::wstring& failure : result.failures) ADD_FAILURE() << WideToUtf8Lossy(failure);
+  EXPECT_EQ(result.code, ExitCode::kOk);
+  EXPECT_EQ(squatter.ReadLine(), "got=0");
+  EXPECT_EQ(squatter.Wait(15000), 0u);
+}
+
 TEST_F(Install, InstallForThisUser) {
   if (const auto why = StageUnsafe()) GTEST_SKIP() << *why;
   Plant11UserFolder(130);
@@ -998,6 +1111,39 @@ TEST_F(Install, FixRepairsTheClassForAllUsers) {
   EXPECT_EQ(result.code, ExitCode::kProblems);
 }
 
+// A part --fix's step reports as not done (machine-repair-class has none, a later build's step
+// might): a repair that did not complete, so exit 1, although the class was repaired.
+TEST_F(Install, FixCountsPartsOfItsStepThatDidNotComplete) {
+  const path build = MakeBuild(paths_.machineRoot, L"2.0.0.0-1a2b3c4d");
+  RegisterMachineClass(paths_.machineRoot / L"app" / L"2.0.0.0-gone0000" / kHandlerDll);
+  ASSERT_TRUE(WriteFileText(paths_.machineRoot / kSettingsExe, ""));
+  ASSERT_HRESULT_SUCCEEDED(WriteSlots(roots_, SlotWrite::kTakeBack));
+  ASSERT_HRESULT_SUCCEEDED(SaveZoom(roots_, 100));
+
+  CheckOptions options;
+  options.repair = RepairMode::kSafe;
+  options.liveTest = false;
+  options.context = probes_.context;
+  options.paths = paths_;
+  options.lockWaitMs = 5000;
+  options.launcher = [this](const ElevationRequest& request, DWORD* processId, DWORD* exitCode) {
+    requests_.push_back(request);
+    const HRESULT hr = RepairMachineClass(roots_, paths_.machineRoot, probes_.context.osArch);
+    return test::RunSelfChild(
+        L"report-step machine-repair-class " + HResultText(hr) + L" 0 \"future-part: 0x80070005\"",
+        processId, exitCode);
+  };
+  CheckResult result;
+  ASSERT_HRESULT_SUCCEEDED(RunCheck(options, roots_, probes_, &result));
+  ASSERT_TRUE(result.elevated);
+  EXPECT_EQ(result.elevated->outcome, ElevatedOutcome::kDone);
+  EXPECT_EQ(result.machineNotDone, std::vector<std::wstring>{L"machine future-part: 0x80070005"});
+  EXPECT_EQ(result.code, ExitCode::kProblems);
+  EXPECT_FALSE(result.adminStepNeeded);
+  EXPECT_FALSE(HasFinding(result.findings, FindingId::kClassDamagedMachine));
+  EXPECT_EQ(MachineClassDll(), (build / kHandlerDll).native());
+}
+
 // ---- --uninstall ----------------------------------------------------------------------------
 
 TEST_F(Install, UninstallRemovesEverything) {
@@ -1129,6 +1275,44 @@ TEST_F(Install, UninstallMachinePartDeclinedOrNotPossible) {
   EXPECT_TRUE(result.machineLeft);
   EXPECT_TRUE(result.failures.empty());
   EXPECT_EQ(result.code, ExitCode::kNeedsAdmin);
+}
+
+// The step for all users failed after going on past several parts and ended with the first
+// one's HRESULT: each part is a failure of its own, in place of that HRESULT alone. An older
+// build's report names none, and leaves that one entry as it was.
+TEST_F(Install, UninstallListsEachPartForAllUsersThatFailed) {
+  const path build = MakeBuild(paths_.machineRoot, L"2.0.0.0-1a2b3c4d");
+  RegisterMachineClass(build / kHandlerDll);
+  ASSERT_TRUE(WriteFileText(paths_.machineRoot / kSettingsExe, ""));
+  // The entries of the step for all users.
+  const auto machineFailures = [](const UninstallResult& result) {
+    std::vector<std::wstring> machine;
+    for (const std::wstring& failure : result.failures) {
+      if (failure.starts_with(L"machine")) machine.push_back(failure);
+    }
+    return machine;
+  };
+
+  UninstallOptions options = MakeUninstallOptions();
+  options.launcher = ReportingLauncher(
+      L"report-step machine-uninstall 0x80070005 0 \"class: 0x80070005\" \"tasks: 0x80070057\"");
+  UninstallResult result;
+  ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
+  ASSERT_TRUE(result.run);
+  EXPECT_EQ(result.run->outcome, ElevatedOutcome::kFailed);
+  EXPECT_EQ(machineFailures(result), (std::vector<std::wstring>{L"machine class: 0x80070005",
+                                                                L"machine tasks: 0x80070057"}));
+  EXPECT_TRUE(result.machineLeft);
+  EXPECT_EQ(result.code, ExitCode::kFailed);
+
+  options.launcher = ReportingLauncher(
+      L"report 0x80070005 \"failed class: 0x80070005\" \"elevated "
+      L"machine-uninstall end hr=0x80070005\"");
+  ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
+  ASSERT_TRUE(result.run);
+  EXPECT_TRUE(result.run->parts.ended);
+  EXPECT_EQ(machineFailures(result), std::vector<std::wstring>{L"machine: 0x80070005"});
+  EXPECT_EQ(result.code, ExitCode::kFailed);
 }
 
 TEST_F(Install, UninstallRefusalsAndTheInstallersUninstaller) {

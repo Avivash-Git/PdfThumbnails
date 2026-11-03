@@ -221,6 +221,7 @@ HRESULT RunCheck(const CheckOptions& options, const RegistryRoots& roots,
           RunElevated(*result->plan.machine, exe, options.owner, options.launcher, &run));
       machineRepaired =
           run.outcome == ElevatedOutcome::kDone || run.outcome == ElevatedOutcome::kRestartPending;
+      result->machineNotDone = NotDoneFailures(run, L"machine");
       result->elevated = std::move(run);
     }
   } else if (result->plan.machine && !options.quiet) {
@@ -239,8 +240,9 @@ HRESULT RunCheck(const CheckOptions& options, const RegistryRoots& roots,
   }
 
   result->adminStepNeeded = result->plan.machine.has_value() && !machineRepaired;
-  result->code = CheckExitCode(result->findings, AnyFailed(result->repairs),
-                               result->adminStepNeeded, options.quiet);
+  result->code =
+      CheckExitCode(result->findings, AnyFailed(result->repairs) || !result->machineNotDone.empty(),
+                    result->adminStepNeeded, options.quiet);
   if (result->elevated && result->elevated->outcome == ElevatedOutcome::kCancelled) {
     result->code = ExitCode::kCancelled;
   } else if (result->elevated && LackedAdministratorRights(*result->elevated)) {
@@ -272,10 +274,15 @@ HRESULT RunCheck(const CheckOptions& options, const RegistryRoots& roots,
   line += L" pdfcraft=" +
           (record.pdfcraftVersion.empty() ? std::wstring(L"none") : record.pdfcraftVersion);
   line += LiveTestLogFields(after);
+  if (result->elevated && !result->machineNotDone.empty()) {
+    line += L" not-done=" + std::to_wstring(CountPartsNotDone(*result->elevated));
+  }
   line += L" ms=" + std::to_wstring(GetTickCount64() - started);
-  // A warning when a step of this program failed; an Explorer test that could not start is one.
-  LogLine((AnyFailed(result->repairs) || FAILED(after.liveError)) ? LogLevel::kWarning
-                                                                  : LogLevel::kInfo,
+  // A warning when a step of this program failed; an Explorer test that could not start is one,
+  // and so is a part of the administrator step that did not complete.
+  LogLine((AnyFailed(result->repairs) || FAILED(after.liveError) || !result->machineNotDone.empty())
+              ? LogLevel::kWarning
+              : LogLevel::kInfo,
           line);
   return S_OK;
 }

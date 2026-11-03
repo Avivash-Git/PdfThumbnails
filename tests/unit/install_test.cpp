@@ -80,6 +80,32 @@ TEST(Install, StepExitCodes) {
             ExitCode::kNeedsAdmin);
 }
 
+// What a command says for an administrator step that is done: with a restart pending, and with
+// parts it did not complete (without the restart's clause then: a part may be a file in use
+// that could not be queued for deletion at the restart).
+TEST(ElevatedTexts, DoneTexts) {
+  ElevatedRun run;
+  run.outcome = ElevatedOutcome::kDone;
+  run.report = {ElevatedEndLine(ElevatedVerb::kMachineInstall, S_OK, false, 0)};
+  run.parts = ReadReportParts(ElevatedVerb::kMachineInstall, run.report);
+  EXPECT_EQ(ElevatedDoneText(L"The part for all users", run), L"The part for all users is done.");
+  run.outcome = ElevatedOutcome::kRestartPending;
+  EXPECT_EQ(ElevatedDoneText(L"The part for all users", run),
+            L"The part for all users is done; files that were in use are deleted at the next "
+            L"restart.");
+  run.report = {NotDoneLine(L"restart-delete: 0x80070005"),
+                ElevatedEndLine(ElevatedVerb::kMachineInstall, S_OK, true, 1)};
+  run.parts = ReadReportParts(ElevatedVerb::kMachineInstall, run.report);
+  ASSERT_TRUE(PartsNotDone(run));
+  EXPECT_EQ(ElevatedDoneText(L"The part for all users", run),
+            L"The part for all users is done, but some of its parts did not complete; its "
+            L"report:");
+  run.outcome = ElevatedOutcome::kDone;
+  EXPECT_EQ(ElevatedDoneText(L"The administrator step", run),
+            L"The administrator step is done, but some of its parts did not complete; its "
+            L"report:");
+}
+
 TEST(Install, NoAdministratorRightsMessage) {
   const std::wstring text = NoAdministratorRightsMessage();
   EXPECT_EQ(text.rfind(L"The step for all users did not get administrator rights", 0), 0u);

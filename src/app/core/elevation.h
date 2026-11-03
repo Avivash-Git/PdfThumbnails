@@ -20,6 +20,14 @@
 // never loads the thumbnail handler, shows no window and writes no log. Its exit code is its
 // result: 0 done, 1 done but a restart is pending, else the HRESULT that failed.
 //
+// A step that goes on after a part of it failed (the class for all users written, then the task
+// folder not made or an old build folder not removed) reports each such part as "not done:
+// <part>: <HRESULT>", and its last line counts them: "elevated <step> end hr=<HRESULT>[
+// restart-pending] not-done=<n>". The parts do not change the exit code: a parent of any build
+// reads 0 and 1 as done, so a step whose own work is done still exits 0 or 1. The asking side
+// adds each part to its command's failures (ReadReportParts, NotDoneFailures); the report can
+// only add failures, never take away the one a failed exit code gives.
+//
 // Progress lines go back to the process that asked, through a named pipe that process creates
 // before starting the elevated one (\\.\pipe\<Product>.Elevated.<its process id>, first
 // instance only, owned by its user and open to the user and Administrators). The name is
@@ -165,18 +173,21 @@ std::wstring_view ElevatedRefusalText(ElevatedRefusal refusal) noexcept;
 // (CheckElevatedEntry), reports through the parent's pipe if there is one, and runs the step.
 // Returns the process exit code: 0, 1 (done, restart pending) or the failing HRESULT. The
 // report's first line ("elevated <step> start", or "... refused hr=<HRESULT>: <why>" with
-// ElevatedRefusalText) ends with its token's facts (TokenFactsText); a step that fails says
-// where its failure started before its last line ("elevated <step> failed in <part> at
-// <file>:<line> <function> hr=<HRESULT>", failure_trace.h, with " (end hr differs)" when the
-// step returned another HRESULT).
+// ElevatedRefusalText) ends with its token's facts (TokenFactsText). After the step's own lines
+// come one NotDoneLine per part it did not complete, then, for a step that fails, where its
+// failure started ("elevated <step> failed in <part> at <file>:<line> <function> hr=<HRESULT>",
+// failure_trace.h, with " (end hr differs)" when the step returned another HRESULT), and last
+// ElevatedEndLine with their count (EndElevatedStep).
 int ElevatedMain() noexcept;
 
 // The step itself, after the entry checks passed (install.h, uninstall.h, migrate_v1.h).
-// |restartPending| is set when something is left for the next restart. A step not in this build
-// fails with E_NOTIMPL.
+// |restartPending| is set when something is left for the next restart; |notDone| receives the
+// parts it went on after, "<part>: <HRESULT>" (never paths). A step not in this build fails with
+// E_NOTIMPL.
 class ElevatedReporter;
 [[nodiscard]] HRESULT RunElevatedStep(ElevatedVerb verb, ElevatedReporter& report,
-                                      bool* restartPending) noexcept;
+                                      bool* restartPending,
+                                      std::vector<std::wstring>* notDone) noexcept;
 
 // ---- The reporting channel ------------------------------------------------------------------
 
@@ -271,6 +282,49 @@ class ElevationReportServer {
 // most kMaxReportLines lines; a last line without "\n" counts. May throw std::bad_alloc.
 std::vector<std::wstring> SplitReportLines(std::string_view bytes);
 
+// ---- Parts a step did not complete ----------------------------------------------------------
+
+class FailureTrace;
+
+// "not done: " + |failure|, where |failure| is "<part>: <HRESULT>" as the step's own list has it
+// ("task-folder: 0x80070005", "hive left: 0x800402F0"). May throw std::bad_alloc.
+std::wstring NotDoneLine(std::wstring_view failure);
+
+// "elevated <step> end hr=<HRESULT>[ restart-pending] not-done=<n>" (pure). May throw
+// std::bad_alloc.
+std::wstring ElevatedEndLine(ElevatedVerb verb, HRESULT hr, bool restartPending, size_t notDone);
+
+// ElevatedMain's last part, once the step returned |hr|: a NotDoneLine per |notDone| entry, where
+// a failure started (|trace|'s pending failure) when |hr| failed, then ElevatedEndLine. Returns
+// the exit code: |hr| when it failed, else 1 when |restartPending|, else 0.
+int EndElevatedStep(ElevatedReporter& report, ElevatedVerb verb, HRESULT hr, bool restartPending,
+                    std::span<const std::wstring> notDone, const FailureTrace& trace) noexcept;
+
+// A part a report names as not done.
+struct NotDonePart {
+  std::wstring part;  // "task-folder", "hive left", ...
+  HRESULT hr = S_OK;  // a failure
+};
+
+// What a step's report says about the parts it did not complete.
+struct ReportParts {
+  bool ended = false;              // the last line is this step's own end line
+  std::optional<size_t> counted;   // its not-done count; absent in earlier builds
+  std::vector<NotDonePart> named;  // the well-formed NotDoneLine lines, in order
+};
+
+// Reads |lines| (a report of the step |verb|, untrusted text) strictly (pure):
+// - the end line is the last line: "elevated <ElevatedVerbName> end hr=", then "0x" and 8 hex
+//   digits in either case, then optional words, each after a space. "not-done=<1 to 9 digits>"
+//   sets |counted|, at most kMaxReportLines; other words are skipped, so a later build may add
+//   some. Any other last line leaves |ended| false and |counted| absent;
+// - the named parts come from every line before the end line, or from every line when there is
+//   none. Such a line is "not done: " + part + ": " + hr, split at the last ": ". The part is 1 to
+//   64 characters of a-z, 0-9, "-" and space, with no space first or last; the hr is "0x" and 8
+//   hex digits, and a failure. Any other line names nothing.
+// May throw std::bad_alloc.
+ReportParts ReadReportParts(ElevatedVerb verb, std::span<const std::wstring> lines);
+
 // ---- Starting the elevated process ----------------------------------------------------------
 
 struct ElevationRequest {
@@ -309,6 +363,7 @@ struct ElevatedRun {
   DWORD exitCode = 0;
   bool reportChannel = false;        // the elevated process wrote to this process's pipe
   std::vector<std::wstring> report;  // what it wrote, as untrusted text
+  ReportParts parts;                 // ReadReportParts of |report|
   // Making this process's pipe, before the launch. A failure leaves the step without a report
   // (it runs all the same); ReportChannelTaken tells when another process caused it.
   HRESULT reportServer = S_OK;
@@ -326,11 +381,42 @@ bool LackedAdministratorRights(const ElevatedRun& run) noexcept;
 // another process").
 bool ReportChannelTaken(const ElevatedRun& run) noexcept;
 
+// How many parts |run|'s report says the step did not complete (pure): its count, or the parts
+// it names when they are more; 0 for a step that never ran (declined, not launched, no
+// administrator rights).
+size_t CountPartsNotDone(const ElevatedRun& run) noexcept;
+// CountPartsNotDone(|run|) > 0 (pure).
+bool PartsNotDone(const ElevatedRun& run) noexcept;
+
+// The failures of the command for the parts |run|'s step did not complete, whatever its exit code
+// says (pure): "<step> <part>: <HRESULT>" per named part, then "<step> unnamed parts: <n> (see the
+// step's report)" for parts counted but not named; none for a step that never ran (declined, not
+// launched, no administrator rights). May throw std::bad_alloc.
+std::vector<std::wstring> NotDoneFailures(const ElevatedRun& run, std::wstring_view step);
+
+// For the steps that exit with their first part's HRESULT (machine-uninstall,
+// machine-migrate-v1): whether the command still needs the failure "<step>: <HRESULT>" (pure).
+// True for a failed run (a failed launch included) unless it lacked administrator rights or its
+// first named part has the HRESULT it exited with. A failed step always keeps one entry: this
+// one or its parts.
+bool NeedsStepFailure(const ElevatedRun& run) noexcept;
+
+// Done (kDone, kRestartPending) without its end line as the report's last line (pure): no
+// report, or one cut short.
+bool ReportIncomplete(const ElevatedRun& run) noexcept;
+
+// The line RunElevated logs after the report (pure): "<step> launch=<HRESULT> exit=<HRESULT>",
+// then " report-channel=<HRESULT>" (with " (taken by another process)") when the pipe could not
+// be made, " no-report" when nothing came through it, " report-incomplete" when the report of a
+// step that is done lacks its end line, and " not-done=<n>" (CountPartsNotDone) when parts were
+// not done. May throw std::bad_alloc.
+std::wstring ElevatedRunSummary(ElevatedVerb verb, const ElevatedRun& run);
+
 // Has |verb| done by the settings executable |exe| (which must be named like it and be
 // absolute: E_INVALIDARG otherwise, before anything starts) through |launcher|, collecting its
-// report. Fails only for invalid arguments or when out of memory; everything else is in |run|,
-// a report channel it could not make included (reportServer; the summary line it logs says so
-// too).
+// report and reading its parts not done (ReadReportParts). Fails only for invalid arguments or
+// when out of memory; everything else is in |run|, a report channel it could not make included
+// (reportServer; the summary line it logs, ElevatedRunSummary, says so too).
 [[nodiscard]] HRESULT RunElevated(ElevatedVerb verb, const std::filesystem::path& exe, HWND owner,
                                   const ElevationLauncher& launcher, ElevatedRun* run) noexcept;
 

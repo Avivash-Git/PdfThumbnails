@@ -1,14 +1,16 @@
 // The elevation boundary (elevation.h) without any elevation: RunElevated with launchers that
-// never ask for administrator rights (one starts this test program's "report" child normally,
-// so the report pipe is tested end to end between real processes), the reporter's refusal to
-// write to a pipe its parent does not serve or its parent's user does not own, a pipe that is
-// never read holding the reporter up for a few seconds at most, the asking side reading on past
-// its cap and ending its reading when it gives up on a client that never stops writing, a report
-// channel another process took, the token facts the report starts with and
-// the ones the elevated side's entry check reads (this process's, and a standard user's token
-// made from it, which the entry check must refuse even where it counts as elevated), and the
-// installer's records (inno.h) in private registry keys. Nothing here calls the real launcher: a
-// UAC prompt never appears.
+// never ask for administrator rights (they start this test program's "report" and "report-step"
+// children normally, so the report pipe is tested end to end between real processes, and with it
+// the parts a step did not complete as the asking side reads them back: this build's report, an
+// older build's, one cut short and one naming a part this build cannot read), the reporter's
+// refusal to write to a pipe its parent does not serve or its parent's user does not own, a pipe
+// that is never read holding the reporter up for a few seconds at most, the asking side reading on
+// past its cap and ending its reading when it gives up on a client that never stops writing, a
+// report channel another process took, the token facts the report starts with and the ones the
+// elevated side's entry check reads (this process's, and a standard user's token made from it,
+// which the entry check must refuse even where it counts as elevated), and the installer's records
+// (inno.h) in private registry keys. Nothing here calls the real launcher: a UAC prompt never
+// appears.
 
 #include <windows.h>
 
@@ -18,6 +20,7 @@
 #include <sddl.h>
 #include <wil/resource.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdio>
@@ -32,7 +35,9 @@
 #include "instance.h"
 #include "medium_il.h"
 #include "project_config.h"
+#include "registry_roots.h"
 #include "registry_sandbox.h"
+#include "strings.h"
 
 namespace pdft {
 namespace {
@@ -84,23 +89,20 @@ bool WriteWithin(HANDLE pipe, HANDLE event, const std::string& bytes, DWORD time
 // Starts this test program as "--pdft-child report <arguments>", the way the elevated process
 // would be started but without elevation, waits for it, and returns its id and exit code.
 HRESULT StartReportChild(const std::wstring& arguments, DWORD* processId, DWORD* exitCode) {
-  std::wstring commandLine =
-      test::QuoteArgument(test::SelfPath()) + L" --pdft-child report " + arguments;
-  STARTUPINFOW startup = {sizeof(startup)};
-  PROCESS_INFORMATION process = {};
-  if (!CreateProcessW(test::SelfPath().c_str(), commandLine.data(), nullptr, nullptr, FALSE,
-                      CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
-    return HRESULT_FROM_WIN32(GetLastError());
-  }
-  wil::unique_handle thread(process.hThread);
-  wil::unique_handle handle(process.hProcess);
-  if (WaitForSingleObject(handle.get(), 30000) != WAIT_OBJECT_0) {
-    TerminateProcess(handle.get(), 1);
-    return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
-  }
-  *processId = process.dwProcessId;
-  if (!GetExitCodeProcess(handle.get(), exitCode)) return HRESULT_FROM_WIN32(GetLastError());
-  return S_OK;
+  return test::RunSelfChild(L"report " + arguments, processId, exitCode);
+}
+
+// RunElevated for |verb|, with a launcher that runs this test program's child "<arguments>".
+ElevatedRun RunChild(ElevatedVerb verb, const std::wstring& arguments) {
+  ElevatedRun run;
+  EXPECT_EQ(RunElevated(
+                verb, SettingsExe(), nullptr,
+                [&](const ElevationRequest&, DWORD* processId, DWORD* exitCode) {
+                  return test::RunSelfChild(arguments, processId, exitCode);
+                },
+                &run),
+            S_OK);
+  return run;
 }
 
 TEST(RunElevated, CollectsItsChildsReport) {
@@ -127,6 +129,112 @@ TEST(RunElevated, CollectsItsChildsReport) {
   EXPECT_FALSE(ReportChannelTaken(run));
   EXPECT_TRUE(run.reportChannel);
   EXPECT_EQ(run.report, (std::vector<std::wstring>{L"step one", L"step two: caf\u00E9"}));
+  // Done, but without its end line: the report did not come back whole.
+  EXPECT_FALSE(run.parts.ended);
+  EXPECT_TRUE(ReportIncomplete(run));
+  EXPECT_FALSE(PartsNotDone(run));
+}
+
+// ---- the parts a step did not complete, through the pipe ----
+
+TEST(RunElevated, PartsNotDoneComeBack) {
+  const ElevatedRun run =
+      RunChild(ElevatedVerb::kMachineInstall,
+               L"report-step machine-install 0 0 \"task-folder: 0x80070005\" \"old-builds: "
+               L"0x80070057\"");
+  EXPECT_EQ(run.outcome, ElevatedOutcome::kDone);
+  EXPECT_TRUE(run.reportChannel);
+  EXPECT_TRUE(run.parts.ended);
+  EXPECT_EQ(run.parts.counted, 2u);
+  EXPECT_FALSE(ReportIncomplete(run));
+  EXPECT_EQ(NotDoneFailures(run, L"machine-install"),
+            (std::vector<std::wstring>{L"machine-install task-folder: 0x80070005",
+                                       L"machine-install old-builds: 0x80070057"}));
+  ASSERT_FALSE(run.report.empty());
+  EXPECT_EQ(run.report.back(), ElevatedEndLine(ElevatedVerb::kMachineInstall, S_OK, false, 2));
+  EXPECT_EQ(run.report.front(), NotDoneLine(L"task-folder: 0x80070005"));
+}
+
+// A step that failed after naming its parts (as machine-uninstall does, ending with the first
+// one's HRESULT): its parts stand for it, and where the failure started is said before the end.
+TEST(RunElevated, AFailedStepNamesItsParts) {
+  const std::wstring left = L"hive left: " + HResultText(kRegistryTreeLeftHr);
+  const ElevatedRun run = RunChild(ElevatedVerb::kMachineUninstall,
+                                   L"report-step machine-uninstall 0x80070005 0 "
+                                   L"\"class: 0x80070005\" \"" +
+                                       left + L"\"");
+  EXPECT_EQ(run.outcome, ElevatedOutcome::kFailed);
+  EXPECT_EQ(run.failure, E_ACCESSDENIED);
+  EXPECT_TRUE(run.parts.ended);
+  EXPECT_FALSE(NeedsStepFailure(run));
+  EXPECT_EQ(NotDoneFailures(run, L"machine"),
+            (std::vector<std::wstring>{L"machine class: 0x80070005", L"machine " + left}));
+  EXPECT_NE(std::find(run.report.begin(), run.report.end(),
+                      L"elevated machine-uninstall failed at a place not traced"),
+            run.report.end());
+  ASSERT_FALSE(run.report.empty());
+  EXPECT_EQ(run.report.back(),
+            ElevatedEndLine(ElevatedVerb::kMachineUninstall, E_ACCESSDENIED, false, 2));
+}
+
+// An older build's report: its end line has no count and it names no parts, so the exit code
+// alone tells how the step ended, as it did.
+TEST(RunElevated, AReportOfAnOlderBuild) {
+  const ElevatedRun run =
+      RunChild(ElevatedVerb::kMachineInstall,
+               L"report 0 \"copied a build (4 files written)\" \"elevated machine-install end "
+               L"hr=0x00000000\"");
+  EXPECT_EQ(run.outcome, ElevatedOutcome::kDone);
+  EXPECT_TRUE(run.parts.ended);
+  EXPECT_FALSE(run.parts.counted);
+  EXPECT_FALSE(ReportIncomplete(run));
+  EXPECT_FALSE(PartsNotDone(run));
+  EXPECT_TRUE(NotDoneFailures(run, L"machine-install").empty());
+}
+
+// A report cut short: what came is read, and the run says that its end is missing.
+TEST(RunElevated, AReportCutShort) {
+  const ElevatedRun run =
+      RunChild(ElevatedVerb::kMachineInstall, L"report 0 \"not done: old-builds: 0x80070057\"");
+  EXPECT_EQ(run.outcome, ElevatedOutcome::kDone);
+  EXPECT_FALSE(run.parts.ended);
+  EXPECT_TRUE(ReportIncomplete(run));
+  EXPECT_EQ(NotDoneFailures(run, L"machine-install"),
+            std::vector<std::wstring>{L"machine-install old-builds: 0x80070057"});
+}
+
+// A part this build cannot read (a later build's name, say): counted, never dropped.
+TEST(RunElevated, APartALaterBuildNames) {
+  const ElevatedRun run = RunChild(ElevatedVerb::kMachineRepairClass,
+                                   L"report-step machine-repair-class 0 0 \"Copy (trash): "
+                                   L"0x80070005\"");
+  EXPECT_EQ(run.outcome, ElevatedOutcome::kDone);
+  EXPECT_TRUE(run.parts.ended);
+  EXPECT_TRUE(run.parts.named.empty());
+  EXPECT_EQ(run.parts.counted, 1u);
+  EXPECT_EQ(NotDoneFailures(run, L"machine"),
+            std::vector<std::wstring>{L"machine unnamed parts: 1 (see the step's report)"});
+}
+
+// The exit code of a step's end: 0, 1 with a restart pending, and the HRESULT of a failure.
+TEST(RunElevated, TheEndOfAStep) {
+  ElevatedRun run =
+      RunChild(ElevatedVerb::kMachineRepairClass, L"report-step machine-repair-class 0 0");
+  EXPECT_EQ(run.outcome, ElevatedOutcome::kDone);
+  EXPECT_EQ(run.exitCode, 0u);
+  EXPECT_EQ(run.report, std::vector<std::wstring>{
+                            ElevatedEndLine(ElevatedVerb::kMachineRepairClass, S_OK, false, 0)});
+  run = RunChild(ElevatedVerb::kMachineRepairClass, L"report-step machine-repair-class 0 1");
+  EXPECT_EQ(run.outcome, ElevatedOutcome::kRestartPending);
+  EXPECT_EQ(run.exitCode, 1u);
+  EXPECT_TRUE(run.parts.ended);
+  run =
+      RunChild(ElevatedVerb::kMachineRepairClass, L"report-step machine-repair-class 0x80004005 1");
+  EXPECT_EQ(run.outcome, ElevatedOutcome::kFailed);
+  EXPECT_EQ(run.failure, E_FAIL);
+  EXPECT_EQ(run.exitCode, static_cast<DWORD>(E_FAIL));
+  ASSERT_FALSE(run.report.empty());
+  EXPECT_EQ(run.report.back(), ElevatedEndLine(ElevatedVerb::kMachineRepairClass, E_FAIL, true, 0));
 }
 
 TEST(RunElevated, AFailedStep) {
@@ -196,6 +304,7 @@ TEST(RunElevated, SomeoneElsesPipeGetsNothing) {
       << "making the pipe: 0x" << std::hex << static_cast<unsigned long>(run.reportServer);
   EXPECT_FALSE(run.reportChannel);
   EXPECT_TRUE(run.report.empty());
+  EXPECT_TRUE(ReportIncomplete(run));
   EXPECT_EQ(squatter.ReadLine(), "got=0");
   EXPECT_EQ(squatter.Wait(15000), 0u);
 }

@@ -1,9 +1,11 @@
 // The pure parts of the elevation boundary (elevation.h): the step names and the one accepted
 // command line, the elevated side's entry checks in their order (administrator rights in every
 // combination of the token's facts), how an elevated run's exit is read, how the report pipe's
-// bytes become lines, which pipe the elevated side writes to, and a report channel another
-// process took. Also the installer's records (inno.h) and which holders of a DLL may be ended
-// (processes.h).
+// bytes become lines, which pipe the elevated side writes to, a report channel another process
+// took, and the parts a step did not complete: the lines and the end line it writes, and how the
+// asking side reads them into its failures (this build's report, an older build's, one cut
+// short, malformed or forged lines). Also the installer's records (inno.h) and which holders of
+// a DLL may be ended (processes.h).
 
 #include <windows.h>
 
@@ -19,6 +21,7 @@
 #include "inno.h"
 #include "processes.h"
 #include "project_config.h"
+#include "registry_roots.h"
 #include "strings.h"
 
 namespace pdft {
@@ -345,6 +348,317 @@ TEST(ElevatedReport, AChannelTakenByAnotherProcess) {
     run.reportServer = other;
     EXPECT_FALSE(ReportChannelTaken(run)) << std::hex << static_cast<unsigned long>(other);
   }
+}
+
+// ---- the parts a step did not complete ----
+
+// A run of |verb| that was launched, ended with |exitCode| and sent |report|, read the way
+// RunElevated reads it.
+ElevatedRun RunWithReport(ElevatedVerb verb, DWORD exitCode, std::vector<std::wstring> report) {
+  ElevatedRun run;
+  run.exitCode = exitCode;
+  run.outcome = ClassifyElevatedExit(S_OK, exitCode, &run.failure);
+  run.reportChannel = !report.empty();
+  run.report = std::move(report);
+  run.parts = ReadReportParts(verb, run.report);
+  return run;
+}
+
+// A run whose launch failed with |launched| (ERROR_CANCELLED: a declined prompt), although lines
+// came back.
+ElevatedRun NotLaunched(HRESULT launched, std::vector<std::wstring> report) {
+  ElevatedRun run;
+  run.launched = launched;
+  run.outcome = ClassifyElevatedExit(launched, 0, &run.failure);
+  run.report = std::move(report);
+  run.parts = ReadReportParts(ElevatedVerb::kMachineUninstall, run.report);
+  return run;
+}
+
+constexpr ElevatedVerb kInstall = ElevatedVerb::kMachineInstall;
+constexpr ElevatedVerb kUninstall = ElevatedVerb::kMachineUninstall;
+
+TEST(ElevatedReport, EndAndNotDoneLines) {
+  EXPECT_EQ(ElevatedEndLine(kInstall, S_OK, false, 0),
+            L"elevated machine-install end hr=0x00000000 not-done=0");
+  EXPECT_EQ(ElevatedEndLine(kUninstall, E_ACCESSDENIED, true, 2),
+            L"elevated machine-uninstall end hr=0x80070005 restart-pending not-done=2");
+  EXPECT_EQ(NotDoneLine(L"task-folder: 0x80070005"), L"not done: task-folder: 0x80070005");
+}
+
+// The lines a step of this build writes, from failures built the way the steps list them, read
+// back in order from between its other lines.
+TEST(ElevatedReport, ReadsPartsOfThisBuild) {
+  EXPECT_EQ(HResultText(kRegistryTreeLeftHr), L"0x800402F0");
+  const std::vector<std::wstring> failures = {
+      L"task-folder: " + HResultText(E_ACCESSDENIED),
+      L"restart-delete: " + HResultText(HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION)),
+      L"hive left: " + HResultText(kRegistryTreeLeftHr)};
+  std::vector<std::wstring> lines = {
+      L"elevated machine-install start (token: elevated yes, elevation type 2 (full), integrity "
+      L"0x3000, Administrators enabled)",
+      L"copied app\\2.0.0.0-1a2b3c4d (4 files written)"};
+  for (const std::wstring& failure : failures) lines.push_back(NotDoneLine(failure));
+  lines.push_back(ElevatedEndLine(kInstall, S_OK, true, failures.size()));
+  const ReportParts parts = ReadReportParts(kInstall, lines);
+  EXPECT_TRUE(parts.ended);
+  EXPECT_EQ(parts.counted, 3u);
+  ASSERT_EQ(parts.named.size(), 3u);
+  EXPECT_EQ(parts.named[0].part, L"task-folder");
+  EXPECT_EQ(parts.named[0].hr, E_ACCESSDENIED);
+  EXPECT_EQ(parts.named[1].part, L"restart-delete");
+  EXPECT_EQ(parts.named[1].hr, HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION));
+  EXPECT_EQ(parts.named[2].part, L"hive left");
+  EXPECT_EQ(parts.named[2].hr, kRegistryTreeLeftHr);
+
+  // Hex digits in either case; the command's failures write them as HResultText does.
+  const ElevatedRun run = RunWithReport(kInstall, 0,
+                                        {L"not done: old-builds: 0x8007000e",
+                                         L"elevated machine-install end hr=0x0000000a not-done=1"});
+  EXPECT_TRUE(run.parts.ended);
+  EXPECT_EQ(NotDoneFailures(run, L"machine-install"),
+            std::vector<std::wstring>{L"machine-install old-builds: 0x8007000E"});
+}
+
+// The reports of the build before parts were reported: ended, no count, nothing named, so the
+// exit code alone tells how the step ended, as it did.
+TEST(ElevatedReport, AReportOfAnOlderBuild) {
+  ElevatedRun run =
+      RunWithReport(kUninstall, static_cast<DWORD>(E_ACCESSDENIED),
+                    {L"elevated machine-uninstall start (token: elevated yes, elevation type 2 "
+                     L"(full), integrity 0x3000, Administrators enabled)",
+                     L"class for all users removed", L"failed class: 0x80070005",
+                     L"elevated machine-uninstall end hr=0x80070005"});
+  EXPECT_TRUE(run.parts.ended);
+  EXPECT_FALSE(run.parts.counted);
+  EXPECT_TRUE(run.parts.named.empty());
+  EXPECT_TRUE(NeedsStepFailure(run));
+  EXPECT_TRUE(NotDoneFailures(run, L"machine").empty());
+
+  run = RunWithReport(kInstall, 1,
+                      {L"class for all users -> app\\2.0.0.0-1a2b3c4d",
+                       L"elevated machine-install end hr=0x00000000 restart-pending"});
+  EXPECT_EQ(run.outcome, ElevatedOutcome::kRestartPending);
+  EXPECT_TRUE(run.parts.ended);
+  EXPECT_FALSE(run.parts.counted);
+  EXPECT_FALSE(ReportIncomplete(run));
+  EXPECT_FALSE(PartsNotDone(run));
+}
+
+// Only well-formed lines name a part, and only the step's own end line, as the last line, ends
+// its report.
+TEST(ElevatedReport, OnlyWellFormedPartsAreNamed) {
+  const auto named = [](const std::wstring& line) {
+    return ReadReportParts(kInstall, std::vector<std::wstring>{line}).named.size();
+  };
+  EXPECT_EQ(named(L"not done: task-folder: 0x80070005"), 1u);
+  EXPECT_EQ(named(L"not done: hive left: 0x800402F0"), 1u);
+  EXPECT_EQ(named(L"not done: " + std::wstring(64, L'a') + L": 0x80070005"), 1u);
+  EXPECT_EQ(named(L"not done: " + std::wstring(65, L'a') + L": 0x80070005"), 0u);
+  for (const wchar_t* line : {
+           L"not done: Task-folder: 0x80070005",   // an uppercase letter
+           L"not done: task\\folder: 0x80070005",  // a path's character
+           L"not done: task.folder: 0x80070005",
+           L"not done:  task-folder: 0x80070005",  // a space first
+           L"not done: task-folder : 0x80070005",  // a space last
+           L"not done: : 0x80070005",              // no part
+           L"not done: a: b: 0x80070005",          // split at the last ": "
+           L"not done: task-folder 0x80070005",    // no ": "
+           L"not done: task-folder: 0x800700050",  // 9 digits
+           L"not done: task-folder: 0x8007005",    // 7 digits
+           L"not done: task-folder: 80070005",     // no 0x
+           L"not done: task-folder: 0X80070005",
+           L"not done: task-folder: 0x8007000g",
+           L"not done: task-folder: 0x00000000",  // a success
+           L"not done: task-folder: 0x80070005 ",
+           L"not done:task-folder: 0x80070005",  // the prefix without its space
+           L"Not done: task-folder: 0x80070005",
+           L"failed task-folder: 0x80070005",
+       }) {
+    EXPECT_EQ(named(line), 0u) << WideToUtf8Lossy(line);
+  }
+
+  const std::wstring end = L"elevated machine-install end hr=0x00000000";
+  const auto read = [](const std::vector<std::wstring>& lines) {
+    return ReadReportParts(kInstall, lines);
+  };
+  EXPECT_FALSE(read({}).ended);
+  // A line after the end line: the report did not end there, and what came is still read.
+  ReportParts parts = read({L"not done: old-builds: 0x80070057", end + L" not-done=1", L"more"});
+  EXPECT_FALSE(parts.ended);
+  EXPECT_FALSE(parts.counted);
+  EXPECT_EQ(parts.named.size(), 1u);
+  // An end line after the last one is not the step's own either.
+  parts = read({end + L" not-done=0", L"not done: old-builds: 0x80070057"});
+  EXPECT_FALSE(parts.ended);
+  EXPECT_EQ(parts.named.size(), 1u);
+  // Another step's end line.
+  EXPECT_FALSE(read({L"elevated machine-uninstall end hr=0x00000000 not-done=0"}).ended);
+  // The HRESULT exactly, then words, each after a space.
+  EXPECT_FALSE(read({L"elevated machine-install end hr=0x0000000"}).ended);
+  EXPECT_FALSE(read({L"elevated machine-install end hr=0x000000000"}).ended);
+  EXPECT_FALSE(read({end + L"restart-pending"}).ended);
+  EXPECT_FALSE(read({L"elevated machine-install end hr=0X00000000"}).ended);
+  EXPECT_TRUE(read({L"elevated machine-install end hr=0x8007000e not-done=0"}).ended);
+  // Words this build does not know are skipped; a count it cannot read is none.
+  parts = read({end + L" future=1 not-done=2"});
+  EXPECT_TRUE(parts.ended);
+  EXPECT_EQ(parts.counted, 2u);
+  for (const wchar_t* word : {L" not-done=x", L" not-done=", L" not-done=1234567890",
+                              L" not-done=-1", L" not-done=+1", L" Not-done=1"}) {
+    parts = read({end + word});
+    EXPECT_TRUE(parts.ended) << WideToUtf8Lossy(word);
+    EXPECT_FALSE(parts.counted) << WideToUtf8Lossy(word);
+  }
+  // A count past what a report can hold names no more parts than that.
+  parts = read({end + L" not-done=999999999"});
+  EXPECT_EQ(parts.counted, kMaxReportLines);
+}
+
+// What the command adds to its failures for a step's parts, and whether it still needs the step's
+// own entry.
+TEST(ElevatedReport, FailuresForTheCommand) {
+  ElevatedRun run = RunWithReport(
+      kInstall, 0,
+      {NotDoneLine(L"task-folder: 0x80070005"), NotDoneLine(L"old-builds: 0x80070057"),
+       ElevatedEndLine(kInstall, S_OK, false, 2)});
+  EXPECT_EQ(NotDoneFailures(run, L"machine-install"),
+            (std::vector<std::wstring>{L"machine-install task-folder: 0x80070005",
+                                       L"machine-install old-builds: 0x80070057"}));
+  EXPECT_EQ(CountPartsNotDone(run), 2u);
+  EXPECT_TRUE(PartsNotDone(run));
+  EXPECT_FALSE(NeedsStepFailure(run));
+
+  // Counted, but not all named: the rest in one entry.
+  run = RunWithReport(
+      kInstall, 0,
+      {NotDoneLine(L"task-folder: 0x80070005"), NotDoneLine(L"A Later Part: 0x80070005"),
+       ElevatedEndLine(kInstall, S_OK, false, 3)});
+  EXPECT_EQ(CountPartsNotDone(run), 3u);
+  EXPECT_EQ(
+      NotDoneFailures(run, L"machine-install"),
+      (std::vector<std::wstring>{L"machine-install task-folder: 0x80070005",
+                                 L"machine-install unnamed parts: 2 (see the step's report)"}));
+
+  run = RunWithReport(kInstall, 0, {ElevatedEndLine(kInstall, S_OK, false, 0)});
+  EXPECT_FALSE(PartsNotDone(run));
+  EXPECT_TRUE(NotDoneFailures(run, L"machine-install").empty());
+  EXPECT_FALSE(NeedsStepFailure(run));
+
+  // A failed step that ended with its first part's HRESULT: the parts stand for it.
+  const std::vector<std::wstring> parts = {NotDoneLine(L"class: 0x80070005"),
+                                           NotDoneLine(L"tasks: 0x80070057")};
+  std::vector<std::wstring> lines = parts;
+  lines.push_back(ElevatedEndLine(kUninstall, E_ACCESSDENIED, false, 2));
+  run = RunWithReport(kUninstall, static_cast<DWORD>(E_ACCESSDENIED), lines);
+  EXPECT_FALSE(NeedsStepFailure(run));
+  EXPECT_EQ(
+      NotDoneFailures(run, L"machine"),
+      (std::vector<std::wstring>{L"machine class: 0x80070005", L"machine tasks: 0x80070057"}));
+  // Another HRESULT than its first part's, a later part's included: the step's own entry stays.
+  for (const HRESULT other : {E_FAIL, E_INVALIDARG}) {
+    run = RunWithReport(kUninstall, static_cast<DWORD>(other), parts);
+    EXPECT_TRUE(NeedsStepFailure(run)) << std::hex << static_cast<unsigned long>(other);
+  }
+  // No parts.
+  run = RunWithReport(kUninstall, static_cast<DWORD>(E_ACCESSDENIED),
+                      {ElevatedEndLine(kUninstall, E_ACCESSDENIED, false, 0)});
+  EXPECT_TRUE(NeedsStepFailure(run));
+  EXPECT_TRUE(NotDoneFailures(run, L"machine").empty());
+
+  // A step that never ran has no parts, whatever came back: a launch that failed keeps the
+  // step's entry; a declined prompt and a step without administrator rights have exit codes of
+  // their own.
+  run = NotLaunched(HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), parts);
+  EXPECT_TRUE(NeedsStepFailure(run));
+  EXPECT_TRUE(NotDoneFailures(run, L"machine").empty());
+  EXPECT_EQ(CountPartsNotDone(run), 0u);
+  run = NotLaunched(HRESULT_FROM_WIN32(ERROR_CANCELLED), parts);
+  EXPECT_EQ(run.outcome, ElevatedOutcome::kCancelled);
+  EXPECT_FALSE(NeedsStepFailure(run));
+  EXPECT_TRUE(NotDoneFailures(run, L"machine").empty());
+  run = RunWithReport(kUninstall, static_cast<DWORD>(kNoAdministratorRightsHr), parts);
+  EXPECT_TRUE(LackedAdministratorRights(run));
+  EXPECT_FALSE(NeedsStepFailure(run));
+  EXPECT_TRUE(NotDoneFailures(run, L"machine").empty());
+  EXPECT_FALSE(PartsNotDone(run));
+}
+
+// A failed step always keeps at least one failure, whatever its report says, forged lines
+// included: the report can add failures, never take one away.
+TEST(ElevatedReport, AFailedStepAlwaysKeepsAFailure) {
+  const std::vector<std::vector<std::wstring>> reports = {
+      {},
+      {L"elevated machine-uninstall end hr=0x80070005"},
+      {L"elevated machine-uninstall end hr=0x80070005 not-done=0"},
+      {NotDoneLine(L"class: 0x80070005")},
+      {NotDoneLine(L"class: 0x80070005"), ElevatedEndLine(kUninstall, E_ACCESSDENIED, false, 1)},
+      {NotDoneLine(L"class: 0x80004005"), ElevatedEndLine(kUninstall, E_FAIL, false, 0)},
+      {NotDoneLine(L"Not A Part: 0x80070005"),
+       ElevatedEndLine(kUninstall, E_ACCESSDENIED, false, 1)},
+      {NotDoneLine(L"hive left: 0x800402F0"), NotDoneLine(L"class: 0x80070005")},
+      {NotDoneLine(L"class: 0x00000000"),
+       L"elevated machine-uninstall end hr=0x00000000 not-done=0"},
+  };
+  // 2: neither 0, 1 nor an HRESULT (E_UNEXPECTED).
+  const DWORD exits[] = {static_cast<DWORD>(E_ACCESSDENIED), static_cast<DWORD>(E_FAIL),
+                         static_cast<DWORD>(kRegistryTreeLeftHr), 2};
+  for (const DWORD code : exits) {
+    for (size_t i = 0; i < reports.size(); ++i) {
+      const ElevatedRun run = RunWithReport(kUninstall, code, reports[i]);
+      ASSERT_EQ(run.outcome, ElevatedOutcome::kFailed);
+      EXPECT_TRUE(NeedsStepFailure(run) || !NotDoneFailures(run, L"machine").empty())
+          << "exit " << std::hex << code << ", report " << std::dec << i;
+    }
+  }
+  for (const std::vector<std::wstring>& report : reports) {
+    EXPECT_TRUE(NeedsStepFailure(NotLaunched(HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), report)));
+  }
+}
+
+// A step that is done, but whose report did not come back whole: none came back, or its end line
+// is not the last line.
+TEST(ElevatedReport, ADoneStepWithoutItsWholeReport) {
+  EXPECT_TRUE(ReportIncomplete(RunWithReport(kInstall, 0, {})));
+  EXPECT_TRUE(ReportIncomplete(
+      RunWithReport(kInstall, 1, {L"elevated machine-install start (token: elevated yes)"})));
+  EXPECT_FALSE(
+      ReportIncomplete(RunWithReport(kInstall, 0, {ElevatedEndLine(kInstall, S_OK, false, 0)})));
+  EXPECT_FALSE(ReportIncomplete(
+      RunWithReport(kInstall, 1, {L"elevated machine-install end hr=0x00000000 restart-pending"})));
+  EXPECT_FALSE(ReportIncomplete(RunWithReport(kInstall, static_cast<DWORD>(E_ACCESSDENIED), {})));
+  EXPECT_FALSE(ReportIncomplete(NotLaunched(HRESULT_FROM_WIN32(ERROR_CANCELLED), {})));
+  EXPECT_FALSE(ReportIncomplete(NotLaunched(HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), {})));
+}
+
+TEST(ElevatedReport, Summary) {
+  ElevatedRun run = RunWithReport(kInstall, 0, {ElevatedEndLine(kInstall, S_OK, false, 0)});
+  EXPECT_EQ(ElevatedRunSummary(kInstall, run),
+            L"machine-install launch=0x00000000 exit=0x00000000");
+  run = RunWithReport(
+      kInstall, 1,
+      {NotDoneLine(L"task-folder: 0x80070005"), NotDoneLine(L"old-builds: 0x80070057"),
+       ElevatedEndLine(kInstall, S_OK, true, 2)});
+  EXPECT_EQ(ElevatedRunSummary(kInstall, run),
+            L"machine-install launch=0x00000000 exit=0x00000001 not-done=2");
+  run = RunWithReport(kInstall, 0, {L"elevated machine-install start (token: elevated yes)"});
+  EXPECT_EQ(ElevatedRunSummary(kInstall, run),
+            L"machine-install launch=0x00000000 exit=0x00000000 report-incomplete");
+  // Nothing came back: that alone is said.
+  run = RunWithReport(kInstall, 0, {});
+  EXPECT_EQ(ElevatedRunSummary(kInstall, run),
+            L"machine-install launch=0x00000000 exit=0x00000000 no-report");
+  run.reportServer = HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+  EXPECT_EQ(ElevatedRunSummary(kInstall, run),
+            L"machine-install launch=0x00000000 exit=0x00000000 report-channel=0x80070005 (taken "
+            L"by another process) no-report");
+  run.reportServer = E_OUTOFMEMORY;
+  EXPECT_EQ(ElevatedRunSummary(kInstall, run),
+            L"machine-install launch=0x00000000 exit=0x00000000 report-channel=0x8007000E "
+            L"no-report");
+  run = NotLaunched(HRESULT_FROM_WIN32(ERROR_CANCELLED), {});
+  EXPECT_EQ(ElevatedRunSummary(kUninstall, run),
+            L"machine-uninstall launch=0x800704C7 exit=0x00000000 no-report");
 }
 
 // ---- the installer's records ----

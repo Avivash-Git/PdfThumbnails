@@ -31,6 +31,12 @@ struct CapturedRun {
 CapturedRun RunCaptured(const std::wstring& exe, const std::wstring& arguments, DWORD timeoutMs,
                         HANDLE token = nullptr);
 
+// Runs this test program as "--pdft-child <arguments>" (already quoted), the way the elevated
+// process would be started but without elevation: no window, no handles inherited. Waits up to
+// 30 s (then it is ended and this fails with HRESULT_FROM_WIN32(ERROR_TIMEOUT)) and returns its
+// process id and exit code.
+HRESULT RunSelfChild(const std::wstring& arguments, DWORD* processId, DWORD* exitCode);
+
 // A child whose standard input and output are pipes held by this process (standard error goes
 // to the same pipe as standard output).
 class PipedChild {
