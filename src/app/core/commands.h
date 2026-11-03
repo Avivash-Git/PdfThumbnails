@@ -160,9 +160,10 @@ std::wstring WindowNamedObjectsRefusedMessage();
 std::vector<std::wstring> UninstallReport(const UninstallResult& result);
 
 // What --uninstall-cleanup writes to its error output (pure; it exits 0 whatever this says): that
-// it stopped early (|hr| failed), the part for all users it left out below an app package, the
-// part for this account it left out where the registry check did not show real writes, and "Not
-// done: <failure>" per failure. Empty when it did everything. May throw std::bad_alloc.
+// it stopped early (|hr| failed), the part for all users it left out without full administrator
+// rights or below an app package, the part for this account it left out where the registry check
+// did not show real writes, and "Not done: <failure>" per failure. Empty when it did everything.
+// May throw std::bad_alloc.
 std::vector<std::wstring> UninstallCleanupErrors(HRESULT hr, const UninstallCleanupResult& result);
 
 // "Zoom: 130 % (saved setting)", "(1.x's settings.ini)" or "(default)" (pure). May throw

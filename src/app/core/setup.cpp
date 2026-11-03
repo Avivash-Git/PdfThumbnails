@@ -417,12 +417,14 @@ HRESULT MigrateV1(const MigrateOptions& options, const RegistryRoots& roots,
   } else {
     result->code = ExitCode::kOk;
   }
-  LogInfo(L"migrate-v1", L"migrate-v1 result=" + std::wstring(CheckResultName(result->code)) +
-                             L" user=" + (result->userPart ? L"yes" : L"no") + L" machine=" +
-                             (result->run             ? L"ran"
-                              : result->machineNeeded ? L"needed"
-                                                      : L"none") +
-                             L" failures=" + std::to_wstring(failures.size()));
+  Log(failures.empty() ? LogLevel::kInfo : LogLevel::kWarning, L"migrate-v1",
+      L"migrate-v1 result=" + std::wstring(CheckResultName(result->code)) + L" user=" +
+          (result->userPart ? L"yes" : L"no") + L" machine=" +
+          (result->run && RefusedBelowPackage(*result->run) ? L"refused"
+           : result->run                                    ? L"ran"
+           : result->machineNeeded                          ? L"needed"
+                                                            : L"none") +
+          L" failures=" + std::to_wstring(failures.size()));
   return S_OK;
 }
 CATCH_RETURN();

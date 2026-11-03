@@ -447,6 +447,19 @@ TEST(UninstallTexts, CleanupSaysWhatItLeftOut) {
             L"reach Windows (virtualized=yes).");
   EXPECT_EQ(lines[2], L"Not done: machine: 0x8007109C");
 
+  // Elevated without full administrator rights: the part for all users is left out, and says why.
+  result = UninstallCleanupResult{};
+  result.userPart = true;
+  result.machineNoRights = true;
+  result.failures = {L"machine: " + HResultText(kNoAdministratorRightsHr)};
+  lines = UninstallCleanupErrors(S_OK, result);
+  ASSERT_EQ(lines.size(), 2u);
+  EXPECT_EQ(lines[0],
+            L"The part for all users was left out: this process is elevated, but without full "
+            L"administrator rights (the Administrators group enabled and an integrity level of "
+            L"High or more).");
+  EXPECT_EQ(lines[1], L"Not done: machine: 0x800402E4");
+
   // A registry check that failed as a whole names its failure.
   result = UninstallCleanupResult{};
   result.userProbeError = static_cast<HRESULT>(0x80041003);

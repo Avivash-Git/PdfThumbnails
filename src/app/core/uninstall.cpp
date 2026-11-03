@@ -601,6 +601,7 @@ HRESULT UninstallCleanup(const UninstallCleanupOptions& options, const RegistryR
     const HRESULT read = ReadAdministratorRights(&rights);
     if (FAILED(read) || !rights) {
       // An elevated token alone does not prove these rights; nothing is tested or written then.
+      result->machineNoRights = SUCCEEDED(read);
       Failed(&failures, L"machine", FAILED(read) ? read : kNoAdministratorRightsHr);
     } else {
       if (options.machineWrites) {

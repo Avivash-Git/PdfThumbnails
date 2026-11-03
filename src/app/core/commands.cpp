@@ -1123,6 +1123,12 @@ std::vector<std::wstring> UninstallReport(const UninstallResult& result) {
 std::vector<std::wstring> UninstallCleanupErrors(HRESULT hr, const UninstallCleanupResult& result) {
   std::vector<std::wstring> lines;
   if (FAILED(hr)) lines.push_back(L"The clean-up stopped early: " + HResultText(hr));
+  if (result.machineNoRights) {
+    lines.push_back(
+        L"The part for all users was left out: this process is elevated, but without full "
+        L"administrator rights (the Administrators group enabled and an integrity level of High "
+        L"or more).");
+  }
   if (result.machineRefused) {
     lines.push_back(
         L"The part for all users was left out: started below an app package (or unable to read "

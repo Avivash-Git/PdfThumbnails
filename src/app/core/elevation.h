@@ -20,17 +20,20 @@
 //   its two volatile test keys;
 // - whatever it writes machine-wide it computes itself from the files under the install folder.
 // It never writes or deletes in the user's profile (%LOCALAPPDATA%, %TEMP%, the thumbnail cache)
-// except that test key in its own registry, which it deletes again; it never loads the thumbnail
-// handler, shows no window and writes no log. Its exit code is its result: 0 done, 1 done but a
-// restart is pending, else the HRESULT that failed.
+// except that test key in its own registry, which it deletes again through the handle it made it
+// with, never by its name; it never loads the thumbnail handler, shows no window and writes no
+// log. Its exit code is its result: 0 done, 1 done but a restart is pending, else the HRESULT
+// that failed.
 //
 // A step that goes on after a part of it failed (the class for all users written, then the task
 // folder not made or an old build folder not removed) reports each such part as "not done:
 // <part>: <HRESULT>", and its last line counts them: "elevated <step> end hr=<HRESULT>[
-// restart-pending] not-done=<n>". The parts do not change the exit code: a parent of any build
-// reads 0 and 1 as done, so a step whose own work is done still exits 0 or 1. The asking side
-// adds each part to its command's failures (ReadReportParts, NotDoneFailures); the report can
-// only add failures, never take away the one a failed exit code gives.
+// restart-pending] not-done=<n>". Reporting the parts changes no exit code: machine-install still
+// exits 0 or 1 once its class for all users is written, since a parent of any build reads 0 and
+// 1 as done, and machine-uninstall and machine-migrate-v1 still exit with the HRESULT of their
+// first failed part. The asking side adds each part to its command's failures (ReadReportParts,
+// NotDoneFailures); the report can only add failures, never take away the one a failed exit code
+// gives.
 //
 // Progress lines go back to the process that asked, through a named pipe that process creates
 // before starting the elevated one (\\.\pipe\<Product>.Elevated.<its process id>, first

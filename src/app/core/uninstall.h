@@ -242,6 +242,10 @@ struct UninstallCleanupOptions {
 struct UninstallCleanupResult {
   bool userPart = false;     // the registry check allowed it
   bool machinePart = false;  // elevated: it ran
+  // Elevated, but its token lacks the administrator rights the elevated side requires
+  // (ReadAdministratorRights said no): the part for all users was left out ("machine:
+  // <kNoAdministratorRightsHr>").
+  bool machineNoRights = false;
   // Elevated, but below an app package (or with the processes above it unreadable) where its
   // test writes did not come back: the part for all users was left out ("machine: <HRESULT>").
   bool machineRefused = false;
