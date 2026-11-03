@@ -135,6 +135,10 @@ struct Snapshot {
   std::optional<LiveTest> live;
   LiveTestSkip liveSkip = LiveTestSkip::kNone;
   HRESULT liveError = S_OK;  // the test was due but could not start (no probe file, no thread)
+  // The command needs the Explorer test's answer (GatherOptions::liveTestRequired): when the
+  // test does not run, the result is unconfirmed rather than healthy (evaluate.h
+  // LiveTestUnconfirmed).
+  bool liveRequired = false;
   std::optional<BlockCount> blocks;  // counted only when DecideSac needs them
   SacVerdict sacVerdict;
   std::optional<TestFileRun> testFile;
@@ -160,6 +164,11 @@ struct Snapshot {
 
 struct GatherOptions {
   bool liveTest = true;
+  // The command's result rests on the Explorer test (--install): a test that does not run,
+  // skipped or unable to start, leaves it unconfirmed instead of healthy. Counts only with
+  // liveTest. The check never sets it: its record and CheckSummary have no words for a result
+  // that is only unconfirmed.
+  bool liveTestRequired = false;
   std::optional<std::filesystem::path> testFile;
   // The process context the command already read; when absent, probes.GetProcessContext with
   // ContextProbe::kReadOnly.

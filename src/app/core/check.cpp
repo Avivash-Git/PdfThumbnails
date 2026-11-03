@@ -25,6 +25,25 @@ void LogLine(LogLevel level, const std::wstring& message) noexcept {
   Log(level, kLogComponent, message);
 }
 
+// The log's word for why the Explorer test was skipped.
+const wchar_t* LiveSkipLogName(LiveTestSkip skip) noexcept {
+  switch (skip) {
+    case LiveTestSkip::kNone:
+      return L"none";
+    case LiveTestSkip::kNotRequested:
+      return L"not-requested";
+    case LiveTestSkip::kElevated:
+      return L"elevated";
+    case LiveTestSkip::kVirtualized:
+      return L"virtualized";
+    case LiveTestSkip::kNotOurHandler:
+      return L"not-our-handler";
+    case LiveTestSkip::kNoClass:
+      return L"no-class";
+  }
+  return L"none";
+}
+
 // The second gathering. After a slot or class changed, everything is read again, the Explorer
 // test included; otherwise the test's answer cannot have changed and is kept, so a check that
 // only tidied up does not start a second thumbnail process.
@@ -104,6 +123,14 @@ const wchar_t* CheckResultName(ExitCode code) noexcept {
   return L"failed";
 }
 
+std::wstring LiveTestLogFields(const Snapshot& s) {
+  if (s.live) {
+    return L" live=" + HResultText(s.live->hr) + L" live-ms=" + std::to_wstring(s.live->ms);
+  }
+  if (FAILED(s.liveError)) return L" live=could-not-start live-hr=" + HResultText(s.liveError);
+  return std::wstring(L" live=skipped live-skip=") + LiveSkipLogName(s.liveSkip);
+}
+
 HRESULT RunCheck(const CheckOptions& options, const RegistryRoots& roots,
                  const SystemProbes& probes, CheckResult* result) noexcept try {
   *result = CheckResult{};
@@ -169,7 +196,8 @@ HRESULT RunCheck(const CheckOptions& options, const RegistryRoots& roots,
     result->after = std::move(before);
     result->code = ExitCode::kNotInstalled;
     result->summary = CheckSummary(result->code, 0, 0);
-    LogLine(LogLevel::kInfo, L"check result=not-installed fixed=0");
+    LogLine(LogLevel::kInfo,
+            L"check result=not-installed fixed=0" + LiveTestLogFields(result->after));
     return S_OK;
   }
 
@@ -243,9 +271,12 @@ HRESULT RunCheck(const CheckOptions& options, const RegistryRoots& roots,
   line += L" fixed=" + std::to_wstring(fixed);
   line += L" pdfcraft=" +
           (record.pdfcraftVersion.empty() ? std::wstring(L"none") : record.pdfcraftVersion);
-  if (after.live) line += L" live=" + HResultText(after.live->hr);
+  line += LiveTestLogFields(after);
   line += L" ms=" + std::to_wstring(GetTickCount64() - started);
-  LogLine(AnyFailed(result->repairs) ? LogLevel::kWarning : LogLevel::kInfo, line);
+  // A warning when a step of this program failed; an Explorer test that could not start is one.
+  LogLine((AnyFailed(result->repairs) || FAILED(after.liveError)) ? LogLevel::kWarning
+                                                                  : LogLevel::kInfo,
+          line);
   return S_OK;
 }
 CATCH_RETURN();

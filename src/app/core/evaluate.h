@@ -46,7 +46,7 @@ enum class FindingId {
   kDefaultAppHandler,        // the default app's ProgID brings its own thumbnail handler
   kLiveTestFailed,           // the Explorer test failed
   kPerUserClassIgnored,      // ... with "class not registered" for a per-user install
-  kLiveTestSkipped,          // the Explorer test did not run
+  kLiveTestSkipped,          // the Explorer test did not run (a warning where the command needs it)
   kTestFileFailed,           // --test-file: no thumbnail, or the test could not start
   kTestFileSkipped,          // --test-file: not run here
   kSacBlocked,               // Smart App Control blocks the DLLs
@@ -115,8 +115,14 @@ bool TaskRunsProgram(const TaskState& task, const std::filesystem::path& program
 // Healthy: no finding keeps thumbnails from working (pure).
 bool HealthyFromFindings(std::span<const Finding> findings) noexcept;
 
+// The Explorer test did not run where the command needed its answer (pure): a
+// LiveTestSkipped finding that is a warning (Snapshot::liveRequired), not information.
+// Nothing is known to keep thumbnails from working, but nothing confirms that they work.
+bool LiveTestUnconfirmed(std::span<const Finding> findings) noexcept;
+
 // The exit code the findings call for (pure): 6 when not installed, else 1 when a finding keeps
-// thumbnails from working, else 0. The check adds 4, 7 and 8 (check.h).
+// thumbnails from working or the Explorer test the command needed did not run
+// (LiveTestUnconfirmed), else 0. The check adds 4, 7 and 8 (check.h).
 ExitCode ExitCodeFromFindings(std::span<const Finding> findings) noexcept;
 
 // Whether |findings| contains |id| (pure).

@@ -418,6 +418,40 @@ class System : public ::testing::Test {
     return step;
   }
 
+  // The Explorer test of the last run of the command logged as |component|, as that run's own
+  // summary line records it: the first line after the last "<component> INFO start" line that
+  // has the same process id and contains |summary|. "0x00000000" or another HRESULT when it ran,
+  // "could-not-start" or "skipped"; empty when the line or its live= field is missing. Other
+  // processes write to the same log (a scheduled check among them): the process id keeps their
+  // lines out.
+  std::string LoggedExplorerTest(std::string_view component, std::string_view summary) const {
+    std::ifstream file(UserLog(), std::ios::binary);
+    if (!file.good()) return {};
+    const std::string text((std::istreambuf_iterator<char>(file)),
+                           std::istreambuf_iterator<char>());
+    const size_t start = text.rfind(" " + std::string(component) + " INFO start ");
+    if (start == std::string::npos) return {};
+    // "<time> <pid> <component> INFO start ...": the process id is the second field.
+    const size_t lineStart = text.rfind('\n', start);
+    const std::string startLine = LineAt(text, lineStart == std::string::npos ? 0 : lineStart + 1);
+    const size_t pidAt = startLine.find(' ');
+    if (pidAt == std::string::npos) return {};
+    const std::string pid = startLine.substr(pidAt + 1, startLine.find(' ', pidAt + 1) - pidAt - 1);
+    for (size_t at = text.find('\n', start); at != std::string::npos; at = text.find('\n', at)) {
+      const std::string line = LineAt(text, ++at);
+      const size_t own = line.find(' ');
+      if (own == std::string::npos || line.compare(own + 1, pid.size() + 1, pid + " ") != 0 ||
+          line.find(summary) == std::string::npos) {
+        continue;
+      }
+      const size_t live = line.find(" live=");
+      if (live == std::string::npos) return {};
+      const size_t value = live + 6;
+      return line.substr(value, line.find(' ', value) - value);
+    }
+    return {};
+  }
+
   // ---- Expectations ----
 
   // What a machine-wide install leaves: the files, the class for all users pointing at this
@@ -472,12 +506,17 @@ class System : public ::testing::Test {
     std::printf("[ system ] status: healthy %d, Explorer test ran %d hr %s\n",
                 BoolAt(status.json, {"healthy"}), BoolAt(status.json, {"liveTest", "ran"}),
                 StringAt(status.json, {"liveTest", "hr"}).c_str());
+    // It may fail on a runner without a desktop, but it must start.
+    EXPECT_NE(StringAt(status.json, {"liveTest", "skipReason"}), "couldNotStart");
     return status;
   }
 
-  // The status is healthy, or only the Explorer test keeps it from being so; |command| exited
-  // 0 when healthy and 1 otherwise.
-  void ExpectHealthy(const Outcome& command, const Status& status) {
+  // The status is healthy, or only the Explorer test keeps it from being so; |command| (logged as
+  // |component|, its summary line containing |summary|) is judged by its own Explorer test, not
+  // by the status's: it must have started, and the command exited 1 when it failed, or, where
+  // the command needs the test's answer (|testRequired|), when it did not run; else 0.
+  void ExpectHealthy(const Outcome& command, const Status& status, std::string_view component,
+                     std::string_view summary, bool testRequired) {
     std::vector<std::string> others;
     for (const Finding& finding : status.breaking) {
       const bool explorerTest =
@@ -488,11 +527,15 @@ class System : public ::testing::Test {
       if (!explorerTest) others.push_back(finding.id + ": " + finding.text);
     }
     EXPECT_TRUE(others.empty()) << Lines(others);
-    if (status.breaking.empty()) {
-      EXPECT_EQ(command.exitCode, 0u) << command.Output();
-    } else {
-      EXPECT_EQ(command.exitCode, 1u) << command.Output();
-    }
+    const std::string own = LoggedExplorerTest(component, summary);
+    std::printf("[ system ] %s's own Explorer test: %s\n", std::string(component).c_str(),
+                own.empty() ? "(not in the log)" : own.c_str());
+    EXPECT_FALSE(own.empty()) << "no live= field on " << component << "'s summary line";
+    // Starting it needs no desktop (only %TEMP%, an event and a thread): a start failure is this
+    // program's, not the runner's.
+    EXPECT_NE(own, "could-not-start");
+    const bool ownFailed = own != "0x00000000" && (own.starts_with("0x") || testRequired);
+    EXPECT_EQ(command.exitCode, (!others.empty() || ownFailed) ? 1u : 0u) << command.Output();
   }
 
   void ExpectStatusForAllUsers(const Status& status, DWORD zoom) {
@@ -698,7 +741,7 @@ TEST_F(System, InstallChecksZoomFixAndUninstall) {
   ExpectInstalledForAllUsers();
   EXPECT_EQ(StoredZoom(), std::optional<DWORD>(100));
   const Status installed = ReadStatus();
-  ExpectHealthy(install, installed);
+  ExpectHealthy(install, installed, "install", " install scope=", true);
   ExpectStatusForAllUsers(installed, 100);
   ExpectReportThroughThePipe(L"machine-install");
 
@@ -738,7 +781,7 @@ TEST_F(System, InstallChecksZoomFixAndUninstall) {
   const std::optional<std::wstring> repaired = ClassDll(Scope::kMachine);
   ASSERT_TRUE(repaired.has_value());
   EXPECT_TRUE(IEquals(*repaired, BuildDll().native())) << Text(*repaired);
-  ExpectHealthy(fix, ReadStatus());
+  ExpectHealthy(fix, ReadStatus(), "fix", " check result=", false);
   ExpectReportThroughThePipe(L"machine-repair-class");
 
   // The uninstall, from the installed executable: the running programs go to a trash folder
@@ -771,7 +814,7 @@ TEST_F(System, InstallReplaces11ForAllUsers) {
   EXPECT_EQ(StoredZoom(), std::optional<DWORD>(120));
   ExpectV1UserFilesGone();
   const Status status = ReadStatus();
-  ExpectHealthy(install, status);
+  ExpectHealthy(install, status, "install", " install scope=", true);
   ExpectStatusForAllUsers(status, 120);
 
   // The clean-up again finds nothing to do.
@@ -799,7 +842,7 @@ TEST_F(System, InstallReplaces11ForThisUser) {
   EXPECT_EQ(StoredZoom(), std::optional<DWORD>(120));
   ExpectV1UserFilesGone();
   const Status status = ReadStatus();
-  ExpectHealthy(install, status);
+  ExpectHealthy(install, status, "install", " install scope=", true);
   ExpectStatusForAllUsers(status, 120);
 
   EXPECT_EQ(User(InstalledCli(), L"--uninstall --yes").exitCode, 0u);

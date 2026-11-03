@@ -268,7 +268,8 @@ TEST_F(CheckEngine, FillsAnEmptySlotAndRecordsTheCheck) {
   const std::string lines = text.str();
   EXPECT_NE(lines.find("check INFO repair fill-slot slot=1 result=done"), std::string::npos)
       << lines;
-  EXPECT_NE(lines.find("check INFO check result=healthy fixed=1 pdfcraft=0.14.0"),
+  EXPECT_NE(lines.find("check INFO check result=healthy fixed=1 pdfcraft=0.14.0 live=0x00000000 "
+                       "live-ms=150 ms="),
             std::string::npos)
       << lines;
   EXPECT_EQ(lines.find(WideToUtf8Lossy(temp_.path())), std::string::npos) << lines;
@@ -279,6 +280,66 @@ TEST_F(CheckEngine, FillsAnEmptySlotAndRecordsTheCheck) {
   EXPECT_TRUE(again.repairs.empty());
   ASSERT_HRESULT_SUCCEEDED(ReadCheck(roots_, &record));
   EXPECT_EQ(record->summary, L"nothing to fix");
+}
+
+// The check's log line says what became of the Explorer test. One that could not start makes the
+// line a warning, but the check does not need the test's answer: it stays healthy, and records
+// no test result.
+TEST_F(CheckEngine, TheLogLineNamesTheExplorerTestsOutcome) {
+  InstallPerUser();
+  probes_.liveError = E_ACCESSDENIED;
+  const std::filesystem::path log = std::filesystem::path(temp_.path()) / L"check.log";
+  SetLogFileForTesting(log, kLogRotateBytes);
+  const CheckResult result = Run();
+  std::optional<CheckRecord> record;
+  EXPECT_HRESULT_SUCCEEDED(ReadCheck(roots_, &record));
+  CheckOptions options = Options();
+  options.liveTest = false;
+  CheckResult skipped;
+  EXPECT_HRESULT_SUCCEEDED(RunCheck(options, roots_, probes_, &skipped));
+  SetLogFileForTesting({}, 0);
+
+  EXPECT_EQ(result.code, ExitCode::kOk);
+  const Finding* notRun = nullptr;
+  for (const Finding& finding : result.findings) {
+    if (finding.id == FindingId::kLiveTestSkipped) notRun = &finding;
+  }
+  ASSERT_TRUE(notRun);
+  EXPECT_EQ(notRun->severity, Severity::kInfo);
+  EXPECT_EQ(notRun->hr, E_ACCESSDENIED);
+  ASSERT_TRUE(record);
+  EXPECT_EQ(record->result, ExitCode::kOk);
+  EXPECT_FALSE(record->liveTest);
+  EXPECT_EQ(skipped.code, ExitCode::kOk);
+
+  std::ifstream file(log, std::ios::binary);
+  std::stringstream text;
+  text << file.rdbuf();
+  const std::string lines = text.str();
+  EXPECT_NE(lines.find("check WARN check result=healthy fixed=0 pdfcraft=0.14.0 "
+                       "live=could-not-start live-hr=0x80070005 ms="),
+            std::string::npos)
+      << lines;
+  EXPECT_NE(lines.find("check INFO check result=healthy fixed=0 pdfcraft=0.14.0 live=skipped "
+                       "live-skip=not-requested ms="),
+            std::string::npos)
+      << lines;
+  EXPECT_EQ(lines.find(WideToUtf8Lossy(temp_.path())), std::string::npos) << lines;
+
+  // The gathering needs the test's answer only when asked to, and only with the test.
+  EXPECT_FALSE(Gather().liveRequired);
+  GatherOptions gather;
+  gather.context = probes_.context;
+  gather.paths = paths_;
+  gather.liveTestRequired = true;
+  Snapshot s;
+  ASSERT_HRESULT_SUCCEEDED(GatherSnapshot(roots_, gather, probes_, &s));
+  EXPECT_TRUE(s.liveRequired);
+  EXPECT_EQ(s.liveError, E_ACCESSDENIED);
+  gather.liveTest = false;
+  ASSERT_HRESULT_SUCCEEDED(GatherSnapshot(roots_, gather, probes_, &s));
+  EXPECT_FALSE(s.liveRequired);
+  EXPECT_EQ(s.liveSkip, LiveTestSkip::kNotRequested);
 }
 
 TEST_F(CheckEngine, AnotherHandlersSlotIsTakenBackOnlyOnRequest) {

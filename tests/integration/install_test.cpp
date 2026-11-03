@@ -18,7 +18,9 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -31,6 +33,7 @@
 #include "file_ops.h"
 #include "instance.h"
 #include "legacy.h"
+#include "log.h"
 #include "paths.h"
 #include "project_config.h"
 #include "registration.h"
@@ -56,6 +59,14 @@ bool WriteFileText(const path& file, const std::string& text) {
   return handle &&
          WriteFile(handle.get(), text.data(), static_cast<DWORD>(text.size()), &written, nullptr) &&
          written == text.size();
+}
+
+// The whole file, as bytes (empty when it cannot be read).
+std::string ReadFileText(const path& file) {
+  std::ifstream stream(file, std::ios::binary);
+  std::stringstream text;
+  text << stream.rdbuf();
+  return text.str();
 }
 
 bool Exists(const path& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
@@ -630,9 +641,13 @@ TEST_F(Install, InstallForAllUsersEndToEnd) {
   holder.pid = 4242;
   probes_.holders.push_back({v1 / kHandlerDll, holder});
 
+  const path log = path(temp_.path()) / L"install.log";
+  SetLogFileForTesting(log, kLogRotateBytes);
   InstallResult result;
-  ASSERT_HRESULT_SUCCEEDED(
-      InstallFromOwnFolder(MakeInstallOptions(Scope::kMachine), roots_, probes_, &result));
+  const HRESULT installed =
+      InstallFromOwnFolder(MakeInstallOptions(Scope::kMachine), roots_, probes_, &result);
+  SetLogFileForTesting({}, 0);
+  ASSERT_HRESULT_SUCCEEDED(installed);
   for (const std::wstring& failure : result.failures) ADD_FAILURE() << WideToUtf8Lossy(failure);
   EXPECT_EQ(result.code, ExitCode::kOk);
   EXPECT_EQ(result.refusal, InstallRefusal::kNone);
@@ -662,10 +677,14 @@ TEST_F(Install, InstallForAllUsersEndToEnd) {
                       (paths_.machineRoot / kSettingsExe).native()));
   EXPECT_FALSE(Exists(paths_.userRoot / L"settings.ini"));
   EXPECT_FALSE(Exists(paths_.userRoot / L"app" / L"1.1.0.0-67a1323e"));
-  // The status after it, with the (fake) Explorer test.
+  // The status after it, with the (fake) Explorer test, which the log line records.
   EXPECT_EQ(result.after.scope, Scope::kMachine);
   EXPECT_GE(probes_.liveRuns, 1);
   EXPECT_TRUE(HealthyFromFindings(result.findings));
+  const std::string lines = ReadFileText(log);
+  EXPECT_NE(lines.find("result=healthy live=0x00000000 live-ms=150 holders-ended=1"),
+            std::string::npos)
+      << lines;
 
   // Installing again changes nothing and asks again (the step is idempotent).
   ASSERT_HRESULT_SUCCEEDED(
@@ -735,6 +754,45 @@ TEST_F(Install, InstallForThisUser) {
   EXPECT_FALSE(HasRunOnce(RunOnceValueName(1)));
   EXPECT_EQ(result.runOnceDeleted, 1u);  // before the copy, not only in the per-user step
   EXPECT_EQ(result.after.scope, Scope::kUser);
+}
+
+// The install's result rests on its own Explorer test: one that cannot start leaves the install
+// unconfirmed (exit 1), though no step failed and nothing is known to keep thumbnails from
+// working. The log line says so; installing again with a test that runs confirms it.
+TEST_F(Install, AnExplorerTestThatCannotStartLeavesTheInstallUnconfirmed) {
+  if (const auto why = StageUnsafe()) GTEST_SKIP() << *why;
+  probes_.liveError = E_ACCESSDENIED;
+  const path log = path(temp_.path()) / L"install.log";
+  SetLogFileForTesting(log, kLogRotateBytes);
+  InstallResult result;
+  const HRESULT installed =
+      InstallFromOwnFolder(MakeInstallOptions(Scope::kUser), roots_, probes_, &result);
+  probes_.liveError = S_OK;
+  InstallResult again;
+  const HRESULT reinstalled =
+      InstallFromOwnFolder(MakeInstallOptions(Scope::kUser), roots_, probes_, &again);
+  SetLogFileForTesting({}, 0);
+  ASSERT_HRESULT_SUCCEEDED(installed);
+  ASSERT_HRESULT_SUCCEEDED(reinstalled);
+
+  for (const std::wstring& failure : result.failures) ADD_FAILURE() << WideToUtf8Lossy(failure);
+  EXPECT_EQ(result.code, ExitCode::kProblems);
+  EXPECT_TRUE(HealthyFromFindings(result.findings));
+  EXPECT_TRUE(LiveTestUnconfirmed(result.findings));
+  EXPECT_EQ(again.code, ExitCode::kOk);
+  EXPECT_FALSE(LiveTestUnconfirmed(again.findings));
+
+  const std::string build = WideToUtf8Lossy(BuildName());
+  const std::string lines = ReadFileText(log);
+  EXPECT_NE(lines.find("install WARN install scope=user build=" + build +
+                       " result=problems live=could-not-start live-hr=0x80070005 holders-ended=0 "
+                       "restart-pending=no failures=0"),
+            std::string::npos)
+      << lines;
+  EXPECT_NE(lines.find("install INFO install scope=user build=" + build +
+                       " result=healthy live=0x00000000 live-ms=150 holders-ended=0"),
+            std::string::npos)
+      << lines;
 }
 
 // A pending sign-in clean-up of the per-user folder goes before anything is copied there, so a

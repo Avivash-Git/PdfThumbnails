@@ -312,6 +312,7 @@ HRESULT GatherSnapshot(const RegistryRoots& roots, const GatherOptions& options,
   s.legacy.legacyTask = legacyTask;
 
   // The Explorer test, only where its answer says something about Explorer.
+  s.liveRequired = options.liveTest && options.liveTestRequired;
   LiveTestConditions conditions;
   conditions.requested = options.liveTest;
   conditions.elevated = s.context.elevated;

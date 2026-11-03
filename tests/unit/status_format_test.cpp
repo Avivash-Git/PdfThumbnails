@@ -291,6 +291,28 @@ TEST(StatusFormat, ExplorerTestFailures) {
   s.live.reset();
   s.liveError = E_OUTOFMEMORY;
   EXPECT_TRUE(FindLine(Lines(s), L"Explorer test", ' ', L"could not run: 0x8007000E"));
+  EXPECT_EQ(Lines(s).back().text, L"Result: healthy");
+
+  // Where the command needed the test's answer (--install), a test that could not run leaves
+  // the result unconfirmed.
+  s.liveRequired = true;
+  line = FindLine(Lines(s), L"Explorer test", '!', L"could not run: 0x8007000E");
+  ASSERT_TRUE(line);
+  EXPECT_EQ(line->hint, L"Run --status to try it again");
+  EXPECT_EQ(Lines(s).back().text,
+            L"Result: no problem found, but not confirmed (the Explorer test did not run)");
+  ExpectHintsOnProblems(s);
+
+  // ... and one skipped because Windows resolves another handler: that problem comes first.
+  s.liveError = S_OK;
+  s.liveSkip = LiveTestSkip::kNotOurHandler;
+  s.effective = kOther;
+  line = FindLine(Lines(s), L"Explorer test", '!',
+                  L"skipped: Windows resolves .pdf thumbnails to another handler");
+  ASSERT_TRUE(line);
+  EXPECT_EQ(line->hint, L"Run --status once the problems above are fixed");
+  EXPECT_EQ(Lines(s).back().text, L"Result: 1 problem keeps PDF thumbnails from working");
+  ExpectHintsOnProblems(s);
 }
 
 TEST(StatusFormat, SmartAppControlTexts) {
@@ -936,6 +958,18 @@ TEST(StatusFormat, Results) {
   notInstalled.id = FindingId::kNotInstalled;
   notInstalled.breaksThumbnails = true;
   EXPECT_EQ(ResultText(std::vector<Finding>{notInstalled}), L"Result: not installed");
+  // An Explorer test the command needed that did not run: unconfirmed, unless a problem is
+  // already known.
+  Finding unconfirmed;
+  unconfirmed.id = FindingId::kLiveTestSkipped;
+  unconfirmed.severity = Severity::kWarning;
+  EXPECT_EQ(ResultText(std::vector<Finding>{unconfirmed}),
+            L"Result: no problem found, but not confirmed (the Explorer test did not run)");
+  EXPECT_EQ(ResultText(std::vector<Finding>{breaks, unconfirmed}),
+            L"Result: 1 problem keeps PDF thumbnails from working");
+  Finding skipped;
+  skipped.id = FindingId::kLiveTestSkipped;
+  EXPECT_EQ(ResultText(std::vector<Finding>{skipped}), L"Result: healthy");
 }
 
 TEST(StatusFormat, Times) {

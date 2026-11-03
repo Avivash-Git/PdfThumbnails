@@ -28,8 +28,10 @@
 //      for all users, last, after a short retry for files still in use (those go to a trash
 //      folder and are deleted at the next restart);
 //   5. the installer's per-user step (setup.h SetupUser);
-//   6. the status, with the Explorer test. Exit 0 when healthy, 1 when installed but not healthy;
-//      files waiting for a restart are reported, not an exit code of their own.
+//   6. the status, with the Explorer test, whose answer the result needs: exit 0 when healthy and
+//      the test passed, 1 when installed but not healthy or when the test did not run (could not
+//      start), which leaves the install unconfirmed; files waiting for a restart are reported,
+//      not an exit code of their own.
 // --install --user: the same checks, and all of it unelevated: while a class for all users
 //   exists, 1.x's rule applies and the install is for all users instead; a 1.x install for all
 //   users refuses it unless --force (Windows' thumbnail process would go on loading 1.x). Pending
@@ -230,7 +232,7 @@ struct InstallOptions {
   HWND owner = nullptr;
   // Starts the administrator step; tests pass a fake, so no test ever starts a real elevation.
   ElevationLauncher launcher;
-  bool liveTest = true;  // the Explorer test in the final status
+  bool liveTest = true;  // the Explorer test in the final status, whose answer the result needs
 };
 
 struct InstallResult {

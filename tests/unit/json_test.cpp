@@ -240,6 +240,30 @@ TEST(StatusJson, NothingInstalledAndSkippedChecks) {
   EXPECT_EQ(root.Get("exitCode")->text, "6");
 }
 
+// An Explorer test that was due but could not start: --status does not need its answer, so the
+// status stays healthy and the finding is information.
+TEST(StatusJson, AnExplorerTestThatCouldNotStart) {
+  Snapshot s = MachineInstallSnapshot();
+  s.live.reset();
+  s.liveError = E_OUTOFMEMORY;
+  const std::vector<Finding> findings = Evaluate(s);
+  const JsonValue root = Parse(StatusJson(s, findings, ExitCodeFromFindings(findings)));
+  ExpectSchema(root);
+  EXPECT_FALSE(root.Get("liveTest")->Get("ran")->boolean);
+  EXPECT_EQ(root.Get("liveTest")->Get("hr")->text, "0x8007000E");
+  EXPECT_TRUE(root.Get("liveTest")->Get("ms")->IsNull());
+  EXPECT_EQ(root.Get("liveTest")->Get("skipReason")->text, "couldNotStart");
+  const JsonValue* skipped = nullptr;
+  for (const JsonValue& finding : root.Get("findings")->items) {
+    if (finding.Get("id")->text == "LiveTestSkipped") skipped = &finding;
+  }
+  ASSERT_TRUE(skipped);
+  EXPECT_EQ(skipped->Get("severity")->text, "info");
+  EXPECT_FALSE(skipped->Get("breaks")->boolean);
+  EXPECT_TRUE(root.Get("healthy")->boolean);
+  EXPECT_EQ(root.Get("exitCode")->text, "0");
+}
+
 TEST(StatusJson, ProblemsTaskBlocksAndOddStrings) {
   Snapshot s = UserInstallSnapshot();
   // Strings anyone could have written into the registry.

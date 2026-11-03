@@ -275,8 +275,12 @@ std::vector<Finding> Evaluate(const Snapshot& s) {
             s.live->hr;
       }
     } else {
+      // Not run: skipped (liveSkip says why), or due but it could not start (liveError). Either
+      // says nothing about File Explorer. Where the command needs the answer, its result is left
+      // unconfirmed: a warning, which the exit code counts.
       Finding& finding =
-          add(Make(FindingId::kLiveTestSkipped, Severity::kInfo, false, FixKind::kNone));
+          add(Make(FindingId::kLiveTestSkipped,
+                   s.liveRequired ? Severity::kWarning : Severity::kInfo, false, FixKind::kNone));
       finding.liveSkip = s.liveSkip;
       if (FAILED(s.liveError)) finding.hr = s.liveError;
     }
@@ -424,9 +428,16 @@ bool HealthyFromFindings(std::span<const Finding> findings) noexcept {
                       [](const Finding& finding) { return finding.breaksThumbnails; });
 }
 
+bool LiveTestUnconfirmed(std::span<const Finding> findings) noexcept {
+  return std::any_of(findings.begin(), findings.end(), [](const Finding& finding) {
+    return finding.id == FindingId::kLiveTestSkipped && finding.severity != Severity::kInfo;
+  });
+}
+
 ExitCode ExitCodeFromFindings(std::span<const Finding> findings) noexcept {
   if (HasFinding(findings, FindingId::kNotInstalled)) return ExitCode::kNotInstalled;
-  return HealthyFromFindings(findings) ? ExitCode::kOk : ExitCode::kProblems;
+  if (!HealthyFromFindings(findings) || LiveTestUnconfirmed(findings)) return ExitCode::kProblems;
+  return ExitCode::kOk;
 }
 
 bool HasFinding(std::span<const Finding> findings, FindingId id) noexcept {

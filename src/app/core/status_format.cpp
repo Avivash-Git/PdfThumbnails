@@ -598,6 +598,10 @@ std::wstring HintFor(const Snapshot& s, std::span<const Finding> findings, const
     case FindingId::kVirtualized:
       return L"Run it from File Explorer or from a terminal that is not part of an app package";
     case FindingId::kLiveTestSkipped:
+      // Only where the command needed its answer; otherwise the line only says what happened.
+      if (f.severity == Severity::kInfo) return L"";
+      return f.hr ? L"Run --status to try it again"
+                  : L"Run --status once the problems above are fixed";
     case FindingId::kTestFileSkipped:
     case FindingId::kSacEvaluation:
     case FindingId::kSacOn:
@@ -830,6 +834,9 @@ std::wstring ResultText(std::span<const Finding> findings) {
   if (Find(findings, FindingId::kNotInstalled)) return L"Result: not installed";
   const int problems = static_cast<int>(std::count_if(
       findings.begin(), findings.end(), [](const Finding& f) { return f.breaksThumbnails; }));
+  if (problems == 0 && LiveTestUnconfirmed(findings)) {
+    return L"Result: no problem found, but not confirmed (the Explorer test did not run)";
+  }
   if (problems == 0) return L"Result: healthy";
   return L"Result: " + Plural(problems, L"problem keeps", L"problems keep") +
          L" PDF thumbnails from working";
@@ -996,10 +1003,14 @@ std::vector<StatusLine> FormatStatus(const Snapshot& s, std::span<const Finding>
     } else {
       line(' ', kLabelExplorerTest, LiveFailureText(s.live->hr));
     }
-  } else if (FAILED(s.liveError)) {
-    line(' ', kLabelExplorerTest, L"could not run: " + Hex(s.liveError));
   } else {
-    line(' ', kLabelExplorerTest, L"skipped: " + SkipReason(s.liveSkip));
+    // Not run. A problem only where the command needed the answer (LiveTestUnconfirmed).
+    const Finding* skipped = has(FindingId::kLiveTestSkipped);
+    const bool needed = skipped && skipped->severity != Severity::kInfo;
+    line(needed ? '!' : ' ', kLabelExplorerTest,
+         FAILED(s.liveError) ? L"could not run: " + Hex(s.liveError)
+                             : L"skipped: " + SkipReason(s.liveSkip),
+         needed ? hint(*skipped) : std::wstring());
   }
 
   if (s.testFile) {

@@ -444,6 +444,61 @@ TEST(Evaluate, LiveTestSkipped) {
   EXPECT_EQ(Find(Evaluate(s), FindingId::kLiveTestSkipped)->hr, E_OUTOFMEMORY);
 }
 
+// A command whose result rests on the Explorer test (--install): a test that did not run leaves
+// it unconfirmed, a warning that the exit code counts, though nothing keeps thumbnails from
+// working.
+TEST(Evaluate, AnExplorerTestTheCommandNeeds) {
+  Snapshot s = MachineInstall();
+  s.live.reset();
+  s.liveError = E_OUTOFMEMORY;
+  s.liveRequired = true;
+  std::vector<Finding> findings = Evaluate(s);
+  const Finding* skipped = Find(findings, FindingId::kLiveTestSkipped);
+  ASSERT_TRUE(skipped);
+  ExpectKind(*skipped, Severity::kWarning, false, FixKind::kNone);
+  EXPECT_EQ(skipped->hr, static_cast<HRESULT>(0x8007000E));
+  EXPECT_TRUE(LiveTestUnconfirmed(findings));
+  EXPECT_TRUE(HealthyFromFindings(findings));
+  EXPECT_EQ(ExitCodeFromFindings(findings), ExitCode::kProblems);
+
+  // Where the command does not need it (--status, --check), the same is information only.
+  s.liveRequired = false;
+  findings = Evaluate(s);
+  ExpectKind(*Find(findings, FindingId::kLiveTestSkipped), Severity::kInfo, false, FixKind::kNone);
+  EXPECT_FALSE(LiveTestUnconfirmed(findings));
+  EXPECT_EQ(ExitCodeFromFindings(findings), ExitCode::kOk);
+
+  // Needed, and the test passed: nothing to say.
+  s.liveRequired = true;
+  s.live = LiveTest{S_OK, {96, 96}, 200};
+  s.liveError = S_OK;
+  findings = Evaluate(s);
+  EXPECT_FALSE(Find(findings, FindingId::kLiveTestSkipped));
+  EXPECT_FALSE(LiveTestUnconfirmed(findings));
+  EXPECT_EQ(ExitCodeFromFindings(findings), ExitCode::kOk);
+
+  // Needed, and skipped because Windows resolves another handler: unconfirmed as well.
+  s.live.reset();
+  s.liveSkip = LiveTestSkip::kNotOurHandler;
+  s.effective = kOther;
+  findings = Evaluate(s);
+  skipped = Find(findings, FindingId::kLiveTestSkipped);
+  ASSERT_TRUE(skipped);
+  ExpectKind(*skipped, Severity::kWarning, false, FixKind::kNone);
+  EXPECT_EQ(skipped->liveSkip, LiveTestSkip::kNotOurHandler);
+  EXPECT_FALSE(skipped->hr);
+  EXPECT_TRUE(Find(findings, FindingId::kEffectiveOther));
+  EXPECT_EQ(ExitCodeFromFindings(findings), ExitCode::kProblems);
+
+  // Nothing installed: there was nothing to test.
+  Snapshot empty = Empty();
+  empty.liveRequired = true;
+  findings = Evaluate(empty);
+  EXPECT_EQ(ExitCodeFromFindings(findings), ExitCode::kNotInstalled);
+  EXPECT_FALSE(Find(findings, FindingId::kLiveTestSkipped));
+  EXPECT_FALSE(LiveTestUnconfirmed(findings));
+}
+
 TEST(Evaluate, TestFile) {
   Snapshot s = MachineInstall();
   s.testFile = TestFileRun{};

@@ -1,6 +1,6 @@
-// Planning repairs (repair.h) and the check's exit code and summary (check.h), all pure: which
-// findings each mode repairs, in which order, what is never done without asking (taking slots
-// back) or never done here at all (the administrator step, the 1.x clean-up).
+// Planning repairs (repair.h) and the check's exit code, summary and log fields (check.h), all
+// pure: which findings each mode repairs, in which order, what is never done without asking
+// (taking slots back) or never done here at all (the administrator step, the 1.x clean-up).
 
 #include <windows.h>
 
@@ -229,6 +229,37 @@ TEST(CheckSummary, Wording) {
   EXPECT_EQ(CheckSummary(ExitCode::kNotInstalled, 0, 1), L"not installed");
   EXPECT_STREQ(CheckResultName(ExitCode::kOk), L"healthy");
   EXPECT_STREQ(CheckResultName(ExitCode::kNeedsAdmin), L"needs-admin");
+}
+
+// The Explorer test's outcome as the summary lines of --check, --fix and --install log it.
+TEST(CheckLog, ExplorerTestFields) {
+  Snapshot s;
+  s.live = LiveTest{S_OK, {96, 96}, 212};
+  EXPECT_EQ(LiveTestLogFields(s), L" live=0x00000000 live-ms=212");
+  // The watchdog gave up.
+  s.live = LiveTest{HRESULT_FROM_WIN32(ERROR_TIMEOUT), {}, 60000};
+  EXPECT_EQ(LiveTestLogFields(s), L" live=0x800705B4 live-ms=60000");
+
+  // Due, but it could not start.
+  s.live.reset();
+  s.liveError = E_ACCESSDENIED;
+  EXPECT_EQ(LiveTestLogFields(s), L" live=could-not-start live-hr=0x80070005");
+
+  s.liveError = S_OK;
+  struct Case {
+    LiveTestSkip skip;
+    const wchar_t* fields;
+  };
+  for (const Case& c : {
+           Case{LiveTestSkip::kNotRequested, L" live=skipped live-skip=not-requested"},
+           Case{LiveTestSkip::kElevated, L" live=skipped live-skip=elevated"},
+           Case{LiveTestSkip::kVirtualized, L" live=skipped live-skip=virtualized"},
+           Case{LiveTestSkip::kNotOurHandler, L" live=skipped live-skip=not-our-handler"},
+           Case{LiveTestSkip::kNoClass, L" live=skipped live-skip=no-class"},
+       }) {
+    s.liveSkip = c.skip;
+    EXPECT_EQ(LiveTestLogFields(s), c.fields);
+  }
 }
 
 }  // namespace

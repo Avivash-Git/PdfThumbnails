@@ -53,8 +53,9 @@ std::wstring RenderStatus(std::span<const StatusLine> lines);
 std::wstring FindingText(const Snapshot& snapshot, const Finding& finding);
 std::wstring FindingHint(const Snapshot& snapshot, const Finding& finding);
 
-// The last line: "Result: healthy", "Result: not installed" or how many problems keep thumbnails
-// from working (pure). May throw std::bad_alloc.
+// The last line: "Result: healthy", "Result: not installed", how many problems keep thumbnails
+// from working, or, with none, that the Explorer test the command needed did not run (pure).
+// May throw std::bad_alloc.
 std::wstring ResultText(std::span<const Finding> findings);
 
 // What is wrong with a --test-file path, as the end of "The test file ..." (pure). May throw

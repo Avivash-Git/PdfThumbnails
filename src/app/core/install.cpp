@@ -757,6 +757,8 @@ HRESULT InstallFromOwnFolder(const InstallOptions& options, const RegistryRoots&
 
   GatherOptions final;
   final.liveTest = options.liveTest;
+  // The install is confirmed by the Explorer test, not by the registry alone.
+  final.liveTestRequired = true;
   final.context = context;
   final.paths = paths;
   RETURN_IF_FAILED(GatherSnapshot(roots, final, probes, &result->after));
@@ -769,10 +771,13 @@ HRESULT InstallFromOwnFolder(const InstallOptions& options, const RegistryRoots&
   } else {
     result->code = status;
   }
-  Log(failures.empty() ? LogLevel::kInfo : LogLevel::kWarning, kLogComponent,
+  // A warning when a step of this program failed; an Explorer test that could not start is one.
+  Log((!failures.empty() || FAILED(result->after.liveError)) ? LogLevel::kWarning : LogLevel::kInfo,
+      kLogComponent,
       std::wstring(L"install scope=") + (scope == Scope::kMachine ? L"machine" : L"user") +
           L" build=" + result->source.buildName + L" result=" + CheckResultName(result->code) +
-          L" holders-ended=" + std::to_wstring(result->holdersEnded) + L" restart-pending=" +
+          LiveTestLogFields(result->after) + L" holders-ended=" +
+          std::to_wstring(result->holdersEnded) + L" restart-pending=" +
           (result->restartPending ? L"yes" : L"no") + L" failures=" +
           std::to_wstring(failures.size()));
   return S_OK;

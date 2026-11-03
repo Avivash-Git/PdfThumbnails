@@ -14,7 +14,8 @@
 //      without administrator rights: 7, failed: 5.
 //   5. When something changed, gather and evaluate again.
 //   6. Record the check under HKCU State, tell Explorer when a slot or class changed (only for the
-//      real registry roots), and write one log line.
+//      real registry roots), and write one log line, with the Explorer test's outcome
+//      (LiveTestLogFields).
 //   7. Exit 0 when nothing keeps thumbnails from working, else 1; a quiet check that needs the
 //      administrator step exits 7.
 
@@ -106,5 +107,12 @@ std::wstring CheckSummary(ExitCode code, int fixed, int problems);
 
 // The log's word for an exit code ("healthy", "problems", "busy", ...).
 const wchar_t* CheckResultName(ExitCode code) noexcept;
+
+// The Explorer test of |snapshot| as the log's summary lines give it (pure), with a leading
+// space: " live=0x00000000 live-ms=212" when it ran, " live=could-not-start
+// live-hr=0x80070005" when it was due but could not start, " live=skipped
+// live-skip=<reason>" otherwise (not-requested, elevated, virtualized, not-our-handler,
+// no-class). No paths. May throw std::bad_alloc.
+std::wstring LiveTestLogFields(const Snapshot& snapshot);
 
 }  // namespace pdft

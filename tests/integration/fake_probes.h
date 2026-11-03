@@ -111,6 +111,7 @@ class FakeProbes final : public SystemProbes {
     ++liveRuns;
     liveSize = size;
     if (file && FAILED(testFileError)) return testFileError;
+    if (!file && FAILED(liveError)) return liveError;
     *result = live;
     return S_OK;
   }
@@ -154,6 +155,7 @@ class FakeProbes final : public SystemProbes {
   mutable bool legacyTask = false;  // DeleteLegacyTask clears it
   HRESULT applyError = S_OK;        // what ApplyTaskOptions returns instead of changing the task
   LiveTest live{S_OK, {96, 96}, 150};
+  HRESULT liveError = S_OK;      // the probe's run cannot start (no probe file, no thread, ...)
   HRESULT testFileError = S_OK;  // a test file's run cannot start (no probe thread, ...)
   struct HeldFile {
     std::filesystem::path file;
