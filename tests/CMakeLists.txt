@@ -4,7 +4,9 @@
 #
 #   unit.tests                pdft_unit_tests: crop math, zoom clamping, the generated GUIDs,
 #                             test-PDF generator (byte-identical to the 1.x generator),
-#                             Medium-integrity support, temp folders, HKCU redirection; the app's
+#                             Medium-integrity support, temp folders, HKCU redirection, the
+#                             thumbnail refresh experiment's verdict (which zoom a bitmap's size
+#                             shows, the folder rules, its record files under %TEMP%); the app's
 #                             pure parts: command line, strings, paths, log, output, exit codes,
 #                             virtualization verdicts, named-object descriptors, start-up
 #                             hardening, the COM descriptor, the executables' string tables,
@@ -190,7 +192,8 @@ add_executable(pdft_unit_tests
   unit/test_pdfs_test.cpp
   unit/medium_il_test.cpp
   unit/temp_dir_test.cpp
-  unit/registry_sandbox_test.cpp)
+  unit/registry_sandbox_test.cpp
+  unit/refresh_judge_test.cpp)
 if(TARGET pdft_appcore)
   target_sources(pdft_unit_tests PRIVATE
     unit/build_folder_test.cpp

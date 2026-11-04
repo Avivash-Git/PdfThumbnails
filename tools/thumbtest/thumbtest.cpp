@@ -21,6 +21,10 @@
 //   thumbtest compare [--tolerance <n>] <a.png|dir> <b.png|dir>
 //       Compares decoded pixels of two PNGs, or of the same-named PNGs in two folders; a
 //       channel may differ by up to <n> (default 0). Exit 0 when all match.
+//   thumbtest incache|refresh|judge|cachefiles|shellinfo|opendialog ...
+//       The thumbnail refresh experiment's modes (refresh_modes.cpp, built with the settings
+//       app): they ask or change the signed-in user's real thumbnail cache, look at File
+//       Explorer, or open a window; judge only reads two record files.
 //
 // A directory stands for the *.pdf files directly inside it, in name order.
 // Prints one line per file: OK/FAIL, bitmap size, share of non-white pixels,
@@ -35,6 +39,8 @@
 // Without --zoom the DLL reads the user's own settings.
 
 #include <windows.h>
+
+#include "thumbtest.h"
 
 #include <propsys.h>
 #include <shlobj.h>
@@ -62,7 +68,55 @@
 #include "test_pdfs.h"
 #include "zoom.h"
 
+namespace thumbtest {
+
+std::string Utf8(const std::wstring& text) {
+  int size = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+  std::string out(size > 0 ? size - 1 : 0, '\0');
+  if (size > 1) WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, &out[0], size, nullptr, nullptr);
+  return out;
+}
+
+bool AddFiles(const std::wstring& arg, std::vector<std::wstring>* files) {
+  const DWORD attributes = GetFileAttributesW(arg.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+    files->push_back(arg);
+    return true;
+  }
+  std::wstring dir = arg;
+  if (dir.back() != L'\\' && dir.back() != L'/') dir += L'\\';
+  std::vector<std::wstring> found;
+  WIN32_FIND_DATAW data;
+  HANDLE find = FindFirstFileExW((dir + L"*.pdf").c_str(), FindExInfoBasic, &data,
+                                 FindExSearchNameMatch, nullptr, 0);
+  if (find != INVALID_HANDLE_VALUE) {
+    do {
+      // The pattern also matches 8.3 aliases (e.g. of "x.pdfx"); check the real name.
+      if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+          CompareStringOrdinal(PathFindExtensionW(data.cFileName), -1, L".pdf", -1, TRUE) ==
+              CSTR_EQUAL) {
+        found.push_back(dir + data.cFileName);
+      }
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
+  }
+  if (found.empty()) {
+    std::printf("no .pdf files in %s\n", Utf8(arg).c_str());
+    return false;
+  }
+  std::sort(found.begin(), found.end(), [](const std::wstring& a, const std::wstring& b) {
+    return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+  });
+  files->insert(files->end(), found.begin(), found.end());
+  return true;
+}
+
+}  // namespace thumbtest
+
 namespace {
+
+using thumbtest::AddFiles;
+using thumbtest::Utf8;
 
 constexpr CLSID kClsidPdfThumbnails = {
     0x0c3534c4, 0x5b7a, 0x48ab, {0x82, 0x8d, 0x1c, 0xd6, 0x60, 0xdc, 0x44, 0x7f}};
@@ -106,13 +160,6 @@ struct Com {
 };
 
 std::mutex g_printLock;
-
-std::string Utf8(const std::wstring& text) {
-  int size = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
-  std::string out(size > 0 ? size - 1 : 0, '\0');
-  if (size > 1) WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, &out[0], size, nullptr, nullptr);
-  return out;
-}
 
 std::wstring Stem(const std::wstring& path) {
   std::wstring name = PathFindFileNameW(path.c_str());
@@ -234,43 +281,6 @@ void Report(const std::wstring& file, HRESULT hr, HBITMAP bitmap, int alpha, dou
       std::printf("     (could not write png: 0x%08lX)\n", static_cast<unsigned long>(saved));
   }
   std::fflush(stdout);
-}
-
-// Appends the files named by |arg|: the file itself or, for a directory, the *.pdf
-// files directly inside it, sorted by name (ordinal, ignoring case). False when a
-// directory holds no PDFs.
-bool AddFiles(const std::wstring& arg, std::vector<std::wstring>* files) {
-  const DWORD attributes = GetFileAttributesW(arg.c_str());
-  if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-    files->push_back(arg);
-    return true;
-  }
-  std::wstring dir = arg;
-  if (dir.back() != L'\\' && dir.back() != L'/') dir += L'\\';
-  std::vector<std::wstring> found;
-  WIN32_FIND_DATAW data;
-  HANDLE find = FindFirstFileExW((dir + L"*.pdf").c_str(), FindExInfoBasic, &data,
-                                 FindExSearchNameMatch, nullptr, 0);
-  if (find != INVALID_HANDLE_VALUE) {
-    do {
-      // The pattern also matches 8.3 aliases (e.g. of "x.pdfx"); check the real name.
-      if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-          CompareStringOrdinal(PathFindExtensionW(data.cFileName), -1, L".pdf", -1, TRUE) ==
-              CSTR_EQUAL) {
-        found.push_back(dir + data.cFileName);
-      }
-    } while (FindNextFileW(find, &data));
-    FindClose(find);
-  }
-  if (found.empty()) {
-    std::printf("no .pdf files in %s\n", Utf8(arg).c_str());
-    return false;
-  }
-  std::sort(found.begin(), found.end(), [](const std::wstring& a, const std::wstring& b) {
-    return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN;
-  });
-  files->insert(files->end(), found.begin(), found.end());
-  return true;
 }
 
 using GetClassObjectFn = HRESULT(STDAPICALLTYPE*)(REFCLSID, REFIID, void**);
@@ -662,6 +672,9 @@ int Usage() {
       "A directory stands for the *.pdf files directly inside it, in name order.\n"
       "--zoom (100 to 200) sets the zoom for this run, in a redirected HKCU and a temporary\n"
       "settings.ini, so 1.x and 2.0 builds of the DLL render alike.\n");
+#ifdef PDFT_THUMBTEST_REFRESH
+  thumbtest::PrintRefreshUsage();
+#endif
   return 2;
 }
 
@@ -670,6 +683,9 @@ int Usage() {
 int wmain(int argc, wchar_t** argv) {
   if (argc < 2) return Usage();
   const std::wstring mode = argv[1];
+#ifdef PDFT_THUMBTEST_REFRESH
+  if (thumbtest::IsRefreshMode(mode)) return thumbtest::RunRefreshMode(argc, argv);
+#endif
   if (mode == L"makepdfs" || mode == L"makesamples") {
     if (argc != 3) return Usage();
     return RunMake(argv[2],

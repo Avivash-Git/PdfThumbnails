@@ -298,6 +298,17 @@ In `out\build\<preset>\bin\`:
   sets the zoom for the run in a redirected HKCU and a temporary `settings.ini`);
   `cache|cachenew|cacheinproc|shell ...` goes through Explorer's thumbnail pipeline;
   `compare <a> <b>` compares PNG files or folders pixel by pixel.
+- `thumbtest incache|refresh|judge|cachefiles|shellinfo|opendialog ...` (built with the settings
+  app) are for the thumbnail refresh experiment: `incache` asks the thumbnail cache which
+  thumbnails it holds, `refresh` makes them again with the experiment's flags, `judge` decides
+  from two `incache` records whether they now show the new zoom, `cachefiles` lists the cache
+  files' sizes and times, `shellinfo` shows what the cache rebuild would find, and `opendialog`
+  shows a File Open dialog. All but `judge`, which only reads its two files, work on your real
+  thumbnail cache and File Explorer: use them on synthetic PDFs only (`makepdfs`). `incache` and
+  `refresh` refuse the files the refresh leaves alone (online-only, on the network, and so on).
+  The modes refuse from an administrator prompt, below an app package (a Windows Terminal tab,
+  for example: use a Command Prompt opened with Win+R) and where the registry is virtualized
+  (exit code 8). `thumbtest` without arguments lists their options.
 - `pdft-run-medium [--] <program> [arguments]` runs a program at Medium integrity with a standard
   user's rights; `pdft-run-medium --check-token` prints the current token.
 - `pdft-run-outside [--timeout <seconds>] -- <program.exe> [arguments]` runs a program in the
