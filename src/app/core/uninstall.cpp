@@ -47,12 +47,19 @@ void Failed(std::vector<std::wstring>* failures, const wchar_t* step, HRESULT hr
 }
 
 // What makes the rebuild of --uninstall --rebuild-thumbnails a step that failed: File Explorer did
-// not come back (what starting it gave, or ERROR_TIMEOUT where it was not started), or a cache file
-// could not be deleted. A rebuild that was refused or could not start changed nothing; programs
-// left alone that keep cache files are only reported.
+// not come back (why the start failed, or could not be made ready, where it came to a start;
+// ERROR_TIMEOUT where none was tried, or one was and File Explorer still did not come back), or a
+// cache file could not be deleted. A rebuild that was refused or could not start changed nothing;
+// programs left alone that keep cache files are only reported.
 std::optional<HRESULT> RebuildStepFailure(const RebuildResult& rebuild) noexcept {
   if (rebuild.shell == ShellOutcome::kNotBack) {
-    return FAILED(rebuild.startError) ? rebuild.startError : HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    // Where it never came to a start, startError may hold why the fallback could not be made
+    // ready before anything changed, which is not why File Explorer did not come back.
+    const bool cameToStart = rebuild.start == ShellStart::kStarted ||
+                             rebuild.start == ShellStart::kJobForbids ||
+                             rebuild.start == ShellStart::kFailed;
+    return cameToStart && FAILED(rebuild.startError) ? rebuild.startError
+                                                     : HRESULT_FROM_WIN32(ERROR_TIMEOUT);
   }
   if (rebuild.failed > 0) return rebuild.firstFileError;
   return std::nullopt;

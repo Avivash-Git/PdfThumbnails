@@ -743,6 +743,39 @@ TEST(RebuildFake, AShellNotEndedIsNeitherWaitedForNorStarted) {
   }
 }
 
+// The report says why it exits 1 when the shell could not be ended, and names the shell that
+// keeps its cache file as still running, apart from the programs it leaves alone.
+TEST(RebuildFake, AShellThatCouldNotBeEndedIsReportedAsStillRunning) {
+  FakeRebuildSystem fake;
+  fake.cacheFiles = Files(L"C:\\fake-cache", 3);
+  fake.SetShell(kShellPid);
+  fake.AddHolder(kShellPid, fake.kExplorerImage(), {fake.cacheFiles[0]});
+  fake.AddHolder(kSearchPid, L"C:\\Windows\\SystemApps\\Search\\SearchHost.exe",
+                 {fake.cacheFiles[2]});
+  fake.endResult[kShellPid] = E_FAIL;
+  fake.inUseFiles.insert(fake.cacheFiles[0].native());
+  fake.inUseFiles.insert(fake.cacheFiles[2].native());
+  fake.Prime();
+
+  RebuildResult result;
+  ASSERT_HRESULT_SUCCEEDED(RunRebuild(fake, Options(), &result));
+  EXPECT_EQ(result.endFailed, 1u);
+  EXPECT_EQ(result.shell, ShellOutcome::kNotEnded);
+  EXPECT_EQ(result.deleted, 1u);
+  EXPECT_EQ(result.inUse, 2u);
+  EXPECT_EQ(result.inUseByNotEnded, std::vector<std::wstring>{L"explorer.exe"});
+  EXPECT_EQ(result.inUseBy, std::vector<std::wstring>{L"SearchHost.exe"});
+  EXPECT_EQ(RebuildExitCode(result), ExitCode::kProblems);
+  EXPECT_EQ(RebuildReport(result),
+            (std::vector<std::wstring>{
+                L"Thumbnail cache cleared: 1 of 3 cache files deleted.",
+                L"1 File Explorer or thumbnail process could not be ended (0x80004005).",
+                L"2 cache files are in use by File Explorer or thumbnail processes still running "
+                L"(explorer.exe) and by programs this program leaves alone (SearchHost.exe); "
+                L"their thumbnails update after you next sign in.",
+                L"Thumbnails are made again as folders are opened."}));
+}
+
 TEST(RebuildFake, OnlyANonShellFileExplorerEndedStillReopens) {
   const path dir = L"C:\\fake-cache";
   FakeRebuildSystem fake;

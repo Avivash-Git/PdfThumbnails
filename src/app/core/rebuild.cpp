@@ -105,6 +105,24 @@ std::wstring Counted(size_t n, const wchar_t* one, const wchar_t* many) {
   return Count(n) + L" " + (n == 1 ? one : many);
 }
 
+// "<a>, <b>, <c>, <d>, and <m> more": at most four names.
+std::wstring Names(const std::vector<std::wstring>& names) {
+  std::wstring text;
+  const size_t shown = std::min<size_t>(names.size(), 4);
+  for (size_t i = 0; i < shown; ++i) {
+    if (i > 0) text += L", ";
+    text += names[i];
+  }
+  if (names.size() > shown) text += L", and " + Count(names.size() - shown) + L" more";
+  return text;
+}
+
+// Whether |image| is one the rebuild ends: File Explorer or the thumbnail process.
+bool EndableImage(std::wstring_view image, const RebuildImages& images) noexcept {
+  return SameImagePath(image, images.explorer) || SameImagePath(image, images.surrogate) ||
+         (!images.surrogateWow64.empty() && SameImagePath(image, images.surrogateWow64));
+}
+
 // The folder windows the report and the log count as meant to be opened again: those opened,
 // those that failed, and those past kMaxReopenedWindows.
 size_t ReopenWanted(const RebuildResult& r) noexcept {
@@ -346,25 +364,36 @@ std::vector<std::wstring> RebuildReport(const RebuildResult& r) {
     lines.push_back(L"The thumbnail cache is already empty; there is nothing to rebuild.");
     return lines;
   }
-  lines.push_back(L"Thumbnail cache cleared: " + Count(r.deleted) + L" of " +
-                  Counted(r.cacheFiles, L"cache file", L"cache files") + L" deleted.");
+  if (r.deleted > 0) {
+    lines.push_back(L"Thumbnail cache cleared: " + Count(r.deleted) + L" of " +
+                    Counted(r.cacheFiles, L"cache file", L"cache files") + L" deleted.");
+  } else if (r.cacheFiles == 1) {
+    lines.push_back(L"The thumbnail cache was not cleared: its cache file could not be deleted.");
+  } else {
+    lines.push_back(L"The thumbnail cache was not cleared: none of its " + Count(r.cacheFiles) +
+                    L" cache files could be deleted.");
+  }
+  if (r.endFailed > 0) {
+    lines.push_back(Counted(r.endFailed, L"File Explorer or thumbnail process",
+                            L"File Explorer or thumbnail processes") +
+                    L" could not be ended (" + HResultText(r.firstEndError) + L").");
+  }
   if (r.inUse > 0) {
-    std::wstring who;
-    if (!r.inUseBy.empty()) {
-      const size_t shown = std::min<size_t>(r.inUseBy.size(), 4);
-      for (size_t i = 0; i < shown; ++i) {
-        if (i > 0) who += L", ";
-        who += r.inUseBy[i];
-      }
-      if (r.inUseBy.size() > shown) {
-        who += L", and " + Count(r.inUseBy.size() - shown) + L" more";
-      }
-    } else {
-      who = L"programs of other accounts or sessions";
+    std::wstring by;
+    if (!r.inUseByNotEnded.empty()) {
+      by =
+          L"File Explorer or thumbnail processes still running (" + Names(r.inUseByNotEnded) + L")";
     }
-    lines.push_back(Counted(r.inUse, L"cache file is", L"cache files are") +
-                    L" in use by programs this program leaves alone (" + who + L"); " +
-                    (r.inUse == 1 ? L"its" : L"their") +
+    // Programs left alone by name, or else as other accounts' (also when none could be named).
+    if (!r.inUseBy.empty() || r.inUseByOthers || r.inUseByNotEnded.empty()) {
+      if (!by.empty()) by += L" and by ";
+      by += L"programs this program leaves alone (" +
+            (r.inUseBy.empty() ? std::wstring(L"programs of other accounts or sessions")
+                               : Names(r.inUseBy)) +
+            L")";
+    }
+    lines.push_back(Counted(r.inUse, L"cache file is", L"cache files are") + L" in use by " + by +
+                    L"; " + (r.inUse == 1 ? L"its" : L"their") +
                     L" thumbnails update after you next sign in.");
   }
   if (r.failed > 0) {
@@ -626,10 +655,11 @@ void DeleteFiles(const RebuildSystem& system, std::span<const std::filesystem::p
   result->deleteMs = system.NowMs() - start;
 }
 
-// Who keeps the files still in use: this session's programs by image leaf name, others only as a
-// count. Never logged.
-void NameHolders(const RebuildSystem& system, std::span<const std::filesystem::path> files,
-                 std::span<const size_t> stillInUse, RebuildResult* result) noexcept try {
+// Who keeps the files still in use: this session's programs by image leaf name (apart, those of
+// the images the rebuild ends), others only as a count. Never logged.
+void NameHolders(const RebuildSystem& system, const RebuildImages& images,
+                 std::span<const std::filesystem::path> files, std::span<const size_t> stillInUse,
+                 RebuildResult* result) noexcept try {
   if (stillInUse.empty()) return;
   std::vector<std::filesystem::path> inUse;
   for (const size_t i : stillInUse) inUse.push_back(files[i]);
@@ -637,15 +667,17 @@ void NameHolders(const RebuildSystem& system, std::span<const std::filesystem::p
   (void)ProcessIdToSessionId(GetCurrentProcessId(), &ownSession);
   std::vector<Holder> holders;
   if (FAILED(system.FindHolders(inUse, &holders))) return;
-  std::set<std::wstring> names;
+  std::set<std::wstring> leftAlone;
+  std::set<std::wstring> notEnded;
   for (const Holder& holder : holders) {
     if (holder.session == ownSession && !holder.image.empty()) {
-      names.insert(Leaf(holder.image));
+      (EndableImage(holder.image, images) ? notEnded : leftAlone).insert(Leaf(holder.image));
     } else {
       result->inUseByOthers = true;
     }
   }
-  result->inUseBy.assign(names.begin(), names.end());
+  result->inUseBy.assign(leftAlone.begin(), leftAlone.end());
+  result->inUseByNotEnded.assign(notEnded.begin(), notEnded.end());
 } catch (...) {
   // Out of memory: the report names nobody.
 }
@@ -1073,7 +1105,7 @@ HRESULT RebuildThumbnailCache(const RebuildOptions& options, const RebuildSystem
   }
 
   DeleteFiles(system, files, result, &stillInUse);
-  NameHolders(system, files, stillInUse, result);
+  NameHolders(system, images, files, stillInUse, result);
 
   if (ending.shellGone) {
     report(RebuildPhase::kWaitingForExplorer);

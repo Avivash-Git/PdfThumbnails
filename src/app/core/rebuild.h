@@ -229,8 +229,11 @@ struct RebuildResult {
   HRESULT firstFileError = S_OK;
   ULONGLONG deleteMs = 0;
   // Image leaf names ("SearchHost.exe") of this session's programs that keep cache files in use,
-  // sorted and each once: for the console, never the log.
+  // sorted and each once: for the console, never the log. Those of the images the rebuild ends
+  // (File Explorer and the thumbnail process: one it could not end, one a check refused, or one
+  // started since) are in inUseByNotEnded, the others in inUseBy.
   std::vector<std::wstring> inUseBy;
+  std::vector<std::wstring> inUseByNotEnded;
   bool inUseByOthers = false;  // ... and programs of other accounts or sessions
 
   // File Explorer.
@@ -258,8 +261,8 @@ struct RebuildResult {
 ExitCode RebuildExitCode(const RebuildResult& r) noexcept;
 
 // What the rebuild did, line by line (pure), for a result that is neither a refusal nor a
-// failure (those have RebuildRefusalText and RebuildFailureText). Programs by image leaf name
-// only. May throw std::bad_alloc.
+// failure (those have RebuildRefusalText and RebuildFailureText), with a line for each reason it
+// exits 1. Programs by image leaf name only. May throw std::bad_alloc.
 std::vector<std::wstring> RebuildReport(const RebuildResult& r);
 
 // Why it was refused (pure), for standard error; |context| names the account and the package,

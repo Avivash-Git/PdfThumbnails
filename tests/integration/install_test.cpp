@@ -1764,6 +1764,32 @@ TEST_F(Install, UninstallFailsWhenTheRebuildLeavesNoFileExplorerOrACacheFile) {
     EXPECT_EQ(result.failures, std::vector<std::wstring>{L"rebuild: 0x80070005"});
     EXPECT_EQ(result.code, ExitCode::kFailed);
   }
+
+  // The fallback start could not be made ready, and the File Explorer Windows started is still
+  // coming up when the longer wait ends: no start was tried, so the wait's own failure, not why
+  // the fallback could not be made ready.
+  {
+    test::FakeRebuildSystem fake;
+    ShellAndSurrogateHoldTheCache(&fake);
+    fake.prepareHr = E_FAIL;
+    fake.shellBackByItself = false;
+    fake.explorerStartedSinceFlag = true;
+    fake.Prime();
+    ASSERT_HRESULT_SUCCEEDED(WriteSlots(roots_, SlotWrite::kTakeBack));
+    UninstallOptions options = MakeUninstallOptions();
+    options.rebuildThumbnails = true;
+    options.rebuildSystem = &fake;
+    UninstallResult result;
+    ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
+    ASSERT_TRUE(result.rebuild);
+    EXPECT_EQ(result.rebuild->shell, ShellOutcome::kNotBack);
+    EXPECT_EQ(result.rebuild->start, ShellStart::kNotTried);
+    EXPECT_EQ(result.rebuild->startError, E_FAIL);
+    EXPECT_EQ(fake.startCalls, 0);
+    const std::wstring notBack = L"rebuild: " + HResultText(HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+    EXPECT_EQ(result.failures, std::vector<std::wstring>{notBack});
+    EXPECT_EQ(result.code, ExitCode::kFailed);
+  }
 }
 
 TEST_F(Install, UserFilesKeep1xsLicensesWhileItsManagerIsThere) {

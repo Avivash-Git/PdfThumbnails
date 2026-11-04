@@ -538,11 +538,77 @@ TEST(RebuildReport, OneOfEach) {
   r.reopenTried = true;
   r.reopened = 1;
   const std::vector<std::wstring> lines = RebuildReport(r);
-  EXPECT_TRUE(HasLine(lines, L"Thumbnail cache cleared: 0 of 1 cache file deleted."));
+  EXPECT_TRUE(
+      HasLine(lines, L"The thumbnail cache was not cleared: its cache file could not be deleted."));
   EXPECT_TRUE(HasLine(lines,
                       L"1 cache file is in use by programs this program leaves alone "
                       L"(SearchHost.exe); its thumbnails update after you next sign in."));
   EXPECT_TRUE(HasLine(lines, L"Reopened 1 of 1 folder window."));
+}
+
+// No file deleted (exit 1): the first line says the cache was not cleared, never "cleared".
+TEST(RebuildReport, NothingDeleted) {
+  RebuildResult r;
+  r.cacheFiles = 3;
+  r.deleted = 0;
+  r.inUse = 2;
+  r.inUseBy = {L"SearchHost.exe"};
+  r.failed = 1;
+  r.firstFileError = E_ACCESSDENIED;
+  ASSERT_EQ(RebuildExitCode(r), ExitCode::kProblems);
+  EXPECT_EQ(RebuildReport(r),
+            (std::vector<std::wstring>{
+                L"The thumbnail cache was not cleared: none of its 3 cache files could be deleted.",
+                L"2 cache files are in use by programs this program leaves alone "
+                L"(SearchHost.exe); their thumbnails update after you next sign in.",
+                L"1 cache file could not be deleted (0x80070005).",
+                L"Thumbnails are made again as folders are opened."}));
+}
+
+// A File Explorer or thumbnail process that could not be ended (exit 1) has a line of its own, and
+// the cache files it keeps are its, never those of a program this program leaves alone.
+TEST(RebuildReport, AProcessNotEndedIsSaidAndNamedApart) {
+  RebuildResult r;
+  r.cacheFiles = 2;
+  r.deleted = 1;
+  r.inUse = 1;
+  r.endFailed = 1;
+  r.firstEndError = E_FAIL;
+  r.inUseByNotEnded = {L"explorer.exe"};
+  r.reopenTried = true;
+  r.reopened = 1;
+  ASSERT_EQ(RebuildExitCode(r), ExitCode::kProblems);
+  const std::vector<std::wstring> lines = RebuildReport(r);
+  EXPECT_EQ(lines, (std::vector<std::wstring>{
+                       L"Thumbnail cache cleared: 1 of 2 cache files deleted.",
+                       L"1 File Explorer or thumbnail process could not be ended (0x80004005).",
+                       L"1 cache file is in use by File Explorer or thumbnail processes still "
+                       L"running (explorer.exe); its thumbnails update after you next sign in.",
+                       L"Reopened 1 of 1 folder window.",
+                       L"Thumbnails are made again as folders are opened."}));
+
+  // Next to programs left alone, by name or as other accounts'.
+  RebuildResult both = r;
+  both.cacheFiles = 4;
+  both.inUse = 3;
+  both.endFailed = 2;
+  both.firstEndError = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+  both.inUseByNotEnded = {L"dllhost.exe", L"explorer.exe"};
+  both.inUseBy = {L"SearchHost.exe"};
+  const std::vector<std::wstring> bothLines = RebuildReport(both);
+  EXPECT_TRUE(HasLine(bothLines,
+                      L"2 File Explorer or thumbnail processes could not be ended (0x800705B4)."));
+  EXPECT_TRUE(HasLine(bothLines,
+                      L"3 cache files are in use by File Explorer or thumbnail processes still "
+                      L"running (dllhost.exe, explorer.exe) and by programs this program leaves "
+                      L"alone (SearchHost.exe); their thumbnails update after you next sign in."));
+  RebuildResult others = r;
+  others.inUseByOthers = true;
+  EXPECT_TRUE(HasLine(RebuildReport(others),
+                      L"1 cache file is in use by File Explorer or thumbnail processes still "
+                      L"running (explorer.exe) and by programs this program leaves alone "
+                      L"(programs of other accounts or sessions); its thumbnails update after you "
+                      L"next sign in."));
 }
 
 TEST(RebuildReport, NothingToReopen) {
