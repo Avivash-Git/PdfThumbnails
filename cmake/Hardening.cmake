@@ -22,7 +22,7 @@
 #                            below for what it changes.
 #
 # The app's executables and their DLL imports:
-#   PDFT_EXE_STATIC_IMPORTS  what they may import statically: KnownDLLs only
+#   PDFT_EXE_STATIC_IMPORTS  what they may import statically: KnownDLLs and one API set
 #   PDFT_EXE_DELAY_LOADS     everything else they may use, delay-loaded
 #   pdft_delay_load(<target> <dll>...)   links and delay-loads DLLs from the second list
 
@@ -49,9 +49,14 @@ option(PDFT_ASAN "AddressSanitizer for every target (local test builds only)" OF
 # does not apply to side-by-side lookups. So an <exe>.local folder next to a copy of the
 # executable may still redirect it, and gate.planting does not try that case.
 # The gates (gate.imports.*) enforce both lists, and gate.planting tries the second.
+# The one API set: the C++ library's std::stop_source (the Ctrl+C handling of --refresh and
+# --uninstall) waits through WaitOnAddress, which it imports from api-ms-win-core-synch-l1-2-0.
+# The loader resolves an API set name through the API set schema to its host (KernelBase.dll, a
+# KnownDLL) and never looks for a file of that name, so a planted copy is not loaded either;
+# gate.planting plants one to check that.
 set(PDFT_EXE_STATIC_IMPORTS
   KERNEL32.dll USER32.dll GDI32.dll ADVAPI32.dll SHELL32.dll ole32.dll OLEAUT32.dll SHLWAPI.dll
-  COMDLG32.dll SHCORE.dll)
+  COMDLG32.dll SHCORE.dll api-ms-win-core-synch-l1-2-0.dll)
 set(PDFT_EXE_DELAY_LOADS
   msi.dll wevtapi.dll rstrtmgr.dll propsys.dll version.dll userenv.dll uxtheme.dll dwmapi.dll
   oleacc.dll bcrypt.dll wintrust.dll crypt32.dll)

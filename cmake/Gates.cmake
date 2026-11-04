@@ -127,13 +127,14 @@ endif()
 # %TEMP%, plants a canary DLL there under every name below, runs each executable with --version
 # and --help (and, when run elevated as on CI, --status --no-live-test), and fails if any canary
 # was loaded. The names: every DLL the executables may delay-load, Common Controls (bound
-# through the manifest), and DLLs that Windows' own DLLs load by name on a program's behalf, the
-# usual targets of DLL planting. Skipped (exit 77) only when Smart App Control or another
+# through the manifest), the API set they import statically (which the loader must resolve
+# without looking for a file), and DLLs that Windows' own DLLs load by name on a program's
+# behalf, the usual targets of DLL planting. Skipped (exit 77) only when Smart App Control or another
 # Application Control policy blocks the canary or an executable, because a canary that cannot
 # load would make the check pass for the wrong reason; any other failure of the canary fails.
 # It starts programs, so it is registered for native builds only.
 set(PDFT_PLANTING_NAMES ${PDFT_EXE_DELAY_LOADS}
-  comctl32.dll cryptbase.dll cryptsp.dll dbghelp.dll profapi.dll sspicli.dll winmm.dll
+  comctl32.dll api-ms-win-core-synch-l1-2-0.dll cryptbase.dll cryptsp.dll dbghelp.dll profapi.dll sspicli.dll winmm.dll
   wtsapi32.dll)
 list(REMOVE_DUPLICATES PDFT_PLANTING_NAMES)
 if(TARGET pdft_planting_check AND NOT CMAKE_CROSSCOMPILING)
