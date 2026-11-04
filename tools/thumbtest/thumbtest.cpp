@@ -25,6 +25,10 @@
 //       The thumbnail refresh experiment's modes (refresh_modes.cpp, built with the settings
 //       app): they ask or change the signed-in user's real thumbnail cache, look at File
 //       Explorer, or open a window; judge only reads two record files.
+//   thumbtest experiment ...
+//       The one-sitting thumbnail refresh experiment (experiment.cpp, docs/TESTING.md): it
+//       changes the real zoom for the run and puts it back, and fills and refreshes the real
+//       thumbnail cache with synthetic PDFs.
 //
 // A directory stands for the *.pdf files directly inside it, in name order.
 // Prints one line per file: OK/FAIL, bitmap size, share of non-white pixels,

@@ -41,11 +41,15 @@
 //   thumbtest opendialog <folder>
 //       Shows the File Open dialog at <folder> in this process, another process than File
 //       Explorer with thumbnails of its own, until it is closed.
+//   thumbtest experiment ...
+//       The one-sitting refresh experiment, which uses the modes' parts (experiment.cpp).
 //
 // <list> is sizes in pixels separated by commas ("16,32,256"); without --sizes the product's
 // (kRefreshSizes). Output names files and folders by name only, apart from what was typed.
 
 #include <windows.h>
+
+#include "refresh_modes.h"
 
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -101,9 +105,6 @@ namespace {
 
 using pdft::test::CacheRecord;
 
-// The app's exit code for "cannot run here" (ExitCode::kWrongContext).
-constexpr int kRefused = 8;
-
 // How long File Explorer gets to list its windows.
 constexpr DWORD kListTimeoutMs = 5000;
 
@@ -117,13 +118,22 @@ constexpr ULONGLONG kMaxTextBytes = 1 << 20;
 // --cancel-after takes up to a day.
 constexpr long kMaxCancelAfterMs = 24 * 3600 * 1000;
 
-int BadUsage() {
-  std::printf("usage:\n");
-  PrintRefreshUsage();
-  return 2;
+// A --record file: a header, then "<name>\t<size>\t<last write>" (the cache files' names are
+// ASCII: IsThumbnailCacheFileName).
+constexpr std::string_view kCacheFilesHeader = "name\tsize\twritten";
+
+std::string IdHex(const std::array<BYTE, 16>& id) {
+  std::string text;
+  for (const BYTE byte : id) {
+    char hex[3];
+    std::snprintf(hex, sizeof(hex), "%02x", byte);
+    text += hex;
+  }
+  return text;
 }
 
-// Milliseconds from the performance counter: GetTickCount64 moves in steps of about 16 ms.
+}  // namespace
+
 ULONGLONG PreciseMs() noexcept {
   static const LONGLONG frequency = [] {
     LARGE_INTEGER f;
@@ -136,7 +146,6 @@ ULONGLONG PreciseMs() noexcept {
                                 now.QuadPart % frequency * 1000 / frequency);
 }
 
-// A whole decimal number from |min| to |max|, digits only.
 bool ParseNumber(const std::wstring& text, long min, long max, long* value) {
   if (text.empty() || !std::iswdigit(text[0])) return false;
   wchar_t* end = nullptr;
@@ -147,26 +156,6 @@ bool ParseNumber(const std::wstring& text, long min, long max, long* value) {
   return true;
 }
 
-// "16,32,256": sizes from 1 to the largest the cache keeps.
-bool ParseSizes(const std::wstring& text, std::vector<UINT>* sizes) {
-  sizes->clear();
-  size_t start = 0;
-  for (;;) {
-    const size_t comma = text.find(L',', start);
-    long size = 0;
-    if (!ParseNumber(text.substr(start, comma == std::wstring::npos ? comma : comma - start), 1,
-                     static_cast<long>(pdft::kMaxEdge), &size)) {
-      return false;
-    }
-    sizes->push_back(static_cast<UINT>(size));
-    if (comma == std::wstring::npos) return true;
-    start = comma + 1;
-  }
-}
-
-// Why the walk of --refresh --folder would leave |path| out (ClassifyCandidate), from the
-// attributes, size and volume Windows reports for it; kNone when it would not. Fails when they
-// cannot be read.
 HRESULT SkipOf(const std::filesystem::path& path, pdft::CandidateSkip* skip) {
   WIN32_FILE_ATTRIBUTE_DATA data = {};
   if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) {
@@ -205,40 +194,7 @@ const char* SkipText(pdft::CandidateSkip skip) {
   return "?";
 }
 
-// The files of |args| (AddFiles), each by its final path (Canonicalize), the form File Explorer
-// shows and the shell's notifications and views compare with. A file the refresh leaves alone
-// (ClassifyCandidate: online-only, on the network, ...) is refused before the shell sees it,
-// checked as named and again where a link leads; until then only its attributes are read
-// (Canonicalize opens it for them). False, with a message, when one is refused or cannot be found.
-bool FinalFiles(const std::vector<std::wstring>& args, size_t first,
-                std::vector<std::filesystem::path>* files) {
-  std::vector<std::wstring> named;
-  for (size_t i = first; i < args.size(); ++i) {
-    if (!AddFiles(args[i], &named)) return false;
-  }
-  for (const std::wstring& name : named) {
-    std::filesystem::path file;
-    pdft::CandidateSkip skip = pdft::CandidateSkip::kNone;
-    HRESULT hr = SkipOf(name, &skip);
-    if (SUCCEEDED(hr) && skip == pdft::CandidateSkip::kNone) hr = pdft::Canonicalize(name, &file);
-    if (SUCCEEDED(hr) && skip == pdft::CandidateSkip::kNone) hr = SkipOf(file, &skip);
-    if (FAILED(hr)) {
-      std::printf("cannot find %s: 0x%08lX\n", Utf8(name).c_str(), static_cast<unsigned long>(hr));
-      return false;
-    }
-    if (skip != pdft::CandidateSkip::kNone) {
-      std::printf("refused: %s is %s, and the refresh leaves such files alone\n",
-                  Utf8(name).c_str(), SkipText(skip));
-      return false;
-    }
-    files->push_back(std::move(file));
-  }
-  return true;
-}
-
-// Why this process may not use the signed-in user's thumbnail cache and File Explorer, from its
-// context with the registry canary (*context), said on the console: std::nullopt when it may,
-// else the exit code. Not elevated (they are the signed-in user's, and the handler does not
+// Not elevated (the cache and File Explorer are the signed-in user's, and the handler does not
 // render elevated); not below an app package, even one that leaves the registry alone (a Windows
 // Terminal tab): the cache runs in this process, and a cache file it makes could land in the
 // package's private copy of the user's folders; and not where its registry writes may be
@@ -286,16 +242,6 @@ std::optional<int> Refusal(pdft::ProcessContext* context) {
   return std::nullopt;
 }
 
-std::string IdHex(const std::array<BYTE, 16>& id) {
-  std::string text;
-  for (const BYTE byte : id) {
-    char hex[3];
-    std::snprintf(hex, sizeof(hex), "%02x", byte);
-    text += hex;
-  }
-  return text;
-}
-
 bool WriteText(const std::wstring& file, const std::string& text) {
   if (text.size() > MAXDWORD) return false;
   wil::unique_hfile handle(CreateFileW(
@@ -305,6 +251,184 @@ bool WriteText(const std::wstring& file, const std::string& text) {
   DWORD written = 0;
   return WriteFile(handle.get(), text.data(), static_cast<DWORD>(text.size()), &written, nullptr) &&
          written == text.size();
+}
+
+std::string TimesText(std::vector<DWORD> times) {
+  if (times.empty()) return "none";
+  std::sort(times.begin(), times.end());
+  ULONGLONG total = 0;
+  for (const DWORD ms : times) total += ms;
+  // The nearest rank: the smallest time at least 95 % of them do not exceed.
+  const size_t rank = (times.size() * 95 + 99) / 100;
+  char text[160];
+  std::snprintf(text, sizeof(text), "%zu, min %lu ms, mean %.1f ms, p95 %lu ms, max %lu ms",
+                times.size(), times.front(),
+                static_cast<double>(total) / static_cast<double>(times.size()), times[rank - 1],
+                times.back());
+  return text;
+}
+
+std::vector<CacheRecord> AskCache(pdft::ThumbnailCacheOps& cache,
+                                  std::span<const std::filesystem::path> files,
+                                  std::span<const UINT> sizes, DWORD flags,
+                                  const std::optional<std::wstring>& label, bool print,
+                                  bool* failed) {
+  std::vector<CacheRecord> records;
+  for (const std::filesystem::path& file : files) {
+    const std::wstring folder = label ? *label : file.parent_path().filename().native();
+    const std::wstring key = folder + L"/" + file.filename().native();
+    const HRESULT selected = cache.Select(file);
+    if (FAILED(selected)) {
+      std::printf("ERROR        hr=0x%08lX (cannot open the file)  %s\n",
+                  static_cast<unsigned long>(selected), Utf8(key).c_str());
+      *failed = true;
+    }
+    for (const UINT size : sizes) {
+      CacheRecord entry;
+      entry.label = folder;
+      entry.key = key;
+      entry.size = size;
+      pdft::CacheAnswer answer;
+      entry.hr = FAILED(selected) ? selected : cache.Get(size, flags, &answer);
+      entry.cacheFlags = answer.cacheFlags;
+      entry.id = answer.id;
+      if (answer.bitmap) {
+        entry.w = static_cast<int>(answer.dims.cx);
+        entry.h = static_cast<int>(answer.dims.cy);
+      }
+      entry.cached = entry.hr == S_OK && answer.bitmap && (answer.cacheFlags & WTS_CACHED);
+      if (print && SUCCEEDED(selected)) {
+        if (entry.cached) {
+          std::printf("CACHED %5u  %dx%d flags=0x%lX id=%s  %s\n", size, entry.w, entry.h,
+                      static_cast<unsigned long>(entry.cacheFlags), IdHex(entry.id).c_str(),
+                      Utf8(key).c_str());
+        } else if (answer.bitmap) {
+          std::printf("MISS   %5u  hr=0x%08lX flags=0x%lX, a bitmap %dx%d  %s\n", size,
+                      static_cast<unsigned long>(entry.hr),
+                      static_cast<unsigned long>(entry.cacheFlags), entry.w, entry.h,
+                      Utf8(key).c_str());
+        } else {
+          std::printf("MISS   %5u  hr=0x%08lX  %s\n", size, static_cast<unsigned long>(entry.hr),
+                      Utf8(key).c_str());
+        }
+      }
+      records.push_back(std::move(entry));
+    }
+    if (print) std::fflush(stdout);
+  }
+  return records;
+}
+
+HRESULT ListCacheFiles(std::map<std::string, CacheFile>* files,
+                       std::map<std::string, DWORD>* unreadable) {
+  files->clear();
+  unreadable->clear();
+  std::vector<std::filesystem::path> paths;
+  const HRESULT hr = pdft::RealRebuildSystem().CacheFiles(&paths);
+  if (FAILED(hr)) return hr;
+  for (const std::filesystem::path& path : paths) {
+    const std::string name = Utf8(path.filename().native());
+    // Its attributes only: the file is never opened for its data, so whoever has it open is not
+    // disturbed.
+    WIN32_FILE_ATTRIBUTE_DATA data = {};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) {
+      (*unreadable)[name] = GetLastError();
+      continue;
+    }
+    (*files)[name] = {(static_cast<ULONGLONG>(data.nFileSizeHigh) << 32) | data.nFileSizeLow,
+                      (static_cast<ULONGLONG>(data.ftLastWriteTime.dwHighDateTime) << 32) |
+                          data.ftLastWriteTime.dwLowDateTime};
+  }
+  return hr;
+}
+
+std::string VerdictText(const pdft::test::FolderVerdict& v, long zoomBefore) {
+  const char* word = !v.baselineValid ? "INVALID"
+                     : v.passA        ? (v.control ? "HELD" : "PASS")
+                                      : (v.control ? "CHANGED" : "FAIL");
+  char text[320];
+  std::snprintf(
+      text, sizeof(text),
+      "%-8s %s%s: %zu cached before (%zu not at %ld %%); after: %zu new, %zu old, %zu gone, %zu "
+      "neither; %zu created, %zu under a new ID",
+      word, Utf8(v.label).c_str(), v.control ? " (control)" : "", v.baseline, v.baselineNotOld,
+      zoomBefore, v.newAfter, v.oldAfter, v.missAfter, v.otherAfter, v.created, v.idChanged);
+  return text;
+}
+
+std::string TimeText(ULONGLONG written) {
+  FILETIME time = {static_cast<DWORD>(written), static_cast<DWORD>(written >> 32)};
+  SYSTEMTIME utc = {};
+  if (!FileTimeToSystemTime(&time, &utc)) return "?";
+  char text[40];
+  std::snprintf(text, sizeof(text), "%04u-%02u-%02u %02u:%02u:%02u.%03u UTC", utc.wYear, utc.wMonth,
+                utc.wDay, utc.wHour, utc.wMinute, utc.wSecond, utc.wMilliseconds);
+  return text;
+}
+
+std::string CacheFilesRecord(const std::map<std::string, CacheFile>& files) {
+  std::string text(kCacheFilesHeader);
+  text += '\n';
+  for (const auto& [name, file] : files) {
+    text += name + "\t" + std::to_string(file.size) + "\t" + std::to_string(file.written) + "\n";
+  }
+  return text;
+}
+
+namespace {
+
+int BadUsage() {
+  std::printf("usage:\n");
+  PrintRefreshUsage();
+  return 2;
+}
+
+// "16,32,256": sizes from 1 to the largest the cache keeps.
+bool ParseSizes(const std::wstring& text, std::vector<UINT>* sizes) {
+  sizes->clear();
+  size_t start = 0;
+  for (;;) {
+    const size_t comma = text.find(L',', start);
+    long size = 0;
+    if (!ParseNumber(text.substr(start, comma == std::wstring::npos ? comma : comma - start), 1,
+                     static_cast<long>(pdft::kMaxEdge), &size)) {
+      return false;
+    }
+    sizes->push_back(static_cast<UINT>(size));
+    if (comma == std::wstring::npos) return true;
+    start = comma + 1;
+  }
+}
+
+// The files of |args| (AddFiles), each by its final path (Canonicalize), the form File Explorer
+// shows and the shell's notifications and views compare with. A file the refresh leaves alone
+// (ClassifyCandidate: online-only, on the network, ...) is refused before the shell sees it,
+// checked as named and again where a link leads; until then only its attributes are read
+// (Canonicalize opens it for them). False, with a message, when one is refused or cannot be found.
+bool FinalFiles(const std::vector<std::wstring>& args, size_t first,
+                std::vector<std::filesystem::path>* files) {
+  std::vector<std::wstring> named;
+  for (size_t i = first; i < args.size(); ++i) {
+    if (!AddFiles(args[i], &named)) return false;
+  }
+  for (const std::wstring& name : named) {
+    std::filesystem::path file;
+    pdft::CandidateSkip skip = pdft::CandidateSkip::kNone;
+    HRESULT hr = SkipOf(name, &skip);
+    if (SUCCEEDED(hr) && skip == pdft::CandidateSkip::kNone) hr = pdft::Canonicalize(name, &file);
+    if (SUCCEEDED(hr) && skip == pdft::CandidateSkip::kNone) hr = SkipOf(file, &skip);
+    if (FAILED(hr)) {
+      std::printf("cannot find %s: 0x%08lX\n", Utf8(name).c_str(), static_cast<unsigned long>(hr));
+      return false;
+    }
+    if (skip != pdft::CandidateSkip::kNone) {
+      std::printf("refused: %s is %s, and the refresh leaves such files alone\n",
+                  Utf8(name).c_str(), SkipText(skip));
+      return false;
+    }
+    files->push_back(std::move(file));
+  }
+  return true;
 }
 
 bool ReadText(const std::wstring& file, std::string* text) {
@@ -358,50 +482,10 @@ int RunInCache(const std::vector<std::wstring>& args) {
   }
   // Never extracts: the question only (refresh.h's probe, or without the ideal size only).
   const DWORD flags = plain ? static_cast<DWORD>(WTS_INCACHEONLY) : pdft::kRefreshProbeFlags;
-  std::vector<CacheRecord> records;
-  int result = 0;
-  for (const std::filesystem::path& file : files) {
-    const std::wstring folder = label ? *label : file.parent_path().filename().native();
-    const std::wstring key = folder + L"/" + file.filename().native();
-    const HRESULT selected = cache->Select(file);
-    if (FAILED(selected)) {
-      std::printf("ERROR        hr=0x%08lX (cannot open the file)  %s\n",
-                  static_cast<unsigned long>(selected), Utf8(key).c_str());
-      result = 1;
-    }
-    for (const UINT size : sizes) {
-      CacheRecord entry;
-      entry.label = folder;
-      entry.key = key;
-      entry.size = size;
-      pdft::CacheAnswer answer;
-      entry.hr = FAILED(selected) ? selected : cache->Get(size, flags, &answer);
-      entry.cacheFlags = answer.cacheFlags;
-      entry.id = answer.id;
-      if (answer.bitmap) {
-        entry.w = static_cast<int>(answer.dims.cx);
-        entry.h = static_cast<int>(answer.dims.cy);
-      }
-      entry.cached = entry.hr == S_OK && answer.bitmap && (answer.cacheFlags & WTS_CACHED);
-      if (SUCCEEDED(selected)) {
-        if (entry.cached) {
-          std::printf("CACHED %5u  %dx%d flags=0x%lX id=%s  %s\n", size, entry.w, entry.h,
-                      static_cast<unsigned long>(entry.cacheFlags), IdHex(entry.id).c_str(),
-                      Utf8(key).c_str());
-        } else if (answer.bitmap) {
-          std::printf("MISS   %5u  hr=0x%08lX flags=0x%lX, a bitmap %dx%d  %s\n", size,
-                      static_cast<unsigned long>(entry.hr),
-                      static_cast<unsigned long>(entry.cacheFlags), entry.w, entry.h,
-                      Utf8(key).c_str());
-        } else {
-          std::printf("MISS   %5u  hr=0x%08lX  %s\n", size, static_cast<unsigned long>(entry.hr),
-                      Utf8(key).c_str());
-        }
-      }
-      records.push_back(std::move(entry));
-    }
-    std::fflush(stdout);
-  }
+  bool failed = false;
+  const std::vector<CacheRecord> records =
+      AskCache(*cache, files, sizes, flags, label, true, &failed);
+  int result = failed ? 1 : 0;
   if (record && !pdft::test::WriteRecords(*record, records)) {
     std::printf("cannot write %s (a label or a name it cannot hold?)\n", Utf8(*record).c_str());
     result = 1;
@@ -456,18 +540,7 @@ bool ParseExtract(const std::wstring& text, pdft::RefreshFilesOptions* options) 
 }
 
 void PrintTimes(const char* what, std::vector<DWORD> times) {
-  if (times.empty()) {
-    std::printf("%s: none\n", what);
-    return;
-  }
-  std::sort(times.begin(), times.end());
-  ULONGLONG total = 0;
-  for (const DWORD ms : times) total += ms;
-  // The nearest rank: the smallest time at least 95 % of them do not exceed.
-  const size_t rank = (times.size() * 95 + 99) / 100;
-  std::printf("%s: %zu, min %lu ms, mean %.1f ms, p95 %lu ms, max %lu ms\n", what, times.size(),
-              times.front(), static_cast<double>(total) / static_cast<double>(times.size()),
-              times[rank - 1], times.back());
+  std::printf("%s: %s\n", what, TimesText(std::move(times)).c_str());
 }
 
 int RunRefresh(const std::vector<std::wstring>& args) {
@@ -621,14 +694,7 @@ int RunJudge(const std::vector<std::wstring>& args) {
   bool all = true;
   size_t refreshed = 0;  // folders that are not controls
   for (const pdft::test::FolderVerdict& v : verdicts) {
-    const char* word = !v.baselineValid ? "INVALID"
-                       : v.passA        ? (v.control ? "HELD" : "PASS")
-                                        : (v.control ? "CHANGED" : "FAIL");
-    std::printf(
-        "%-8s %s%s: %zu cached before (%zu not at %ld %%); after: %zu new, %zu old, %zu gone, "
-        "%zu neither; %zu created, %zu under a new ID\n",
-        word, Utf8(v.label).c_str(), v.control ? " (control)" : "", v.baseline, v.baselineNotOld,
-        zoomBefore, v.newAfter, v.oldAfter, v.missAfter, v.otherAfter, v.created, v.idChanged);
+    std::printf("%s\n", VerdictText(v, zoomBefore).c_str());
     all = all && v.passA;
     if (!v.control) ++refreshed;
   }
@@ -648,25 +714,7 @@ int RunJudge(const std::vector<std::wstring>& args) {
 
 // ---- cachefiles -------------------------------------------------------------------------------
 
-struct CacheFile {
-  ULONGLONG size = 0;
-  ULONGLONG written = 0;  // last write, as a FILETIME (UTC)
-};
-
-std::string TimeText(ULONGLONG written) {
-  FILETIME time = {static_cast<DWORD>(written), static_cast<DWORD>(written >> 32)};
-  SYSTEMTIME utc = {};
-  if (!FileTimeToSystemTime(&time, &utc)) return "?";
-  char text[40];
-  std::snprintf(text, sizeof(text), "%04u-%02u-%02u %02u:%02u:%02u.%03u UTC", utc.wYear, utc.wMonth,
-                utc.wDay, utc.wHour, utc.wMinute, utc.wSecond, utc.wMilliseconds);
-  return text;
-}
-
-// A --record file: a header, then "<name>\t<size>\t<last write>" (the cache files' names are
-// ASCII: IsThumbnailCacheFileName).
-constexpr std::string_view kCacheFilesHeader = "name\tsize\twritten";
-
+// A --record file (CacheFilesRecord) read back.
 bool ReadCacheFiles(const std::wstring& file, std::map<std::string, CacheFile>* files) {
   std::string text;
   if (!ReadText(file, &text)) return false;
@@ -722,28 +770,17 @@ int RunCacheFiles(const std::vector<std::wstring>& args) {
   pdft::ProcessContext context;
   if (const std::optional<int> refused = Refusal(&context)) return *refused;
 
-  std::vector<std::filesystem::path> paths;
-  const HRESULT hr = pdft::RealRebuildSystem().CacheFiles(&paths);
+  std::map<std::string, CacheFile> now;
+  std::map<std::string, DWORD> unreadable;
+  const HRESULT hr = ListCacheFiles(&now, &unreadable);
   if (FAILED(hr)) {
     std::printf("cannot list the thumbnail cache: 0x%08lX\n", static_cast<unsigned long>(hr));
     return 1;
   }
   if (hr == S_FALSE) std::printf("there is no thumbnail cache folder\n");
-  int result = 0;
-  std::map<std::string, CacheFile> now;
-  for (const std::filesystem::path& path : paths) {
-    const std::string name = Utf8(path.filename().native());
-    // Its attributes only: the file is never opened for its data, so whoever has it open is not
-    // disturbed.
-    WIN32_FILE_ATTRIBUTE_DATA data = {};
-    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) {
-      std::printf("%-28s unreadable (error %lu)\n", name.c_str(), GetLastError());
-      result = 1;
-      continue;
-    }
-    now[name] = {(static_cast<ULONGLONG>(data.nFileSizeHigh) << 32) | data.nFileSizeLow,
-                 (static_cast<ULONGLONG>(data.ftLastWriteTime.dwHighDateTime) << 32) |
-                     data.ftLastWriteTime.dwLowDateTime};
+  int result = unreadable.empty() ? 0 : 1;
+  for (const auto& [name, error] : unreadable) {
+    std::printf("%-28s unreadable (error %lu)\n", name.c_str(), error);
   }
   for (const auto& [name, file] : now) {
     std::printf("%-28s %12llu  %s\n", name.c_str(), file.size, TimeText(file.written).c_str());
@@ -771,12 +808,7 @@ int RunCacheFiles(const std::vector<std::wstring>& args) {
     }
   }
   if (record) {
-    std::string text(kCacheFilesHeader);
-    text += '\n';
-    for (const auto& [name, file] : now) {
-      text += name + "\t" + std::to_string(file.size) + "\t" + std::to_string(file.written) + "\n";
-    }
-    if (!WriteText(*record, text)) {
+    if (!WriteText(*record, CacheFilesRecord(now))) {
       std::printf("cannot write %s\n", Utf8(*record).c_str());
       result = 1;
     }
@@ -1045,7 +1077,7 @@ int RunOpenDialog(const std::vector<std::wstring>& args) {
 
 bool IsRefreshMode(const std::wstring& mode) {
   return mode == L"incache" || mode == L"refresh" || mode == L"judge" || mode == L"cachefiles" ||
-         mode == L"shellinfo" || mode == L"opendialog";
+         mode == L"shellinfo" || mode == L"opendialog" || mode == L"experiment";
 }
 
 int RunRefreshMode(int argc, wchar_t** argv) {
@@ -1075,6 +1107,8 @@ int RunRefreshMode(int argc, wchar_t** argv) {
     result = RunShellInfo(args);
   } else if (mode == L"opendialog") {
     result = RunOpenDialog(args);
+  } else if (mode == L"experiment") {
+    result = RunExperiment(args);
   }
   CoUninitialize();
   return result;
@@ -1092,7 +1126,9 @@ void PrintRefreshUsage() {
       "                  [--control <label>]...\n"
       "  thumbtest cachefiles [--record <tsv>] [--diff <tsv>]\n"
       "  thumbtest shellinfo [--windows] [--holders [--after-explorer-test]]\n"
-      "  thumbtest opendialog <folder>\n"
+      "  thumbtest opendialog <folder>\n");
+  PrintExperimentUsage();
+  std::printf(
       "The refresh modes use the signed-in user's own thumbnail cache and File Explorer (judge\n"
       "reads only its two files): synthetic PDFs only, from a normal prompt with no app package\n"
       "above it (a Command Prompt opened with Win+R); elsewhere they refuse (exit 8).\n"
