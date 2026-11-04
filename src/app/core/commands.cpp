@@ -27,6 +27,7 @@
 #include "paths.h"
 #include "project_config.h"
 #include "rebuild.h"
+#include "refresh.h"
 #include "registration.h"
 #include "registry_roots.h"
 #include "settings.h"
@@ -868,15 +869,13 @@ int RunZoomCommand(const CliArgs& args, const ProcessContext& context, Output& o
 
 // ---- --refresh ------------------------------------------------------------------------------
 
+// How often --refresh --folder prints where it is, at most.
+constexpr ULONGLONG kRefreshProgressEveryMs = 5000;
+
 // --refresh --full: the refusals first (PrecheckRebuild: they read the context, AutoRestartShell
 // and, where Windows does not restart File Explorer, whether this program could), then the
 // question, the operation lock and the rebuild (rebuild.h).
-int RunRefreshCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
-  if (!args.full) {
-    out.Error(
-        L"--refresh without --full is not available in this build yet; use --refresh --full.");
-    return Code(ExitCode::kFailed);
-  }
+int RunRefreshFullCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
   // From here Ctrl+C only asks to stop, so a start of File Explorer the check below tries is
   // always ended; it stops the command until the rebuild ends the first process or deletes the
   // first file.
@@ -964,6 +963,110 @@ int RunRefreshCommand(const CliArgs& args, const ProcessContext& context, Output
     for (const std::wstring& line : RebuildReport(result)) out.Line(line);
   }
   return Code(RebuildExitCode(result));
+}
+
+// --refresh --folder: the refusals first (ReadRefreshConditions), then each folder checked, the
+// operation lock, the refusals again, and the refresh of the PDF thumbnails in those folders
+// (refresh.h), with a progress line at most every kRefreshProgressEveryMs.
+int RunRefreshFoldersCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
+  // The exit code when the refresh may not start; std::nullopt when it may.
+  const auto refused = [&context, &out]() -> std::optional<int> {
+    RefreshConditions conditions;
+    if (const HRESULT hr = ReadRefreshConditions(context, RegistryRoots{},
+                                                 SystemAssociationQueries(), &conditions);
+        FAILED(hr)) {
+      out.Error(RefreshFailureText(hr));
+      return Code(ExitCode::kFailed);
+    }
+    const RefreshRefusal refusal = DecideRefreshRefusal(conditions);
+    if (refusal == RefreshRefusal::kNone) return std::nullopt;
+    const ExitCode code = RefreshRefusalExitCode(refusal);
+    Log(code == ExitCode::kOk ? LogLevel::kInfo : LogLevel::kWarning, L"refresh",
+        std::wstring(L"refresh refused=") + RefreshRefusalToken(refusal));
+    // Icons only is no failure: there is simply nothing to refresh.
+    if (code == ExitCode::kOk) {
+      out.Line(RefreshFolderRefusalMessage(refusal, context));
+    } else {
+      out.Error(RefreshFolderRefusalMessage(refusal, context));
+    }
+    return Code(code);
+  };
+  if (const std::optional<int> code = refused()) return *code;
+
+  PdfRefreshOptions options;
+  for (const std::wstring& text : args.folders) {
+    std::filesystem::path folder;
+    FolderProblem problem = FolderProblem::kNone;
+    const HRESULT hr = ValidateRefreshFolder(text, &folder, &problem);
+    // The path is the user's: it goes to the console, never to the log.
+    if (problem != FolderProblem::kNone) {
+      out.Error(FolderProblemText(text, problem));
+      return Code(ExitCode::kUsage);
+    }
+    if (FAILED(hr)) {
+      out.Error(RefreshFailureText(hr));
+      return Code(ExitCode::kFailed);
+    }
+    options.folders.push_back(std::move(folder));
+  }
+
+  std::optional<OperationLock> lock;
+  const HRESULT locked = OperationLock::Acquire(kCheckLockWaitMs, &lock);
+  if (locked == OperationLock::kBusy || locked == OperationLock::kTakenByLowerIntegrity) {
+    out.Error(kBusyMessage);
+    return Code(ExitCode::kBusy);
+  }
+  if (locked == kNamedObjectsRefusedHr) {
+    Log(LogLevel::kWarning, L"refresh",
+        L"refresh result=failed named-objects-refused hr=" + HResultText(kNamedObjectsRefusedHr));
+    out.Error(NamedObjectsRefusedMessage());
+    return Code(ExitCode::kFailed);
+  }
+  if (FAILED(locked)) {
+    out.Error(RefreshFailureText(locked));
+    return Code(ExitCode::kFailed);
+  }
+  if (lock->sessionOnly()) Log(LogLevel::kWarning, L"refresh", L"refresh lock=session-only");
+  if (lock->abandoned()) Log(LogLevel::kWarning, L"refresh", L"refresh lock=abandoned");
+  // Decided again under the lock: a command that held it meanwhile, an uninstall or
+  // --fix --take-back, may have changed the registration or the handler Windows uses for .pdf.
+  if (const std::optional<int> code = refused()) return *code;
+
+  // Ctrl+C asks the refresh to stop: the request under way finishes first.
+  std::stop_source stop;
+  wil::unique_event_nothrow done;
+  (void)done.create(wil::EventOptions::ManualReset);
+  ConsoleStop consoleStop(&stop, done.get());
+  std::optional<ULONGLONG> lastLine;
+  const auto progress = [&out, &lastLine](const RefreshProgress& p) {
+    const ULONGLONG now = GetTickCount64();
+    if (lastLine && now - *lastLine < kRefreshProgressEveryMs) return;
+    const std::wstring line = RefreshProgressText(p);
+    if (line.empty()) return;
+    out.Line(line);
+    lastLine = now;
+  };
+  RefreshCounts counts;
+  const HRESULT hr = RefreshPdfThumbnails(options, progress, stop.get_token(), &counts);
+  const ExitCode code = RefreshExitCode(hr, counts);
+  if (code == ExitCode::kFailed) {
+    out.Error(RefreshFailureText(hr));
+    return Code(code);
+  }
+  for (const std::wstring& line :
+       RefreshReport(hr, counts, options.limits.maxFiles, kPdfRefreshDefault)) {
+    out.Line(line);
+  }
+  return Code(code);
+}
+
+int RunRefreshCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
+  if (args.full) return RunRefreshFullCommand(args, context, out);
+  if (!args.folders.empty()) return RunRefreshFoldersCommand(args, context, out);
+  out.Error(
+      L"--refresh without --folder is not available in this build yet; use --refresh --folder "
+      L"<folder>, or --refresh --full.");
+  return Code(ExitCode::kFailed);
 }
 
 HRESULT CopyToClipboard(std::wstring_view text) noexcept {
@@ -1425,7 +1528,8 @@ std::wstring ZoomText(const ZoomDecision& decision) {
 std::wstring ZoomSavedText(int zoom) {
   return L"Zoom set to " + std::to_wstring(ClampZoom(zoom)) +
          L" %. Thumbnails made from now on use it. To redo the ones File Explorer already made, "
-         L"run --refresh --full (restarts File Explorer).";
+         L"run --refresh --full (restarts File Explorer), or --refresh --folder <folder> for the "
+         L"PDF thumbnails in one folder.";
 }
 
 bool UninstallNeedsYes(const CliArgs& args, bool canAskOnConsole) noexcept {
@@ -1440,6 +1544,11 @@ std::wstring RefreshFullRefusalMessage(RebuildRefusal refusal, const ProcessCont
                                        HRESULT detail) {
   if (refusal == RebuildRefusal::kVirtualized) return CannotRunHereMessage(context);
   return RebuildRefusalText(refusal, context, detail);
+}
+
+std::wstring RefreshFolderRefusalMessage(RefreshRefusal refusal, const ProcessContext& context) {
+  if (refusal == RefreshRefusal::kVirtualized) return CannotRunHereMessage(context);
+  return RefreshRefusalText(refusal, context);
 }
 
 bool ShouldStartSettingsWindow(DWORD consoleProcessCount, bool hasConsoleWindow) noexcept {

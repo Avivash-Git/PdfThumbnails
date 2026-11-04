@@ -31,6 +31,7 @@
 #include "medium_il.h"
 #include "project_config.h"
 #include "rebuild.h"
+#include "refresh.h"
 #include "snapshot.h"
 #include "strings.h"
 #include "system_probes.h"
@@ -674,6 +675,52 @@ TEST_P(Exes, RefreshFullIsRefusedElevated) {
   EXPECT_EQ(run.err.rfind(
                 WideToUtf8Lossy(RefreshFullRefusalMessage(RebuildRefusal::kElevated, context)), 0),
             0u)
+      << run.err;
+  EXPECT_EQ(run.out, "");
+}
+
+// The --folder a refusal test names: one that does not exist, in a folder of the test's own, so
+// even a command that went past its refusal would find nothing to refresh (exit 2).
+std::wstring MissingFolder(const test::TempDir& dir) { return dir.File(L"no-such-folder"); }
+
+// --refresh --folder writes (the thumbnail cache), so where the virtualization guard refuses
+// writing commands it stops there (exit 8) before it reads anything.
+TEST_P(Exes, RefreshFolderIsRefusedWhereWritesAreSwallowed) {
+  std::wstring ancestor;
+  if (const std::optional<std::string> why = WhyAWritingCommandMayNotRunHere(&ancestor)) {
+    GTEST_SKIP() << *why;
+  }
+  test::TempDir dir(L"refresh-folder");
+  ASSERT_TRUE(dir.ok());
+  test::CapturedRun run;
+  RUN_OR_SKIP(L"--refresh --folder \"" + MissingFolder(dir) + L"\"", run);
+  std::printf("%ls --refresh --folder -> exit %lu: %s", GetParam(), run.exitCode, run.err.c_str());
+  EXPECT_EQ(run.exitCode, 8u);
+  EXPECT_EQ(run.err.rfind("Cannot run here: ", 0), 0u) << run.err;
+  EXPECT_NE(run.err.find(WideToUtf8Lossy(ancestor)), std::string::npos) << run.err;
+  EXPECT_EQ(run.out, "");
+}
+
+// Elevated with the real registry on a runner GitHub hosts (CI), --refresh --folder stops at its
+// elevation refusal (exit 8) before it reads anything else or looks at the folder: the thumbnail
+// cache is the signed-in user's own.
+TEST_P(Exes, RefreshFolderIsRefusedElevated) {
+  ProcessContext context;
+  ASSERT_HRESULT_SUCCEEDED(GetProcessContext(ContextProbe::kWrite, &context));
+  if (const std::optional<std::string> why = WhyAnElevatedRefreshMayNotRunHere(context)) {
+    GTEST_SKIP() << *why;
+  }
+  test::TempDir dir(L"refresh-folder");
+  ASSERT_TRUE(dir.ok());
+  test::CapturedRun run;
+  RUN_OR_SKIP(L"--refresh --folder \"" + MissingFolder(dir) + L"\"", run);
+  std::printf("%ls --refresh --folder (elevated) -> exit %lu: %s", GetParam(), run.exitCode,
+              run.err.c_str());
+  EXPECT_EQ(run.exitCode, 8u);
+  EXPECT_EQ(
+      run.err.rfind(
+          WideToUtf8Lossy(RefreshFolderRefusalMessage(RefreshRefusal::kElevated, context)), 0),
+      0u)
       << run.err;
   EXPECT_EQ(run.out, "");
 }

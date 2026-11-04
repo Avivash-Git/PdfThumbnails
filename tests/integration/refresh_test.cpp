@@ -3,8 +3,10 @@
 // folder on the way became a junction, the long names only, offline files skipped and offline
 // folders not entered, the limits by count, time and depth, the stop), checking a
 // --folder, and the whole refresh of a temp folder against a fake thumbnail cache and a fake File
-// Explorer (the log keeps counts, not names). Nothing here asks the real thumbnail cache or tells
-// the real File Explorer anything; the files are never opened.
+// Explorer (the log keeps counts, not names). Also the conditions a refresh reads before it
+// starts, from a private registry key (ScopedRegistrySandbox) and a fake for what Windows resolves
+// for .pdf. Nothing here asks the real thumbnail cache or tells the real File Explorer anything;
+// the files are never opened.
 
 #include <windows.h>
 
@@ -21,8 +23,12 @@
 #include <string>
 #include <vector>
 
+#include "explorer_settings.h"
+#include "fake_probes.h"
 #include "log.h"
 #include "paths.h"
+#include "registration.h"
+#include "registry_sandbox.h"
 #include "strings.h"
 #include "temp_dir.h"
 
@@ -432,6 +438,7 @@ TEST(RefreshFake, RefreshesAFolderAndLogsCountsNotNames) {
   EXPECT_EQ(counts.files, 3u);
   EXPECT_EQ(counts.entriesCached, 3u);
   EXPECT_EQ(counts.refreshed, 3u);
+  EXPECT_EQ(counts.filesRefreshed, 3u);
   EXPECT_EQ(counts.notCached, 0u);
   // The files of one folder together, that folder's files before its subfolder's.
   ASSERT_EQ(cache.selected.size(), 3u);
@@ -450,6 +457,11 @@ TEST(RefreshFake, RefreshesAFolderAndLogsCountsNotNames) {
   EXPECT_EQ(lines.find("very-private-folder"), std::string::npos) << lines;
   EXPECT_EQ(lines.find("secret"), std::string::npos) << lines;
   EXPECT_EQ(lines.find("pdft-tests"), std::string::npos) << lines;
+
+  // What --refresh --folder then says names no file either.
+  EXPECT_EQ(RefreshReport(hr, counts, options.limits.maxFiles, true),
+            std::vector<std::wstring>{L"Refreshed 3 PDF thumbnails in 3 files (3 files checked)."});
+  EXPECT_EQ(RefreshExitCode(hr, counts), ExitCode::kOk);
 }
 
 TEST(RefreshFake, AStopWhileFindingRefreshesNothing) {
@@ -492,6 +504,108 @@ TEST(RefreshFake, BadOptionsMakeNoCall) {
   EXPECT_EQ(RefreshPdfThumbnails(noStore, cache, notifier, {}, {}, &counts), E_INVALIDARG);
   EXPECT_TRUE(cache.selected.empty());
   EXPECT_EQ(cache.gets, 0u);
+}
+
+// ---- ReadRefreshConditions ----
+
+void SetDword(HKEY root, const wchar_t* key, const wchar_t* name, DWORD value) {
+  ASSERT_EQ(RegSetKeyValueW(root, key, name, REG_DWORD, &value, sizeof(value)), ERROR_SUCCESS);
+}
+
+void SetClassDll(HKEY root, const std::wstring& dll) {
+  ASSERT_EQ(RegSetKeyValueW(root, (ClassKeyPath() + L"\\InprocServer32").c_str(), nullptr, REG_SZ,
+                            dll.c_str(), static_cast<DWORD>((dll.size() + 1) * sizeof(wchar_t))),
+            ERROR_SUCCESS);
+}
+
+// A process that ran the canary and found real writes, as --refresh runs.
+ProcessContext WritesChecked() {
+  ProcessContext context;
+  context.probe = ContextProbe::kWrite;
+  context.virtualization = Virtualization::kNo;
+  return context;
+}
+
+TEST(RefreshConditionsRead, TheRegistrationAndFileExplorersSettings) {
+  test::ScopedRegistrySandbox sandbox;
+  ASSERT_TRUE(sandbox.ok()) << HResultText(sandbox.error());
+  const RegistryRoots roots{sandbox.user(), sandbox.machine()};
+  test::FakeQueries queries;  // Windows resolves our handler
+  const ProcessContext context = WritesChecked();
+  const auto decide = [&]() {
+    RefreshConditions c;
+    EXPECT_HRESULT_SUCCEEDED(ReadRefreshConditions(context, roots, queries, &c));
+    EXPECT_TRUE(c.writesChecked);
+    return DecideRefreshRefusal(c);
+  };
+
+  // No class of ours, per user or for all users.
+  EXPECT_EQ(decide(), RefreshRefusal::kNotInstalled);
+  // A class for all users is enough; so is one per user. The DLL need not be there.
+  SetClassDll(sandbox.machine(), L"C:\\pdft-no-such-folder\\PdfThumbnails.dll");
+  EXPECT_EQ(decide(), RefreshRefusal::kNone);
+  ASSERT_HRESULT_SUCCEEDED(DeleteMachineClass(roots));
+  EXPECT_EQ(decide(), RefreshRefusal::kNotInstalled);
+  SetClassDll(sandbox.user(), L"C:\\pdft-no-such-folder\\PdfThumbnails.dll");
+  EXPECT_EQ(decide(), RefreshRefusal::kNone);
+
+  // Windows resolves another handler for .pdf, or none.
+  queries.handler = L"{9C60DE1E-E5FC-40F4-A487-460851A8D915}";
+  EXPECT_EQ(decide(), RefreshRefusal::kNotOurHandler);
+  queries.handler.reset();
+  EXPECT_EQ(decide(), RefreshRefusal::kNotOurHandler);
+  queries.handler = std::wstring(kHandlerClsidString);
+
+  // Icons only, the user's policy and the policy for all users.
+  SetDword(sandbox.user(), kExplorerAdvancedKey, kIconsOnlyValue, 1);
+  EXPECT_EQ(decide(), RefreshRefusal::kThumbnailsOff);
+  SetDword(sandbox.user(), kExplorerAdvancedKey, kIconsOnlyValue, 0);
+  EXPECT_EQ(decide(), RefreshRefusal::kNone);
+  SetDword(sandbox.user(), kExplorerPoliciesKey, kDisableThumbnailsValue, 1);
+  EXPECT_EQ(decide(), RefreshRefusal::kThumbnailsOff);
+  SetDword(sandbox.user(), kExplorerPoliciesKey, kDisableThumbnailsValue, 0);
+  SetDword(sandbox.machine(), kExplorerPoliciesKey, kDisableThumbnailsValue, 1);
+  EXPECT_EQ(decide(), RefreshRefusal::kThumbnailsOff);
+}
+
+// What the context refuses needs nothing else: Windows is not even asked.
+TEST(RefreshConditionsRead, AContextRefusalReadsNothingMore) {
+  test::ScopedRegistrySandbox sandbox;
+  ASSERT_TRUE(sandbox.ok()) << HResultText(sandbox.error());
+  const RegistryRoots roots{sandbox.user(), sandbox.machine()};
+  SetClassDll(sandbox.user(), L"C:\\pdft-no-such-folder\\PdfThumbnails.dll");
+  test::FakeQueries queries;
+
+  ProcessContext elevated = WritesChecked();
+  elevated.elevated = true;
+  ProcessContext readOnly = WritesChecked();
+  readOnly.probe = ContextProbe::kReadOnly;
+  ProcessContext virtualized = WritesChecked();
+  virtualized.virtualization = Virtualization::kUnknown;
+  ProcessContext otherUser = WritesChecked();
+  otherUser.differentFromShellUser = true;
+  struct Case {
+    const ProcessContext* context;
+    RefreshRefusal refusal;
+  };
+  for (const Case& c :
+       {Case{&elevated, RefreshRefusal::kElevated}, Case{&readOnly, RefreshRefusal::kVirtualized},
+        Case{&virtualized, RefreshRefusal::kVirtualized},
+        Case{&otherUser, RefreshRefusal::kOtherShellUser}}) {
+    RefreshConditions conditions;
+    conditions.classRegistered = true;  // filled afresh
+    ASSERT_HRESULT_SUCCEEDED(ReadRefreshConditions(*c.context, roots, queries, &conditions));
+    EXPECT_EQ(DecideRefreshRefusal(conditions), c.refusal);
+    EXPECT_FALSE(conditions.classRegistered);
+    EXPECT_FALSE(conditions.effectiveIsOurs);
+  }
+  EXPECT_EQ(queries.calls, 0);
+
+  RefreshConditions conditions;
+  ASSERT_HRESULT_SUCCEEDED(ReadRefreshConditions(WritesChecked(), roots, queries, &conditions));
+  EXPECT_TRUE(conditions.classRegistered);
+  EXPECT_TRUE(conditions.effectiveIsOurs);
+  EXPECT_EQ(queries.calls, 1);
 }
 
 }  // namespace

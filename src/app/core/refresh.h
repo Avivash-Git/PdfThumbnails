@@ -24,8 +24,14 @@
 #include <optional>
 #include <span>
 #include <stop_token>
+#include <string>
 #include <string_view>
 #include <vector>
+
+#include "context.h"
+#include "exit_code.h"
+#include "registration.h"
+#include "registry_roots.h"
 
 namespace pdft {
 
@@ -63,7 +69,7 @@ enum class RefreshRefusal {
   kVirtualized,     // 8: or the registry check did not run
   kOtherShellUser,  // 8: File Explorer on this desktop is another account's
   kNotInstalled,    // 6: no class of ours is registered
-  kNotOurHandler,   // 1: Windows uses another handler for .pdf thumbnails
+  kNotOurHandler,   // 1: Windows uses another handler for .pdf thumbnails, or none
   kThumbnailsOff,   // 0: File Explorer shows icons only: nothing to refresh
 };
 
@@ -80,6 +86,26 @@ struct RefreshConditions {
 
 // The first refusal in the order of RefreshRefusal (pure).
 RefreshRefusal DecideRefreshRefusal(const RefreshConditions& c) noexcept;
+
+// The conditions of a refresh started in |context|: the context's own first; past a refusal they
+// decide nothing more is read. Then whether a class of ours is registered (per user or for all
+// users) and File Explorer's settings, through |roots|, and the handler Windows resolves for .pdf
+// (|queries|). Read-only.
+[[nodiscard]] HRESULT ReadRefreshConditions(const ProcessContext& context,
+                                            const RegistryRoots& roots,
+                                            const AssociationQueries& queries,
+                                            RefreshConditions* conditions) noexcept;
+
+// The log's word for |refusal| (pure): "elevated", "not-installed" and so on; "none" for kNone.
+const wchar_t* RefreshRefusalToken(RefreshRefusal refusal) noexcept;
+
+// The exit code of |refusal| (pure), as RefreshRefusal lists them; kOk for kNone.
+ExitCode RefreshRefusalExitCode(RefreshRefusal refusal) noexcept;
+
+// Why the refresh does not start (pure), for standard error, except kThumbnailsOff, which fails
+// nothing (standard output). |context| names the account. Empty for kNone and kVirtualized (the
+// caller's CannotRunHereMessage). May throw std::bad_alloc.
+std::wstring RefreshRefusalText(RefreshRefusal refusal, const ProcessContext& context);
 
 // Why a file is not refreshed.
 enum class CandidateSkip {
@@ -178,6 +204,7 @@ struct RefreshCounts {
   // ... that could not be made again; also each file the shell could not open (other than gone)
   size_t failed = 0;
   HRESULT firstFailure = S_OK;     // the first of those failures
+  size_t filesRefreshed = 0;       // files with a thumbnail made again
   std::vector<UINT> sizesDropped;  // sizes the cache refused (E_INVALIDARG): not asked again
   bool stopped = false;
 
@@ -276,5 +303,30 @@ enum class FolderProblem {
 // *problem says what is wrong.
 [[nodiscard]] HRESULT ValidateRefreshFolder(std::wstring_view text, std::filesystem::path* folder,
                                             FolderProblem* problem) noexcept;
+
+// What is wrong with --folder |text| (pure), for standard error: |text| is the user's own, for the
+// console only. Empty for kNone. May throw std::bad_alloc.
+std::wstring FolderProblemText(std::wstring_view text, FolderProblem problem);
+
+// What a refresh that ran says, line by line (pure), from RefreshPdfThumbnails' answer |hr| (S_OK,
+// stopped, or every size refused; a failure to start has RefreshFailureText) and |counts|: what
+// was refreshed, or that there was nothing to; the files skipped; the thumbnails that could not be
+// made again; a cache that refused every size; a walk that stopped at |maxFiles|. Unless
+// |refreshDefault| (kPdfRefreshDefault: the refresh experiment showed that open folder windows
+// show the new thumbnails), it adds that they may not. May throw std::bad_alloc.
+std::vector<std::wstring> RefreshReport(HRESULT hr, const RefreshCounts& counts, size_t maxFiles,
+                                        bool refreshDefault);
+
+// The exit code of a refresh that ran (pure): 3 when stopped; 1 when the cache refused every
+// size, a thumbnail could not be made again or a limit stopped the walk; 5 for a failure to
+// start; 0 otherwise, nothing to refresh included.
+ExitCode RefreshExitCode(HRESULT hr, const RefreshCounts& counts) noexcept;
+
+// Why the refresh could not start (pure). May throw std::bad_alloc.
+std::wstring RefreshFailureText(HRESULT failure);
+
+// The progress line for |progress| (pure); empty where there is nothing to say. May throw
+// std::bad_alloc.
+std::wstring RefreshProgressText(const RefreshProgress& progress);
 
 }  // namespace pdft

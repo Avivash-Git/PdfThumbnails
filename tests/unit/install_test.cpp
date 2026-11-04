@@ -3,7 +3,7 @@
 // code (a step without administrator rights, or refused below an app package, included), the class
 // path the elevated side may write for all users, the user hives it cleans, the per-user files the
 // uninstall removes, the trash folders the status reports, and the texts of --install, --uninstall,
-// --uninstall-cleanup, --zoom and --refresh --full.
+// --uninstall-cleanup, --zoom and --refresh.
 
 #include <windows.h>
 
@@ -21,6 +21,7 @@
 #include "file_ops.h"
 #include "project_config.h"
 #include "rebuild.h"
+#include "refresh.h"
 #include "registration.h"
 #include "snapshot_fixtures.h"
 #include "strings.h"
@@ -582,10 +583,11 @@ TEST(ZoomTexts, OriginAndSaved) {
   EXPECT_EQ(ZoomText(decision), L"Zoom: 100 % (default)");
   const std::wstring saved = ZoomSavedText(150);
   EXPECT_EQ(saved.rfind(L"Zoom set to 150 %.", 0), 0u) << saved;
-  // The only refresh this build has is the full rebuild, and the text says what it costs.
-  EXPECT_NE(saved.find(L"run --refresh --full (restarts File Explorer)."), std::wstring::npos)
-      << saved;
-  EXPECT_EQ(saved.find(L"--folder"), std::wstring::npos) << saved;
+  // The full rebuild, with what it costs, and the refresh of one folder's PDF thumbnails.
+  EXPECT_NE(saved.find(L"run --refresh --full (restarts File Explorer), or --refresh --folder "
+                       L"<folder> for the PDF thumbnails in one folder."),
+            std::wstring::npos)
+      << WideToUtf8Lossy(saved);
 }
 
 TEST(UninstallTexts, NeedsYesWithoutAConsole) {
@@ -657,6 +659,30 @@ TEST(RefreshTexts, Refusals) {
             std::wstring::npos);
   EXPECT_TRUE(RefreshFullRefusalMessage(RebuildRefusal::kCancelled, context).empty());
   EXPECT_TRUE(RefreshFullRefusalMessage(RebuildRefusal::kNone, context).empty());
+}
+
+// --refresh --folder: the same line where the registry may be virtualized, its own texts for the
+// rest.
+TEST(RefreshTexts, FolderRefusals) {
+  ProcessContext context;
+  context.userAccount = L"PC\\tester";
+  context.packagedAncestor = L"Example_1.0.0.0_x64__abcdefghijklm";
+  context.virtualization = Virtualization::kYes;
+  EXPECT_EQ(RefreshFolderRefusalMessage(RefreshRefusal::kVirtualized, context),
+            CannotRunHereMessage(context));
+  for (const RefreshRefusal refusal :
+       {RefreshRefusal::kElevated, RefreshRefusal::kOtherShellUser, RefreshRefusal::kNotInstalled,
+        RefreshRefusal::kNotOurHandler, RefreshRefusal::kThumbnailsOff}) {
+    const std::wstring message = RefreshFolderRefusalMessage(refusal, context);
+    EXPECT_FALSE(message.empty()) << static_cast<int>(refusal);
+    EXPECT_EQ(message, RefreshRefusalText(refusal, context));
+  }
+  EXPECT_EQ(RefreshFolderRefusalMessage(RefreshRefusal::kElevated, context)
+                .rfind(L"Cannot run here: running as administrator.", 0),
+            0u);
+  EXPECT_NE(RefreshFolderRefusalMessage(RefreshRefusal::kOtherShellUser, context).find(L"PC\\tester"),
+            std::wstring::npos);
+  EXPECT_TRUE(RefreshFolderRefusalMessage(RefreshRefusal::kNone, context).empty());
 }
 
 }  // namespace

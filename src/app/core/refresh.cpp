@@ -16,10 +16,12 @@
 #include <tuple>
 #include <utility>
 
+#include "explorer_settings.h"
 #include "live_test.h"
 #include "log.h"
 #include "paths.h"
 #include "processes.h"
+#include "project_config.h"
 #include "registration.h"
 #include "registry_roots.h"
 #include "settings.h"
@@ -153,6 +155,7 @@ void ResetRefreshing(RefreshCounts* counts) noexcept {
   counts->refreshed = 0;
   counts->failed = 0;
   counts->firstFailure = S_OK;
+  counts->filesRefreshed = 0;
   counts->sizesDropped.clear();
   counts->stopped = false;
   counts->probeMs = 0;
@@ -168,6 +171,11 @@ bool AreUsableOptions(const PdfRefreshOptions& options) noexcept {
 }
 
 std::wstring Count(ULONGLONG n) { return std::to_wstring(n); }
+
+// "<n> <one>" or "<n> <many>".
+std::wstring Counted(ULONGLONG n, const wchar_t* one, const wchar_t* many) {
+  return Count(n) + L" " + (n == 1 ? one : many);
+}
 
 const wchar_t* YesNo(bool value) noexcept { return value ? L"yes" : L"no"; }
 
@@ -442,6 +450,98 @@ RefreshRefusal DecideRefreshRefusal(const RefreshConditions& c) noexcept {
   return RefreshRefusal::kNone;
 }
 
+HRESULT ReadRefreshConditions(const ProcessContext& context, const RegistryRoots& roots,
+                              const AssociationQueries& queries,
+                              RefreshConditions* conditions) noexcept try {
+  *conditions = {};
+  RefreshConditions& c = *conditions;
+  c.elevated = context.elevated;
+  c.writesChecked = context.probe == ContextProbe::kWrite;
+  c.virtualized = RefusesWrites(context.virtualization);
+  c.otherShellUser = context.differentFromShellUser;
+  if (c.elevated || !c.writesChecked || c.virtualized || c.otherShellUser) return S_OK;
+
+  std::optional<ClassReg> userClass;
+  std::optional<ClassReg> machineClass;
+  RETURN_IF_FAILED(ReadClass(roots, Scope::kUser, &userClass));
+  RETURN_IF_FAILED(ReadClass(roots, Scope::kMachine, &machineClass));
+  c.classRegistered = userClass.has_value() || machineClass.has_value();
+  std::optional<std::wstring> effective;
+  RETURN_IF_FAILED(QueryEffectiveHandler(queries, &effective));
+  c.effectiveIsOurs = effective.has_value() && IsOurClsid(*effective);
+  ExplorerSettings explorer;
+  RETURN_IF_FAILED(ReadExplorerSettings(roots, &explorer));
+  c.iconsOnly = explorer.iconsOnly;
+  c.thumbnailsOffByPolicy =
+      explorer.thumbnailsOffByUserPolicy || explorer.thumbnailsOffByMachinePolicy;
+  return S_OK;
+}
+CATCH_RETURN();
+
+const wchar_t* RefreshRefusalToken(RefreshRefusal refusal) noexcept {
+  switch (refusal) {
+    case RefreshRefusal::kElevated:
+      return L"elevated";
+    case RefreshRefusal::kVirtualized:
+      return L"virtualized";
+    case RefreshRefusal::kOtherShellUser:
+      return L"other-shell-user";
+    case RefreshRefusal::kNotInstalled:
+      return L"not-installed";
+    case RefreshRefusal::kNotOurHandler:
+      return L"not-our-handler";
+    case RefreshRefusal::kThumbnailsOff:
+      return L"thumbnails-off";
+    case RefreshRefusal::kNone:
+      return L"none";
+  }
+  return L"none";
+}
+
+ExitCode RefreshRefusalExitCode(RefreshRefusal refusal) noexcept {
+  switch (refusal) {
+    case RefreshRefusal::kElevated:
+    case RefreshRefusal::kVirtualized:
+    case RefreshRefusal::kOtherShellUser:
+      return ExitCode::kWrongContext;
+    case RefreshRefusal::kNotInstalled:
+      return ExitCode::kNotInstalled;
+    case RefreshRefusal::kNotOurHandler:
+      return ExitCode::kProblems;
+    case RefreshRefusal::kThumbnailsOff:
+    case RefreshRefusal::kNone:
+      return ExitCode::kOk;
+  }
+  return ExitCode::kOk;
+}
+
+std::wstring RefreshRefusalText(RefreshRefusal refusal, const ProcessContext& context) {
+  switch (refusal) {
+    case RefreshRefusal::kElevated:
+      return L"Cannot run here: running as administrator. The thumbnail cache is the signed-in "
+             L"user's own, and this program does not make thumbnails as administrator; run "
+             L"--refresh from a normal (not administrator) prompt.";
+    case RefreshRefusal::kOtherShellUser:
+      return L"Cannot run here: this program runs as " + context.userAccount +
+             L", but File Explorer on this desktop belongs to another account, and the thumbnail "
+             L"cache is each account's own. Run it as the signed-in user.";
+    case RefreshRefusal::kNotInstalled:
+      return std::wstring(kProductName) + L" is not installed here; there is nothing to refresh.";
+    case RefreshRefusal::kNotOurHandler:
+      return L"Windows uses another program's handler for .pdf thumbnails, or none, so a refresh "
+             L"would not make them with " +
+             std::wstring(kProductName) + L". Run --fix --take-back to use " +
+             std::wstring(kProductName) + L" again.";
+    case RefreshRefusal::kThumbnailsOff:
+      return L"File Explorer shows icons only, so there are no thumbnails to refresh.";
+    case RefreshRefusal::kVirtualized:
+    case RefreshRefusal::kNone:
+      // kVirtualized uses the caller's CannotRunHereMessage(context); kNone is no refusal.
+      return {};
+  }
+  return {};
+}
+
 CandidateSkip ClassifyCandidate(std::wstring_view path, DWORD attributes, ULONGLONG size,
                                 UINT driveType) noexcept {
   if (attributes & (FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_RECALL_ON_OPEN)) {
@@ -596,6 +696,7 @@ HRESULT RefreshFiles(std::span<const std::filesystem::path> files,
 
     const ULONGLONG notifyStart = now();
     if (fileRefreshed > 0) {
+      ++counts->filesRefreshed;
       folderRefreshed = true;
       if (options.notify & kNotifyItems) notifier.ItemUpdated(file);
     }
@@ -812,5 +913,105 @@ HRESULT ValidateRefreshFolder(std::wstring_view text, std::filesystem::path* fol
   return S_OK;
 }
 CATCH_RETURN();
+
+std::wstring FolderProblemText(std::wstring_view text, FolderProblem problem) {
+  const std::wstring folder = L"--folder " + std::wstring(text) + L": ";
+  switch (problem) {
+    case FolderProblem::kBadName:
+    case FolderProblem::kDevicePath:
+      return folder + L"not a usable path.";
+    case FolderProblem::kNotFound:
+      return folder + L"no such folder.";
+    case FolderProblem::kNotAFolder:
+      return folder + L"not a folder.";
+    case FolderProblem::kNetwork:
+      return folder + L"network folders are not refreshed.";
+    case FolderProblem::kNone:
+      return {};
+  }
+  return {};
+}
+
+std::vector<std::wstring> RefreshReport(HRESULT hr, const RefreshCounts& c, size_t maxFiles,
+                                        bool refreshDefault) {
+  std::vector<std::wstring> lines;
+  // Every reason to skip a PDF file (kNotPdf is for files that are none).
+  size_t skipped = 0;
+  for (size_t i = 0; i < static_cast<size_t>(CandidateSkip::kLongPath); ++i) {
+    skipped += c.skipped[i];
+  }
+  if (hr == kCancelled) {
+    lines.push_back(L"Stopped: " + Counted(c.refreshed, L"thumbnail", L"thumbnails") +
+                    L" refreshed; the rest keep the old zoom. Run --refresh --folder again to "
+                    L"finish.");
+  } else if (c.files == 0) {
+    // Files that were all skipped have their own line.
+    if (skipped == 0) lines.push_back(L"No PDF files were found; there is nothing to refresh.");
+  } else if (hr == S_OK && c.refreshed == 0 && c.failed == 0 && !c.capped) {
+    // Not when a limit left files unchecked: those may have thumbnails to refresh.
+    lines.push_back(
+        L"None of these PDF files has a thumbnail File Explorer made; there is nothing to "
+        L"refresh.");
+  } else {
+    lines.push_back(L"Refreshed " + Counted(c.refreshed, L"PDF thumbnail", L"PDF thumbnails") +
+                    L" in " + Counted(c.filesRefreshed, L"file", L"files") + L" (" +
+                    Counted(c.files, L"file checked", L"files checked") + L").");
+  }
+  if (skipped > 0) {
+    lines.push_back(Counted(skipped, L"file was", L"files were") +
+                    L" skipped: online-only or offline files, network files, files in the "
+                    L"recycle bin, files over 256 MB and files at paths too long for File "
+                    L"Explorer keep their thumbnails.");
+  }
+  if (c.failed > 0) {
+    lines.push_back(Counted(c.failed, L"thumbnail", L"thumbnails") + L" could not be made again (" +
+                    HResultText(c.firstFailure) + L"); File Explorer keeps the old " +
+                    (c.failed == 1 ? L"one." : L"ones."));
+  }
+  if (hr == kNoSizeLeft) {
+    lines.push_back(
+        L"The thumbnail cache refused every thumbnail size, so the PDF files after these were "
+        L"not checked; they keep their thumbnails.");
+  }
+  // A walk that stopped at its limit, when every file it found was then checked (a stop and a
+  // cache that refused every size have lines of their own).
+  if (c.capped && hr == S_OK) {
+    lines.push_back(L"Only the first " + Count(maxFiles) +
+                    L" PDF files found were checked; run --refresh --folder on smaller folders "
+                    L"for the rest.");
+  }
+  if (c.refreshed > 0 && !refreshDefault) {
+    lines.push_back(
+        L"Folder windows that are open now may show the old thumbnails until you open the folder "
+        L"again.");
+  }
+  return lines;
+}
+
+ExitCode RefreshExitCode(HRESULT hr, const RefreshCounts& c) noexcept {
+  if (hr == kCancelled) return ExitCode::kCancelled;
+  if (hr == kNoSizeLeft) return ExitCode::kProblems;
+  if (FAILED(hr)) return ExitCode::kFailed;
+  if (c.failed > 0 || c.capped) return ExitCode::kProblems;
+  return ExitCode::kOk;
+}
+
+std::wstring RefreshFailureText(HRESULT failure) {
+  return L"Cannot refresh the PDF thumbnails: " + HResultText(failure) + L". Nothing changed.";
+}
+
+std::wstring RefreshProgressText(const RefreshProgress& p) {
+  switch (p.phase) {
+    case RefreshPhase::kFinding:
+      return L"Looking for PDF files...";
+    case RefreshPhase::kRefreshing:
+      if (p.files == 0) return {};
+      return L"Checked " + Count(p.done) + L" of " + Counted(p.files, L"PDF file", L"PDF files") +
+             L"; " + Counted(p.refreshed, L"thumbnail", L"thumbnails") + L" refreshed so far...";
+    case RefreshPhase::kNotifying:
+      return L"Telling File Explorer...";
+  }
+  return {};
+}
 
 }  // namespace pdft

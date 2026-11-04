@@ -1,7 +1,8 @@
 // The PDF thumbnail refresh's pure parts and its engine (refresh.h): which flags are safe, the
-// refusal order, which files are skipped, grouping by folder, and RefreshFiles against a fake
-// thumbnail cache and a fake File Explorer on a fake clock. Nothing here asks the real thumbnail
-// cache or tells the real File Explorer anything.
+// refusal order, which files are skipped, grouping by folder, RefreshFiles against a fake
+// thumbnail cache and a fake File Explorer on a fake clock, and what --refresh --folder says: its
+// refusals, the folder problems, the report, the exit codes and the progress lines. Nothing here
+// asks the real thumbnail cache or tells the real File Explorer anything.
 
 #include <windows.h>
 
@@ -18,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "project_config.h"
 #include "strings.h"
 
 namespace pdft {
@@ -298,6 +300,7 @@ TEST(RefreshFiles, OnlyCachedSizesAreMadeAgain) {
   EXPECT_EQ(counts.notCached, 1u);
   EXPECT_EQ(counts.entriesCached, 3u);
   EXPECT_EQ(counts.refreshed, 3u);
+  EXPECT_EQ(counts.filesRefreshed, 2u);
   EXPECT_EQ(counts.failed, 0u);
   EXPECT_EQ(counts.gone, 0u);
   EXPECT_FALSE(counts.stopped);
@@ -442,6 +445,7 @@ TEST(RefreshFiles, FailuresAreCountedWithTheFirstHresult) {
   EXPECT_EQ(counts.failed, 2u);
   EXPECT_EQ(counts.firstFailure, E_ACCESSDENIED);
   EXPECT_EQ(counts.refreshed, 1u);
+  EXPECT_EQ(counts.filesRefreshed, 1u);
   EXPECT_EQ(counts.entriesCached, 2u);
   EXPECT_TRUE(counts.sizesDropped.empty());  // only E_INVALIDARG drops a size
 }
@@ -672,15 +676,250 @@ TEST(RefreshFiles, TimesAndTheFindingCounts) {
   counts.skipped[0] = 2;
   counts.findMs = 40;
   counts.refreshed = 99;  // RefreshFiles starts its own counts afresh
+  counts.filesRefreshed = 99;
   ASSERT_EQ(RunRefresh(files, options, &cache, &notifier, &counts), S_OK);
   EXPECT_EQ(extractions, (std::vector<DWORD>{7, 7}));
   EXPECT_EQ(counts.extractMs, 14u);
   EXPECT_EQ(counts.probeMs, 21u);  // three sizes asked about
   EXPECT_EQ(counts.refreshed, 2u);
+  EXPECT_EQ(counts.filesRefreshed, 1u);
   EXPECT_EQ(counts.fromWalk, 5u);
   EXPECT_TRUE(counts.capped);
   EXPECT_EQ(counts.skipped[0], 2u);
   EXPECT_EQ(counts.findMs, 40u);
+}
+
+// ---- What --refresh --folder says ----
+
+using Lines = std::vector<std::wstring>;
+
+constexpr wchar_t kOpenWindowsCaveat[] =
+    L"Folder windows that are open now may show the old thumbnails until you open the folder "
+    L"again.";
+
+TEST(RefreshFolderTexts, RefusalExitCodesAndLogWords) {
+  EXPECT_EQ(RefreshRefusalExitCode(RefreshRefusal::kNone), ExitCode::kOk);
+  EXPECT_EQ(RefreshRefusalExitCode(RefreshRefusal::kElevated), ExitCode::kWrongContext);
+  EXPECT_EQ(RefreshRefusalExitCode(RefreshRefusal::kVirtualized), ExitCode::kWrongContext);
+  EXPECT_EQ(RefreshRefusalExitCode(RefreshRefusal::kOtherShellUser), ExitCode::kWrongContext);
+  EXPECT_EQ(RefreshRefusalExitCode(RefreshRefusal::kNotInstalled), ExitCode::kNotInstalled);
+  EXPECT_EQ(RefreshRefusalExitCode(RefreshRefusal::kNotOurHandler), ExitCode::kProblems);
+  // Icons only: there is nothing to refresh, which fails nothing.
+  EXPECT_EQ(RefreshRefusalExitCode(RefreshRefusal::kThumbnailsOff), ExitCode::kOk);
+
+  std::set<std::wstring> words;
+  for (const RefreshRefusal refusal :
+       {RefreshRefusal::kNone, RefreshRefusal::kElevated, RefreshRefusal::kVirtualized,
+        RefreshRefusal::kOtherShellUser, RefreshRefusal::kNotInstalled,
+        RefreshRefusal::kNotOurHandler, RefreshRefusal::kThumbnailsOff}) {
+    words.insert(RefreshRefusalToken(refusal));
+  }
+  EXPECT_EQ(words.size(), 7u);
+  EXPECT_STREQ(RefreshRefusalToken(RefreshRefusal::kNone), L"none");
+  EXPECT_STREQ(RefreshRefusalToken(RefreshRefusal::kNotInstalled), L"not-installed");
+  EXPECT_STREQ(RefreshRefusalToken(RefreshRefusal::kThumbnailsOff), L"thumbnails-off");
+}
+
+TEST(RefreshFolderTexts, Refusals) {
+  ProcessContext context;
+  context.userAccount = L"PC\\tester";
+  EXPECT_EQ(RefreshRefusalText(RefreshRefusal::kElevated, context),
+            L"Cannot run here: running as administrator. The thumbnail cache is the signed-in "
+            L"user's own, and this program does not make thumbnails as administrator; run "
+            L"--refresh from a normal (not administrator) prompt.");
+  const std::wstring other = RefreshRefusalText(RefreshRefusal::kOtherShellUser, context);
+  EXPECT_EQ(other.rfind(L"Cannot run here: this program runs as PC\\tester, but File Explorer", 0),
+            0u)
+      << WideToUtf8Lossy(other);
+  EXPECT_EQ(RefreshRefusalText(RefreshRefusal::kNotInstalled, context),
+            std::wstring(kProductName) + L" is not installed here; there is nothing to refresh.");
+  // Another program's handler, or none at all (empty .pdf slots).
+  EXPECT_EQ(RefreshRefusalText(RefreshRefusal::kNotOurHandler, context),
+            L"Windows uses another program's handler for .pdf thumbnails, or none, so a refresh "
+            L"would not make them with " +
+                std::wstring(kProductName) + L". Run --fix --take-back to use " +
+                std::wstring(kProductName) + L" again.");
+  EXPECT_EQ(RefreshRefusalText(RefreshRefusal::kThumbnailsOff, context),
+            L"File Explorer shows icons only, so there are no thumbnails to refresh.");
+  EXPECT_TRUE(RefreshRefusalText(RefreshRefusal::kVirtualized, context).empty());
+  EXPECT_TRUE(RefreshRefusalText(RefreshRefusal::kNone, context).empty());
+}
+
+// The folder is named as the user typed it.
+TEST(RefreshFolderTexts, FolderProblems) {
+  EXPECT_EQ(FolderProblemText(L"C:\\My PDFs", FolderProblem::kNotFound),
+            L"--folder C:\\My PDFs: no such folder.");
+  EXPECT_EQ(FolderProblemText(L"a|b", FolderProblem::kBadName),
+            L"--folder a|b: not a usable path.");
+  EXPECT_EQ(FolderProblemText(L"\\\\.\\C:", FolderProblem::kDevicePath),
+            L"--folder \\\\.\\C:: not a usable path.");
+  EXPECT_EQ(FolderProblemText(L"x.pdf", FolderProblem::kNotAFolder),
+            L"--folder x.pdf: not a folder.");
+  EXPECT_EQ(FolderProblemText(L"\\\\server\\share", FolderProblem::kNetwork),
+            L"--folder \\\\server\\share: network folders are not refreshed.");
+  EXPECT_TRUE(FolderProblemText(L"C:\\", FolderProblem::kNone).empty());
+}
+
+TEST(RefreshFolderTexts, WhatWasRefreshed) {
+  RefreshCounts c;
+  c.files = 12;
+  c.notCached = 9;
+  c.entriesCached = 5;
+  c.refreshed = 5;
+  c.filesRefreshed = 3;
+  EXPECT_EQ(RefreshReport(S_OK, c, 20000, true),
+            Lines{L"Refreshed 5 PDF thumbnails in 3 files (12 files checked)."});
+  // Until the refresh experiment shows that open folder windows follow, the report says that
+  // they may not.
+  EXPECT_EQ(
+      RefreshReport(S_OK, c, 20000, false),
+      (Lines{L"Refreshed 5 PDF thumbnails in 3 files (12 files checked).", kOpenWindowsCaveat}));
+  EXPECT_EQ(RefreshExitCode(S_OK, c), ExitCode::kOk);
+
+  RefreshCounts one;
+  one.files = 1;
+  one.entriesCached = 1;
+  one.refreshed = 1;
+  one.filesRefreshed = 1;
+  EXPECT_EQ(RefreshReport(S_OK, one, 20000, true),
+            Lines{L"Refreshed 1 PDF thumbnail in 1 file (1 file checked)."});
+}
+
+TEST(RefreshFolderTexts, NothingToRefresh) {
+  RefreshCounts none;
+  EXPECT_EQ(RefreshReport(S_OK, none, 20000, false),
+            Lines{L"No PDF files were found; there is nothing to refresh."});
+  EXPECT_EQ(RefreshExitCode(S_OK, none), ExitCode::kOk);
+
+  RefreshCounts uncached;
+  uncached.files = 4;
+  uncached.notCached = 3;
+  uncached.gone = 1;
+  EXPECT_EQ(RefreshReport(S_OK, uncached, 20000, false),
+            Lines{L"None of these PDF files has a thumbnail File Explorer made; there is nothing "
+                  L"to refresh."});
+  EXPECT_EQ(RefreshExitCode(S_OK, uncached), ExitCode::kOk);
+
+  // Every PDF file skipped: that line says why. Files that are no PDFs do not count.
+  RefreshCounts skipped;
+  skipped.skipped[static_cast<size_t>(CandidateSkip::kPlaceholder) - 1] = 2;
+  skipped.skipped[static_cast<size_t>(CandidateSkip::kLongPath) - 1] = 1;
+  skipped.skipped[static_cast<size_t>(CandidateSkip::kNotPdf) - 1] = 9;
+  EXPECT_EQ(RefreshReport(S_OK, skipped, 20000, false),
+            Lines{L"3 files were skipped: online-only or offline files, network files, files in "
+                  L"the recycle bin, files over 256 MB and files at paths too long for File "
+                  L"Explorer keep their thumbnails."});
+  EXPECT_EQ(RefreshExitCode(S_OK, skipped), ExitCode::kOk);
+}
+
+TEST(RefreshFolderTexts, WhatWasNotDone) {
+  RefreshCounts c;
+  c.files = 3;
+  c.entriesCached = 3;
+  c.refreshed = 2;
+  c.filesRefreshed = 2;
+  c.failed = 1;
+  c.firstFailure = WTS_E_EXTRACTIONTIMEDOUT;
+  c.skipped[static_cast<size_t>(CandidateSkip::kTooLarge) - 1] = 1;
+  c.capped = true;
+  EXPECT_EQ(
+      RefreshReport(S_OK, c, 20000, false),
+      (Lines{L"Refreshed 2 PDF thumbnails in 2 files (3 files checked).",
+             L"1 file was skipped: online-only or offline files, network files, files in "
+             L"the recycle bin, files over 256 MB and files at paths too long for File "
+             L"Explorer keep their thumbnails.",
+             L"1 thumbnail could not be made again (" + HResultText(WTS_E_EXTRACTIONTIMEDOUT) +
+                 L"); File Explorer keeps the old one.",
+             L"Only the first 20000 PDF files found were checked; run --refresh --folder on "
+             L"smaller folders for the rest.",
+             kOpenWindowsCaveat}));
+  EXPECT_EQ(RefreshExitCode(S_OK, c), ExitCode::kProblems);
+
+  // Nothing could be made again: no word about open windows.
+  RefreshCounts failed;
+  failed.files = 2;
+  failed.entriesCached = 2;
+  failed.failed = 2;
+  failed.firstFailure = E_ACCESSDENIED;
+  EXPECT_EQ(RefreshReport(S_OK, failed, 20000, false),
+            (Lines{L"Refreshed 0 PDF thumbnails in 0 files (2 files checked).",
+                   L"2 thumbnails could not be made again (0x80070005); File Explorer keeps the "
+                   L"old ones."}));
+  EXPECT_EQ(RefreshExitCode(S_OK, failed), ExitCode::kProblems);
+
+  // None of the files checked had a thumbnail, but the files past the limit may have some.
+  RefreshCounts capped;
+  capped.files = 5;
+  capped.notCached = 5;
+  capped.capped = true;
+  EXPECT_EQ(RefreshExitCode(S_OK, capped), ExitCode::kProblems);
+  EXPECT_EQ(RefreshReport(S_OK, capped, 5, true),
+            (Lines{L"Refreshed 0 PDF thumbnails in 0 files (5 files checked).",
+                   L"Only the first 5 PDF files found were checked; run --refresh --folder on "
+                   L"smaller folders for the rest."}));
+}
+
+TEST(RefreshFolderTexts, StoppedRefusedAndFailed) {
+  const HRESULT stopped = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+  RefreshCounts c;
+  c.files = 4;
+  c.entriesCached = 3;
+  c.refreshed = 3;
+  c.filesRefreshed = 2;
+  c.stopped = true;
+  EXPECT_EQ(RefreshReport(stopped, c, 20000, false),
+            (Lines{L"Stopped: 3 thumbnails refreshed; the rest keep the old zoom. Run --refresh "
+                   L"--folder again to finish.",
+                   kOpenWindowsCaveat}));
+  EXPECT_EQ(RefreshExitCode(stopped, c), ExitCode::kCancelled);
+  // Stopped while finding the files.
+  RefreshCounts finding;
+  finding.stopped = true;
+  EXPECT_EQ(RefreshReport(stopped, finding, 20000, false),
+            Lines{L"Stopped: 0 thumbnails refreshed; the rest keep the old zoom. Run --refresh "
+                  L"--folder again to finish."});
+  EXPECT_EQ(RefreshExitCode(stopped, finding), ExitCode::kCancelled);
+  // Stopped before the files a capped walk found were all checked: no word about the limit.
+  RefreshCounts stoppedCapped = c;
+  stoppedCapped.capped = true;
+  EXPECT_EQ(RefreshReport(stopped, stoppedCapped, 20000, false),
+            (Lines{L"Stopped: 3 thumbnails refreshed; the rest keep the old zoom. Run --refresh "
+                   L"--folder again to finish.",
+                   kOpenWindowsCaveat}));
+  EXPECT_EQ(RefreshExitCode(stopped, stoppedCapped), ExitCode::kCancelled);
+
+  // The cache refused every size; a limit the walk reached adds nothing to that.
+  const HRESULT noSize = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+  RefreshCounts refused;
+  refused.files = 1;
+  refused.sizesDropped = {16, 256};
+  const Lines refusedLines{L"Refreshed 0 PDF thumbnails in 0 files (1 file checked).",
+                           L"The thumbnail cache refused every thumbnail size, so the PDF files "
+                           L"after these were not checked; they keep their thumbnails."};
+  EXPECT_EQ(RefreshReport(noSize, refused, 20000, false), refusedLines);
+  EXPECT_EQ(RefreshExitCode(noSize, refused), ExitCode::kProblems);
+  refused.capped = true;
+  EXPECT_EQ(RefreshReport(noSize, refused, 20000, false), refusedLines);
+  EXPECT_EQ(RefreshExitCode(noSize, refused), ExitCode::kProblems);
+
+  // It could not start.
+  EXPECT_EQ(RefreshExitCode(E_OUTOFMEMORY, RefreshCounts{}), ExitCode::kFailed);
+  EXPECT_EQ(RefreshExitCode(E_INVALIDARG, RefreshCounts{}), ExitCode::kFailed);
+  EXPECT_EQ(RefreshFailureText(E_ACCESSDENIED),
+            L"Cannot refresh the PDF thumbnails: 0x80070005. Nothing changed.");
+}
+
+TEST(RefreshFolderTexts, ProgressLines) {
+  EXPECT_EQ(RefreshProgressText(RefreshProgress{RefreshPhase::kFinding}),
+            L"Looking for PDF files...");
+  EXPECT_EQ(RefreshProgressText(RefreshProgress{RefreshPhase::kRefreshing, 400, 120, 37, 1}),
+            L"Checked 120 of 400 PDF files; 37 thumbnails refreshed so far...");
+  EXPECT_EQ(RefreshProgressText(RefreshProgress{RefreshPhase::kRefreshing, 1, 0, 1, 0}),
+            L"Checked 0 of 1 PDF file; 1 thumbnail refreshed so far...");
+  // No files to refresh: nothing to say.
+  EXPECT_TRUE(RefreshProgressText(RefreshProgress{RefreshPhase::kRefreshing}).empty());
+  EXPECT_EQ(RefreshProgressText(RefreshProgress{RefreshPhase::kNotifying, 4, 4, 4, 0}),
+            L"Telling File Explorer...");
 }
 
 }  // namespace

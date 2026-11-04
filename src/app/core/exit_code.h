@@ -10,14 +10,15 @@ enum class ExitCode : int {
   kOk = 0,            // done; healthy
   kProblems = 1,      // problems remain, or a step is incomplete (e.g. a restart is pending)
   kUsage = 2,         // the command line is wrong
-  kCancelled = 3,     // the user cancelled (declined UAC, answered "no", Ctrl+C before a change)
+  kCancelled = 3,     // the user cancelled (declined UAC, answered "no", or Ctrl+C stopped it)
   kBusy = 4,          // another operation held the lock for too long
   kFailed = 5,        // failed; the log has the HRESULT
   kNotInstalled = 6,  // the product is not installed
   kNeedsAdmin = 7,    // needs administrator rights, and nobody can be asked (or UAC gave none)
   // cannot run here (a virtualized container, a step for all users whose test writes did not
-  // reach Windows, elevated where refused, or a rebuild of the thumbnail cache that would not get
-  // File Explorer back from here or whose File Explorer is another account's)
+  // reach Windows, elevated where refused, a refresh of thumbnails whose File Explorer is another
+  // account's, or a rebuild of the thumbnail cache that would not get File Explorer back from
+  // here)
   kWrongContext = 8,
 };
 
@@ -34,7 +35,7 @@ inline constexpr ExitCodeInfo kExitCodes[] = {
     {ExitCode::kUsage, L"usage error"},
     {ExitCode::kCancelled,
      L"cancelled (the administrator prompt was declined, the answer was no, or Ctrl+C stopped it "
-     L"before anything changed)"},
+     L"before anything changed; --refresh --folder keeps the thumbnails it refreshed until then)"},
     {ExitCode::kBusy, L"busy: another check or change did not finish within 30 seconds"},
     {ExitCode::kFailed, L"failed (the log has the error code)"},
     {ExitCode::kNotInstalled, L"not installed"},
@@ -44,8 +45,8 @@ inline constexpr ExitCodeInfo kExitCodes[] = {
     {ExitCode::kWrongContext,
      L"cannot run here (an app container that virtualizes the registry, a step for all users "
      L"below an app package whose test writes did not reach Windows, elevated where that is "
-     L"refused, or a rebuild of the thumbnail cache where File Explorer belongs to another "
-     L"account or would not come back from here)"},
+     L"refused, a refresh of thumbnails where File Explorer belongs to another account, or a "
+     L"rebuild of the thumbnail cache where File Explorer would not come back from here)"},
 };
 
 // The table is in value order without gaps.

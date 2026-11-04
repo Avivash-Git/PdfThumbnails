@@ -406,7 +406,8 @@ TEST(CliArgs, HelpListsEveryVisibleCommandAndExitCode) {
 }
 
 // The rebuild restarts File Explorer: the help says that it asks first, also for the uninstall's
-// rebuild, and exit code 3 covers a Ctrl+C before anything changed.
+// rebuild. Exit code 3 covers a Ctrl+C before anything changed, and one that stopped
+// --refresh --folder part way; exit code 8 another account's File Explorer for either refresh.
 TEST(CliArgs, HelpSaysTheRebuildAsksFirst) {
   const std::wstring text = UsageText(kCli);
   EXPECT_NE(text.find(L"which restarts File Explorer (asks first, or --yes)."), std::wstring::npos);
@@ -414,7 +415,12 @@ TEST(CliArgs, HelpSaysTheRebuildAsksFirst) {
                       L"rebuilds the thumbnail cache, which restarts File Explorer.\n"),
             std::wstring::npos);
   EXPECT_NE(text.find(L"  3  cancelled (the administrator prompt was declined, the answer was no, "
-                      L"or Ctrl+C stopped it before anything changed)\n"),
+                      L"or Ctrl+C stopped it before anything changed; --refresh --folder keeps the "
+                      L"thumbnails it refreshed until then)\n"),
+            std::wstring::npos);
+  EXPECT_NE(text.find(L"elevated where that is refused, a refresh of thumbnails where File "
+                      L"Explorer belongs to another account, or a rebuild of the thumbnail cache "
+                      L"where File Explorer would not come back from here)"),
             std::wstring::npos);
 }
 

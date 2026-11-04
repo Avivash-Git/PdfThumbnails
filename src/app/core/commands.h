@@ -14,6 +14,7 @@
 #include "mode.h"
 #include "output.h"
 #include "rebuild.h"
+#include "refresh.h"
 #include "settings.h"
 #include "uninstall.h"
 
@@ -58,13 +59,20 @@ using OpenWindowFn = int (*)() noexcept;
 //     --uninstall-cleanup  the uninstaller's step; always exit 0
 //     --zoom         prints the zoom and where it comes from, or saves a new one (refused
 //                    elevated: 8); the thumbnails already made keep the old zoom, and it names
-//                    --refresh --full for them
+//                    --refresh --full and --refresh --folder for them
 //     --refresh --full  rebuilds the thumbnail cache, which restarts File Explorer (rebuild.h).
 //                    Before it asks (or takes --yes) it refuses an administrator process, another
 //                    account's File Explorer, and a package above it where Windows does not
 //                    restart File Explorer (8); "no", or Ctrl+C before anything changed: 3; exit
 //                    0, 1, 3, 4, 5, 8
-//   --refresh without --full is not built yet: it says so and exits 5.
+//     --refresh --folder  refreshes the PDF thumbnails File Explorer already made in those
+//                    folders and their subfolders (refresh.h). Refused first (and again once it
+//                    holds the operation lock) as administrator, for another account's File
+//                    Explorer (8), where nothing is installed (6), where Windows uses another
+//                    handler for .pdf or none (1), and where File Explorer shows icons only (0,
+//                    nothing to refresh); a folder that is not usable is a usage error (2);
+//                    Ctrl+C stops it (3); exit 0, 1, 2, 3, 4, 5, 6, 8
+//   --refresh without --full or --folder is not built yet: it says so and exits 5.
 // May throw std::bad_alloc; AppMain's callers catch everything.
 int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWindow);
 
@@ -186,8 +194,8 @@ std::vector<std::wstring> UninstallCleanupErrors(HRESULT hr, const UninstallClea
 std::wstring ZoomText(const ZoomDecision& decision);
 
 // What --zoom <n> prints once it saved the zoom (pure): the thumbnails File Explorer already made
-// keep the old zoom until --refresh --full rebuilds them. Names no command this build lacks. May
-// throw std::bad_alloc.
+// keep the old zoom until --refresh --full rebuilds them, or --refresh --folder refreshes the PDF
+// thumbnails in a folder. Names no command this build lacks. May throw std::bad_alloc.
 std::wstring ZoomSavedText(int zoom);
 
 // --uninstall removes the product for all users, so it must be confirmed (pure): it needs --yes
@@ -204,6 +212,12 @@ bool RefreshNeedsYes(const CliArgs& args, bool canAskOnConsole) noexcept;
 // throw std::bad_alloc.
 std::wstring RefreshFullRefusalMessage(RebuildRefusal refusal, const ProcessContext& context,
                                        HRESULT detail = S_OK);
+
+// Why --refresh --folder was refused (pure): CannotRunHereMessage where the registry may be
+// virtualized, RefreshRefusalText otherwise (for standard output where File Explorer shows icons
+// only, which fails nothing; standard error for the rest). Empty for kNone. May throw
+// std::bad_alloc.
+std::wstring RefreshFolderRefusalMessage(RefreshRefusal refusal, const ProcessContext& context);
 
 // The answer to a [y/N] question means yes (pure): "y" or "yes", ignoring case and surrounding
 // white space. Anything else, nothing included, is no.
