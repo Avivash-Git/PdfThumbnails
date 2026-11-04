@@ -75,12 +75,6 @@ bool SameUser(HANDLE process) noexcept {
                   reinterpret_cast<TOKEN_USER*>(ourUser)->User.Sid) != FALSE;
 }
 
-bool SameImage(std::wstring_view a, std::wstring_view b) {
-  const std::filesystem::path left = std::filesystem::path(a).lexically_normal();
-  const std::filesystem::path right = std::filesystem::path(b).lexically_normal();
-  return left.is_absolute() && IEquals(left.native(), right.native());
-}
-
 }  // namespace
 
 HRESULT FindHolders(std::span<const std::filesystem::path> files,
@@ -151,6 +145,16 @@ HRESULT SurrogateImagePath(std::wstring* image) noexcept try {
 }
 CATCH_RETURN();
 
+bool SameImagePath(std::wstring_view a, std::wstring_view b) noexcept {
+  try {
+    const std::filesystem::path left = std::filesystem::path(a).lexically_normal();
+    const std::filesystem::path right = std::filesystem::path(b).lexically_normal();
+    return left.is_absolute() && IEquals(left.native(), right.native());
+  } catch (...) {
+    return false;  // out of memory: "not the same" is the safe answer
+  }
+}
+
 HolderRefusal JudgeHolder(const Holder& found, const HolderFacts& now,
                           std::span<const std::wstring_view> allowedImages) noexcept {
   if (found.pid == now.ownPid) return HolderRefusal::kSelf;
@@ -160,11 +164,8 @@ HolderRefusal JudgeHolder(const Holder& found, const HolderFacts& now,
   }
   if (!now.sameUser) return HolderRefusal::kOtherUser;
   if (now.image.empty()) return HolderRefusal::kNotAllowed;
-  try {
-    for (const std::wstring_view allowed : allowedImages) {
-      if (SameImage(now.image, allowed)) return HolderRefusal::kNone;
-    }
-  } catch (...) {
+  for (const std::wstring_view allowed : allowedImages) {
+    if (SameImagePath(now.image, allowed)) return HolderRefusal::kNone;
   }
   return HolderRefusal::kNotAllowed;
 }

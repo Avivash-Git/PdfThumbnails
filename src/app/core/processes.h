@@ -43,6 +43,11 @@ struct Holder {
 // The image an install may end a holder of: <System folder>\dllhost.exe, the thumbnail process.
 [[nodiscard]] HRESULT SurrogateImagePath(std::wstring* image) noexcept;
 
+// Whether |a| and |b| are the same path (pure): whole paths, ignoring case, after "." and ".."
+// are resolved; a relative |a| never matches. No file system access, so a link or a short (8.3)
+// name is not the same as where it leads.
+bool SameImagePath(std::wstring_view a, std::wstring_view b) noexcept;
+
 // What TerminateOwnSessionHolder knows about a process when it decides.
 struct HolderFacts {
   DWORD ownPid = 0;

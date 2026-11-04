@@ -42,10 +42,12 @@
 #                             registry keys and temporary folders; read-only: Smart App Control,
 #                             the Code Integrity log, PdfCraft (Windows Installer, Uninstall
 #                             keys), the check task and 1.x's task, Explorer settings, the
-#                             Windows build; the whole check (gathering, repairs, the record,
-#                             the lock, also against a process below Medium integrity) through
-#                             private keys, folders under %TEMP% and fakes for everything
-#                             Windows-wide, --checks the same way; probe PDFs in %TEMP%
+#                             Windows build, File Explorer's folder windows (counts only; one
+#                             window on a folder of its own is opened through the shell, and
+#                             closed, only on runners GitHub hosts); the whole check (gathering,
+#                             repairs, the record, the lock, also against a process below Medium
+#                             integrity) through private keys, folders under %TEMP% and fakes for
+#                             everything Windows-wide, --checks the same way; probe PDFs in %TEMP%
 #                             (deleted); the diagnostics' log reader on files under %TEMP%; the
 #                             check task written (each checkbox combination, the folder or the
 #                             root-folder name, one copy per user, the check's repair of a stale
@@ -284,8 +286,9 @@ pdft_add_program_test(handler.refuses_elevated pdft_refuses_elevated
 # elevated, and test tasks in a Task Scheduler folder and under root-folder names of its own,
 # which it deletes; starts itself (child modes in integration/main.cpp), the two executables, a
 # writing command of theirs only where its writes are swallowed anyway, and pdft-run-medium.exe
-# once through Task Scheduler; never starts a thumbnail extraction. Its named objects carry a
-# suffix of the run's own, so it never takes or waits for a running app's.
+# once through Task Scheduler; never starts a thumbnail extraction, and opens a File Explorer
+# window (on a folder of its own, closed again) only on runners GitHub hosts. Its named objects
+# carry a suffix of the run's own, so it never takes or waits for a running app's.
 if(TARGET pdft_appcore)
   add_executable(pdft_integration_tests
     integration/main.cpp
@@ -307,6 +310,7 @@ if(TARGET pdft_appcore)
     integration/registration_test.cpp
     integration/settings_test.cpp
     integration/setup_test.cpp
+    integration/shell_windows_test.cpp
     integration/tasks_test.cpp)
   pdft_harden(pdft_integration_tests TEST)
   target_link_libraries(pdft_integration_tests PRIVATE pdft_appcore pdft_testsupport GTest::gtest

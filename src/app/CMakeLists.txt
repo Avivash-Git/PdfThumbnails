@@ -16,7 +16,9 @@
 #                                   the table of the files 1.x shipped,
 #                                   cmake/scripts/V1FileTable.cmake) and the installer's
 #                                   per-user and machine-wide steps; installing from a build's
-#                                   folder and uninstalling, with their administrator steps
+#                                   folder and uninstalling, with their administrator steps;
+#                                   File Explorer's folder windows (listed, and opened through
+#                                   the running shell)
 #   PdfThumbnailsSettings  WIN32    ${PDFT_SETTINGS_EXE}: the window, scheduled checks, elevated
 #                                   steps; shows no console window
 #   PdfThumbnailsCli       console  ${PDFT_CLI_EXE}: terminals and scripts (a shell waits for it
@@ -62,6 +64,7 @@ add_library(pdft_appcore STATIC
   core/sac.cpp core/sac.h
   core/settings.cpp core/settings.h
   core/setup.cpp core/setup.h
+  core/shell_windows.cpp core/shell_windows.h
   core/snapshot.cpp core/snapshot.h
   core/startup.cpp core/startup.h
   core/status_format.cpp core/status_format.h

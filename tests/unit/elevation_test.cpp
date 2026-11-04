@@ -940,5 +940,17 @@ TEST(Holders, OnlyTheSurrogateOfThisSessionAndUser) {
   EXPECT_EQ(JudgeHolder(Found(), facts, allowed), HolderRefusal::kSelf);
 }
 
+TEST(Holders, ImagesCompareAsWholePaths) {
+  EXPECT_TRUE(SameImagePath(L"C:\\Windows\\explorer.exe", L"c:\\windows\\EXPLORER.EXE"));
+  EXPECT_TRUE(
+      SameImagePath(L"C:\\Windows\\System32\\..\\.\\explorer.exe", L"C:\\Windows\\explorer.exe"));
+  EXPECT_FALSE(SameImagePath(L"C:\\Windows\\SysWOW64\\explorer.exe", L"C:\\Windows\\explorer.exe"));
+  EXPECT_FALSE(SameImagePath(L"C:\\Windows\\explorer", L"C:\\Windows\\explorer.exe"));
+  // Not absolute: no drive, or no root.
+  EXPECT_FALSE(SameImagePath(L"\\Windows\\explorer.exe", L"\\Windows\\explorer.exe"));
+  EXPECT_FALSE(SameImagePath(L"explorer.exe", L"explorer.exe"));
+  EXPECT_FALSE(SameImagePath(L"", L""));
+}
+
 }  // namespace
 }  // namespace pdft
