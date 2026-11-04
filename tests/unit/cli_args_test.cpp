@@ -86,8 +86,8 @@ const std::vector<Case>& Cases() {
       Ok("ChecksSignIn", kCli, {L"--checks", L"signin"}, kChecks, true),
       Ok("ChecksDefault", kCli, {L"--checks", L"default"}, kChecks, true),
       Ok("Refresh", kCli, {L"--refresh"}, kRefresh, true),
-      Ok("RefreshAllOptions", kCli,
-         {L"--refresh", L"--folder", L"C:\\a", L"--folder=C:\\b", L"--full", L"--yes"}, kRefresh,
+      Ok("RefreshFull", kCli, {L"--refresh", L"--full", L"--yes"}, kRefresh, true),
+      Ok("RefreshFolders", kCli, {L"--refresh", L"--folder", L"C:\\a", L"--folder=C:\\b"}, kRefresh,
          true),
       Ok("Install", kCli, {L"--install"}, kInstall, true),
       Ok("InstallMachine", kCli, {L"--install", L"--machine"}, kInstall, true),
@@ -177,6 +177,13 @@ const std::vector<Case>& Cases() {
             L"--out and --copy cannot be combined"),
       Fails("UserOnlyAndMachineOnly", kCli, {L"--migrate-v1", L"--user-only", L"--machine-only"},
             L"cannot be combined"),
+      Fails("FolderWithFull", kCli, {L"--refresh", L"--folder", L"C:\\a", L"--full"},
+            L"--folder and --full cannot be combined"),
+      Fails("FullWithFolder", kCli, {L"--refresh", L"--full", L"--folder=C:\\a"},
+            L"--full and --folder cannot be combined"),
+      Fails("YesWithoutFull", kCli, {L"--refresh", L"--yes"}, L"--yes goes with --full"),
+      Fails("YesWithFolders", kCli, {L"--refresh", L"--folder", L"C:\\a", L"--yes"},
+            L"--yes goes with --full"),
       // Developer-only and settings-executable-only parts.
       Fails("InstallInRelease", kCliRelease, {L"--install"}, L"unknown command"),
       Fails("ElevatedInCli", kCli, {L"--elevated", L"machine-uninstall"}, L"unknown command"),
@@ -267,11 +274,14 @@ TEST(CliArgs, ChecksValues) {
 }
 
 TEST(CliArgs, RefreshFoldersRepeat) {
-  const CliArgs args = ParseOk(
-      kCli, {L"--refresh", L"--folder", L"C:\\a", L"--full", L"--folder=C:\\b c", L"--yes"});
+  const CliArgs args = ParseOk(kCli, {L"--refresh", L"--folder", L"C:\\a", L"--folder=C:\\b c"});
   EXPECT_EQ(args.folders, (std::vector<std::wstring>{L"C:\\a", L"C:\\b c"}));
-  EXPECT_TRUE(args.full);
-  EXPECT_TRUE(args.yes);
+  EXPECT_FALSE(args.full);
+  EXPECT_FALSE(args.yes);
+  const CliArgs full = ParseOk(kCli, {L"--refresh", L"--full", L"--yes"});
+  EXPECT_TRUE(full.folders.empty());
+  EXPECT_TRUE(full.full);
+  EXPECT_TRUE(full.yes);
 }
 
 TEST(CliArgs, InstallValues) {
@@ -389,7 +399,8 @@ TEST(CliArgs, HelpListsEveryVisibleCommandAndExitCode) {
     EXPECT_NE(text.back(), L'\n');
   }
   EXPECT_NE(UsageText(kCli).find(L"[--machine|--user]"), std::wstring::npos);
-  EXPECT_NE(UsageText(kCli).find(L"[--folder <folder>]..."), std::wstring::npos);
+  EXPECT_NE(UsageText(kCli).find(L"--refresh [--folder <folder>]... [--full] [--yes]\n"),
+            std::wstring::npos);
   EXPECT_NE(UsageText(kCli).find(L"--zoom [<100-200>]"), std::wstring::npos);
   EXPECT_EQ(UsageText(kCliRelease).find(L"--install"), std::wstring::npos);
 }

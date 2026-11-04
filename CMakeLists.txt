@@ -36,6 +36,12 @@ option(PDFT_BUILD_APP "Build the settings app (the settings and command-line exe
 # copy). Release builds, which an installer puts in place, turn this off. The app reads it as
 # pdft::kDevInstall (project_config.h).
 option(PDFT_DEV_INSTALL "Developer install verbs in the settings app (OFF for release builds)" ON)
+# Whether Save in the settings window and --zoom refresh PDF thumbnails in place; otherwise they
+# offer the full rebuild of the thumbnail cache, which restarts File Explorer. The refresh
+# experiment decides the default. The app reads it as pdft::kPdfRefreshDefault (project_config.h).
+option(PDFT_PDF_REFRESH_DEFAULT
+    "Save and --zoom refresh PDF thumbnails without restarting File Explorer (set from the refresh experiment)"
+    OFF)
 option(PDFT_BUILD_TOOLS "Build the developer tools (thumbtest, pdft-run-outside)" ON)
 include(CTest)   # BUILD_TESTING (default ON): gates, unit, handler and integration tests
 

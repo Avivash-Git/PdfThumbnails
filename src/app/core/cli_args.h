@@ -120,7 +120,7 @@ struct CliArgs {
   bool noRepair = false;
   // --fix
   bool takeBack = false;
-  bool yes = false;  // also --refresh, --uninstall
+  bool yes = false;  // also --refresh --full, --uninstall
   // --zoom (the command's value), --install, --setup-user
   std::optional<int> zoom;
   bool noRefresh = false;

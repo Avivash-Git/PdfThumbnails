@@ -18,6 +18,9 @@ inline constexpr wchar_t kArch[] = L"@PDFT_ARCH@";
 // The settings app's developer install verbs (CMake option PDFT_DEV_INSTALL; off in release
 // builds, which an installer puts in place).
 inline constexpr bool kDevInstall = @PDFT_C_DEV_INSTALL@;
+// Whether Save in the settings window and --zoom refresh PDF thumbnails in place (CMake option
+// PDFT_PDF_REFRESH_DEFAULT); otherwise they offer the full rebuild, which restarts File Explorer.
+inline constexpr bool kPdfRefreshDefault = @PDFT_C_PDF_REFRESH_DEFAULT@;
 
 // ---- COM and file names -------------------------------------------------------------------
 inline constexpr wchar_t kHandlerClsidString[] = L"@PDFT_C_HANDLER_CLSID@";

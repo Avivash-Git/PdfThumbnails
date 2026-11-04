@@ -119,9 +119,9 @@ constexpr OptionInfo kOptions[] = {
     {Option::kNoRepair, L"--no-repair", kNone, L"", false, 0, false, false, Bit(Verb::kCheck)},
     {Option::kTakeBack, L"--take-back", kNone, L"", false, 0, false, false, Bit(Verb::kFix)},
     {Option::kNoRefresh, L"--no-refresh", kNone, L"", false, 0, false, false, Bit(Verb::kZoom)},
-    {Option::kFolder, L"--folder", kRequired, L"<folder>", true, 0, false, false,
+    {Option::kFolder, L"--folder", kRequired, L"<folder>", true, 4, false, false,
      Bit(Verb::kRefresh)},
-    {Option::kFull, L"--full", kNone, L"", false, 0, false, false, Bit(Verb::kRefresh)},
+    {Option::kFull, L"--full", kNone, L"", false, 4, false, false, Bit(Verb::kRefresh)},
     {Option::kMachine, L"--machine", kNone, L"", false, 1, false, false, Bit(Verb::kInstall)},
     {Option::kUser, L"--user", kNone, L"", false, 1, false, false, Bit(Verb::kInstall)},
     {Option::kChecks, L"--checks", kRequired, L"<list>", false, 0, false, false,
@@ -340,7 +340,9 @@ std::wstring Syntax(const VerbInfo& verb, const ParseOptions& options) {
     if (option.value == kRequired) text += L" " + std::wstring(option.valueName);
     text += L"]";
     if (option.repeatable) text += L"...";
-    openGroup = option.group;
+    // "[--folder <folder>]..." stays whole: the next option of its group gets its own brackets,
+    // so the syntax does not show that they exclude each other and the summary has to say it.
+    openGroup = option.repeatable ? 0 : option.group;
   }
   return text;
 }
@@ -469,6 +471,9 @@ std::variant<CliArgs, ParseError> ParseCommandLine(std::span<const std::wstring_
 
   if (result.noRefresh && !result.zoom) {
     return Error(L"--no-refresh goes with a new zoom: --zoom <100-200> --no-refresh");
+  }
+  if (verb->verb == Verb::kRefresh && result.yes && !result.full) {
+    return Error(L"--yes goes with --full: --refresh --full --yes");
   }
   result.writes = verb->writes == Writes::kYes || (verb->writes == Writes::kWithValue && verbValue);
   return result;

@@ -161,6 +161,7 @@ by Git):
 | `PDFT_PDFIUM_ARCHIVE`, `PDFT_GTEST_ARCHIVE`, `PDFT_WIL_ARCHIVE` | empty | Offline builds: a local copy of the archive. It must match the pinned SHA-256. |
 | `PDFT_BUILD_APP` | `ON` | Builds the settings app (`PdfThumbnailsSettings.exe`, `PdfThumbnailsCli.exe`). WIL is downloaded only for it. |
 | `PDFT_DEV_INSTALL` | `ON` | The app's developer install commands (install from the build's own folder). Release builds, which an installer puts in place, turn it off. |
+| `PDFT_PDF_REFRESH_DEFAULT` | `OFF` | Whether Save in the settings window and `--zoom <n>` refresh PDF thumbnails in place, without restarting File Explorer. Off, they offer the full rebuild of the thumbnail cache instead, which restarts File Explorer. The refresh experiment decides the default; the commands that read it come in a later build. |
 | `PDFT_ASAN` | `OFF` (`ON` in `x64-asan`) | AddressSanitizer for every target; for local test runs only. |
 | `PDFT_BUILD_TOOLS` | `ON` | Builds the developer tools, `thumbtest` and `pdft-run-outside` (see [Tools](#tools)). `thumbtest` is also in the test bundle; `pdft-run-outside` is in no install component. |
 | `BUILD_TESTING` | `ON` | Builds the tests and registers the gates. |
