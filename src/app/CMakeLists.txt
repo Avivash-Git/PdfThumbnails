@@ -20,7 +20,10 @@
 #                                   File Explorer's folder windows (listed, and opened through
 #                                   the running shell); rebuilding the thumbnail cache (ending
 #                                   File Explorer and the thumbnail processes, deleting the cache
-#                                   files, and letting Windows start File Explorer again)
+#                                   files, and letting Windows start File Explorer again);
+#                                   refreshing cached PDF thumbnails in place (finding the PDFs in
+#                                   folders, asking the cache which thumbnails it holds, making
+#                                   those again in the thumbnail process, telling File Explorer)
 #   PdfThumbnailsSettings  WIN32    ${PDFT_SETTINGS_EXE}: the window, scheduled checks, elevated
 #                                   steps; shows no console window
 #   PdfThumbnailsCli       console  ${PDFT_CLI_EXE}: terminals and scripts (a shell waits for it
@@ -61,6 +64,7 @@ add_library(pdft_appcore STATIC
   core/pe_info.cpp core/pe_info.h
   core/processes.cpp core/processes.h
   core/rebuild.cpp core/rebuild.h
+  core/refresh.cpp core/refresh.h
   core/registration.cpp core/registration.h
   core/registry_roots.cpp core/registry_roots.h
   core/repair.cpp core/repair.h

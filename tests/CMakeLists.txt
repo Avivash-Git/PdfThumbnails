@@ -16,7 +16,12 @@
 #                             Windows build string; the thumbnail-cache rebuild's decisions (the
 #                             cache-file name, the refusal order, how a holder is classified and
 #                             ended, the wait for File Explorer, the reopen plan, the exit code
-#                             and the report); the check's findings, repair plans and exit codes;
+#                             and the report); the PDF thumbnail refresh's decisions (the flags it
+#                             allows, the refusal order, which files it skips, grouping by
+#                             folder) and its engine against a fake thumbnail cache and a fake
+#                             File Explorer on a fake clock (what is extracted, sizes dropped,
+#                             stopping, progress, notifications); the check's findings, repair
+#                             plans and exit codes;
 #                             the reports: the status text line by line, the JSON status
 #                             (escaping, schema 1, checked by a strict JSON reader) and the
 #                             diagnostics' masking; the --fix confirmation rules; the install
@@ -50,7 +55,10 @@
 #                             closed, only on runners GitHub hosts), whether Windows restarts File
 #                             Explorer; the thumbnail-cache rebuild against a fake system (ending
 #                             order, deleting, waiting for File Explorer, reopening windows, the
-#                             log's counts) and the cache-file listing on a temp folder; the whole
+#                             log's counts) and the cache-file listing on a temp folder; finding
+#                             PDFs in temp folders for the PDF thumbnail refresh (never into links,
+#                             its limits), checking its --folder folders, and the refresh of a temp
+#                             folder against a fake thumbnail cache (the log's counts); the whole
 #                             check (gathering, repairs, the record, the lock, also against a
 #                             process below Medium integrity) through private keys, folders under
 #                             %TEMP% and fakes for everything Windows-wide, --checks the same way;
@@ -204,6 +212,7 @@ if(TARGET pdft_appcore)
     unit/paths_test.cpp
     unit/pe_info_test.cpp
     unit/rebuild_test.cpp
+    unit/refresh_test.cpp
     unit/registration_test.cpp
     unit/registry_roots_test.cpp
     unit/repair_test.cpp
@@ -319,6 +328,7 @@ if(TARGET pdft_appcore)
     integration/probes_test.cpp
     integration/processes_test.cpp
     integration/rebuild_test.cpp
+    integration/refresh_test.cpp
     integration/registration_test.cpp
     integration/settings_test.cpp
     integration/setup_test.cpp
