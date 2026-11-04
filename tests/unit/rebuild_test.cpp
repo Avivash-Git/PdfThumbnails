@@ -755,12 +755,22 @@ TEST(RebuildText, RefusalsAndFailures) {
             std::wstring::npos);
   EXPECT_NE(RebuildRefusalText(RebuildRefusal::kOtherShellUser, context).find(L"PC\\tester"),
             std::wstring::npos);
-  EXPECT_FALSE(RebuildRefusalText(RebuildRefusal::kNoRestartBelowPackage, context).empty());
+  EXPECT_EQ(RebuildRefusalText(RebuildRefusal::kNoRestartBelowPackage, context),
+            L"Cannot run here: Windows is set not to restart File Explorer by itself, and this "
+            L"program does not start it from inside an app package (the terminal it runs in). Run "
+            L"--refresh --full from a Command Prompt opened with Win+R (type cmd), which no app "
+            L"package starts.");
+  ProcessContext packaged = context;
+  packaged.packagedAncestor = L"Example_1.0.0.0_x64__abcdefghijklm";
+  EXPECT_NE(RebuildRefusalText(RebuildRefusal::kNoRestartBelowPackage, packaged)
+                .find(L"(started from the packaged app Example_1.0.0.0_x64__abcdefghijklm)."),
+            std::wstring::npos);
   EXPECT_EQ(RebuildRefusalText(RebuildRefusal::kNoRestartInJob, context),
             L"Cannot run here: Windows is set not to restart File Explorer by itself, and a File "
             L"Explorer started from here would stay inside a job of the program this runs in (a "
             L"terminal or another tool), so ending that program could end File Explorer and the "
-            L"taskbar too. Nothing changed; run --refresh --full from a Win+R prompt.");
+            L"taskbar too. Nothing changed; run --refresh --full from a Command Prompt opened with "
+            L"Win+R (type cmd).");
   EXPECT_EQ(RebuildRefusalText(RebuildRefusal::kNoRestartStartFails, context,
                                HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED)),
             L"Cannot rebuild the thumbnail cache: Windows is set not to restart File Explorer by "

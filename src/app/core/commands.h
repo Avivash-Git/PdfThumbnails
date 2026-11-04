@@ -54,8 +54,9 @@ using OpenWindowFn = int (*)() noexcept;
 //     --install      (developer builds) installs from this executable's folder (install.h)
 //     --uninstall    removes the product for all users (uninstall.h; asks first, or --yes); with
 //                    --rebuild-thumbnails it also rebuilds the thumbnail cache (rebuild.h), which
-//                    restarts File Explorer, and the question says so where the context allows
-//                    the rebuild; Ctrl+C then stops it before it removes anything (3)
+//                    restarts File Explorer, and the question says so unless the rebuild's check
+//                    before it refuses the rebuild; Ctrl+C then stops it before it removes
+//                    anything (3)
 //     --uninstall-cleanup  the uninstaller's step; always exit 0
 //     --zoom         prints the zoom and where it comes from, or saves a new one (refused
 //                    elevated: 8); the thumbnails already made keep the old zoom, and it names
@@ -63,15 +64,19 @@ using OpenWindowFn = int (*)() noexcept;
 //     --refresh --full  rebuilds the thumbnail cache, which restarts File Explorer (rebuild.h).
 //                    Before it asks (or takes --yes) it refuses an administrator process, another
 //                    account's File Explorer, and a package above it where Windows does not
-//                    restart File Explorer (8); "no", or Ctrl+C before anything changed: 3; exit
-//                    0, 1, 3, 4, 5, 8
+//                    restart File Explorer (8), and, where Windows does not restart File Explorer
+//                    by itself, a File Explorer started from here that would stay inside a job
+//                    (8) or cannot be started at all (5), found by starting explorer.exe
+//                    suspended and ending it before it runs; "no", or Ctrl+C before anything
+//                    changed: 3; exit 0, 1, 3, 4, 5, 8
 //     --refresh --folder  refreshes the PDF thumbnails File Explorer already made in those
 //                    folders and their subfolders (refresh.h). Refused first (and again once it
 //                    holds the operation lock) as administrator, for another account's File
 //                    Explorer (8), where nothing is installed (6), where Windows uses another
 //                    handler for .pdf or none (1), and where File Explorer shows icons only (0,
 //                    nothing to refresh); a folder that is not usable is a usage error (2);
-//                    Ctrl+C stops it (3); exit 0, 1, 2, 3, 4, 5, 6, 8
+//                    Ctrl+C stops it (3; before the refresh starts, nothing changed); exit 0, 1,
+//                    2, 3, 4, 5, 6, 8
 //   --refresh without --full or --folder is not built yet: it says so and exits 5.
 // May throw std::bad_alloc; AppMain's callers catch everything.
 int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWindow);
@@ -195,7 +200,8 @@ std::wstring ZoomText(const ZoomDecision& decision);
 
 // What --zoom <n> prints once it saved the zoom (pure): the thumbnails File Explorer already made
 // keep the old zoom until --refresh --full rebuilds them, or --refresh --folder refreshes the PDF
-// thumbnails in a folder. Names no command this build lacks. May throw std::bad_alloc.
+// thumbnails in a folder and its subfolders. Names no command this build lacks. May throw
+// std::bad_alloc.
 std::wstring ZoomSavedText(int zoom);
 
 // --uninstall removes the product for all users, so it must be confirmed (pure): it needs --yes

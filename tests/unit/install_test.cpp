@@ -583,9 +583,10 @@ TEST(ZoomTexts, OriginAndSaved) {
   EXPECT_EQ(ZoomText(decision), L"Zoom: 100 % (default)");
   const std::wstring saved = ZoomSavedText(150);
   EXPECT_EQ(saved.rfind(L"Zoom set to 150 %.", 0), 0u) << saved;
-  // The full rebuild, with what it costs, and the refresh of one folder's PDF thumbnails.
+  // The full rebuild, with what it costs, and the refresh of the PDF thumbnails in a folder
+  // and its subfolders.
   EXPECT_NE(saved.find(L"run --refresh --full (restarts File Explorer), or --refresh --folder "
-                       L"<folder> for the PDF thumbnails in one folder."),
+                       L"<folder> for the PDF thumbnails in a folder and its subfolders."),
             std::wstring::npos)
       << WideToUtf8Lossy(saved);
 }
@@ -680,8 +681,9 @@ TEST(RefreshTexts, FolderRefusals) {
   EXPECT_EQ(RefreshFolderRefusalMessage(RefreshRefusal::kElevated, context)
                 .rfind(L"Cannot run here: running as administrator.", 0),
             0u);
-  EXPECT_NE(RefreshFolderRefusalMessage(RefreshRefusal::kOtherShellUser, context).find(L"PC\\tester"),
-            std::wstring::npos);
+  EXPECT_NE(
+      RefreshFolderRefusalMessage(RefreshRefusal::kOtherShellUser, context).find(L"PC\\tester"),
+      std::wstring::npos);
   EXPECT_TRUE(RefreshFolderRefusalMessage(RefreshRefusal::kNone, context).empty());
 }
 

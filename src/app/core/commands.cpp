@@ -969,6 +969,19 @@ int RunRefreshFullCommand(const CliArgs& args, const ProcessContext& context, Ou
 // operation lock, the refusals again, and the refresh of the PDF thumbnails in those folders
 // (refresh.h), with a progress line at most every kRefreshProgressEveryMs.
 int RunRefreshFoldersCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
+  // From here Ctrl+C only asks to stop: before the refresh starts it ends the command, nothing
+  // changed; during the refresh, the request under way finishes first.
+  std::stop_source stop;
+  wil::unique_event_nothrow done;
+  (void)done.create(wil::EventOptions::ManualReset);
+  ConsoleStop consoleStop(&stop, done.get());
+  // Stopped by Ctrl+C before the refresh started, so nothing changed.
+  const auto stopped = [&out] {
+    Log(LogLevel::kWarning, L"refresh", L"refresh refused=cancelled");
+    out.Line(L"Nothing changed.");
+    return Code(ExitCode::kCancelled);
+  };
+
   // The exit code when the refresh may not start; std::nullopt when it may.
   const auto refused = [&context, &out]() -> std::optional<int> {
     RefreshConditions conditions;
@@ -1009,9 +1022,13 @@ int RunRefreshFoldersCommand(const CliArgs& args, const ProcessContext& context,
     }
     options.folders.push_back(std::move(folder));
   }
+  if (stop.stop_requested()) return stopped();
 
   std::optional<OperationLock> lock;
   const HRESULT locked = OperationLock::Acquire(kCheckLockWaitMs, &lock);
+  // The wait cannot be interrupted, so a Ctrl+C during it is answered once it ends, whatever
+  // it gave.
+  if (stop.stop_requested()) return stopped();
   if (locked == OperationLock::kBusy || locked == OperationLock::kTakenByLowerIntegrity) {
     out.Error(kBusyMessage);
     return Code(ExitCode::kBusy);
@@ -1032,11 +1049,6 @@ int RunRefreshFoldersCommand(const CliArgs& args, const ProcessContext& context,
   // --fix --take-back, may have changed the registration or the handler Windows uses for .pdf.
   if (const std::optional<int> code = refused()) return *code;
 
-  // Ctrl+C asks the refresh to stop: the request under way finishes first.
-  std::stop_source stop;
-  wil::unique_event_nothrow done;
-  (void)done.create(wil::EventOptions::ManualReset);
-  ConsoleStop consoleStop(&stop, done.get());
   std::optional<ULONGLONG> lastLine;
   const auto progress = [&out, &lastLine](const RefreshProgress& p) {
     const ULONGLONG now = GetTickCount64();
@@ -1064,8 +1076,8 @@ int RunRefreshCommand(const CliArgs& args, const ProcessContext& context, Output
   if (args.full) return RunRefreshFullCommand(args, context, out);
   if (!args.folders.empty()) return RunRefreshFoldersCommand(args, context, out);
   out.Error(
-      L"--refresh without --folder is not available in this build yet; use --refresh --folder "
-      L"<folder>, or --refresh --full.");
+      L"--refresh without --folder or --full is not available in this build yet; use --refresh "
+      L"--folder <folder>, or --refresh --full.");
   return Code(ExitCode::kFailed);
 }
 
@@ -1532,7 +1544,7 @@ std::wstring ZoomSavedText(int zoom) {
   return L"Zoom set to " + std::to_wstring(ClampZoom(zoom)) +
          L" %. Thumbnails made from now on use it. To redo the ones File Explorer already made, "
          L"run --refresh --full (restarts File Explorer), or --refresh --folder <folder> for the "
-         L"PDF thumbnails in one folder.";
+         L"PDF thumbnails in a folder and its subfolders.";
 }
 
 bool UninstallNeedsYes(const CliArgs& args, bool canAskOnConsole) noexcept {

@@ -458,13 +458,18 @@ std::wstring RebuildRefusalText(RebuildRefusal refusal, const ProcessContext& co
              L"cache is each account's own. Run it as the signed-in user.";
     case RebuildRefusal::kNoRestartBelowPackage:
       return L"Cannot run here: Windows is set not to restart File Explorer by itself, and this "
-             L"program does not start it from inside an app package (the terminal it runs in). "
-             L"Run --refresh --full from a Win+R prompt.";
+             L"program does not start it from inside an app package (" +
+             (context.packagedAncestor
+                  ? L"started from the packaged app " + *context.packagedAncestor
+                  : std::wstring(L"the terminal it runs in")) +
+             L"). Run --refresh --full from a Command Prompt opened with Win+R (type cmd), which "
+             L"no app package starts.";
     case RebuildRefusal::kNoRestartInJob:
       return L"Cannot run here: Windows is set not to restart File Explorer by itself, and a File "
              L"Explorer started from here would stay inside a job of the program this runs in (a "
              L"terminal or another tool), so ending that program could end File Explorer and the "
-             L"taskbar too. Nothing changed; run --refresh --full from a Win+R prompt.";
+             L"taskbar too. Nothing changed; run --refresh --full from a Command Prompt opened "
+             L"with Win+R (type cmd).";
     case RebuildRefusal::kNoRestartStartFails:
       return L"Cannot rebuild the thumbnail cache: Windows is set not to restart File Explorer by "
              L"itself, and this program cannot start File Explorer from here either (" +
