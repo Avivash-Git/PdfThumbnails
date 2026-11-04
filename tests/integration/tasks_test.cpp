@@ -961,8 +961,8 @@ TEST_F(TaskWriting, SharedFolderStepsRefuseUnelevated) {
 
 // Asked directly, Task Scheduler itself refuses to let an unelevated process make a folder owned
 // by Administrators, so only an administrator can make the shared folder as it should be (and a
-// folder a user makes instead is theirs, which ApplyTaskOptions does not trust). From a standard
-// account this is part of the manual check in docs/BUILDING.md.
+// folder a user makes instead is theirs, which ApplyTaskOptions does not trust). The system tests
+// run it from a real standard account (CI); docs/BUILDING.md says how to do so by hand.
 TEST_F(TaskWriting, UnelevatedCannotMakeAFolderOwnedByAdministrators) {
   if (context_.elevated) GTEST_SKIP() << "elevated here; EnsureTaskFolder's tests make the folder";
   const wil::com_ptr_nothrow<ITaskFolder> root = GetFolder(service_.get(), L"\\");
@@ -979,7 +979,9 @@ TEST_F(TaskWriting, UnelevatedCannotMakeAFolderOwnedByAdministrators) {
 }
 
 // Task Scheduler starts the program as the user: the principal, interactive token and settings
-// are ones it runs. The action becomes pdft-run-medium.exe --exit 0 for this.
+// are ones it runs. The action becomes pdft-run-medium.exe --exit 0 for this. The system tests'
+// standard account has no Windows session of its own and accepts this test's skips for that by
+// the first words of their messages (tests/system/account_rules.h kNoSessionSkips).
 TEST_F(TaskWriting, TaskSchedulerRunsTheTask) {
   if (!GetShellWindow()) {
     GTEST_SKIP() << "no interactive desktop here: Task Scheduler runs interactive-token tasks only "
@@ -1060,6 +1062,8 @@ class TaskFolderElevated : public TaskWriting {
   void SetUp() override {
     TaskWriting::SetUp();
     if (HasFatalFailure()) return;
+    // The system tests' standard account expects this skip by its first words
+    // (tests/system/account_rules.h kNeedsElevationSkip).
     if (!context_.elevated) {
       GTEST_SKIP() << "needs elevation (the shared folder is made and removed by elevated code "
                       "only); runs on CI";

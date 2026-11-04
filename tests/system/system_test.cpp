@@ -15,6 +15,11 @@
 // next starts from a clean PC. If UAC does not elevate the account's step, the test that asked
 // says so with the step's own token line, and the tests after it stop at once.
 //
+// A second user, the standard account (test_account.h: not a member of Administrators), runs the
+// integration tests' task tests before anything is installed, and its own --setup-user once the
+// install for all users has made the protected task folder; its state is checked like the test
+// account's.
+//
 // Lines starting with "[ system ]" are what the CI job looks for.
 
 #include <windows.h>
@@ -36,6 +41,7 @@
 #include <string_view>
 #include <vector>
 
+#include "account_rules.h"
 #include "build_folder.h"
 #include "child_process.h"
 #include "file_ops.h"
@@ -68,6 +74,10 @@ constexpr const wchar_t* kV1ShippedFiles[] = {L"PdfThumbnails.ps1", L"PdfThumbna
 // The findings the runner may show without the install being at fault: the Explorer test needs a
 // thumbnail surrogate that a CI runner without a signed-in desktop may not start.
 constexpr std::string_view kExplorerTestFindings[] = {"LiveTestFailed", "LiveTestSkipped"};
+
+// The integration tests, next to this program (in the build folder and in the test bundle): the
+// standard account runs their task tests.
+constexpr wchar_t kIntegrationTestsExe[] = L"pdft_integration_tests.exe";
 
 // Set once UAC did not elevate the test account's step: every test needs that, so the ones after
 // stop at once instead of failing for reasons that follow from it.
@@ -168,6 +178,19 @@ bool ProtectFolder(const path& folder, std::initializer_list<std::wstring_view> 
   return SetNamedSecurityInfoW(const_cast<wchar_t*>(folder.c_str()), SE_FILE_OBJECT,
                                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                                nullptr, nullptr, dacl, nullptr) == ERROR_SUCCESS;
+}
+
+// "[ system ] <exe> <arguments> (<who>) -> exit <code>", then the program's output, indented.
+void Print(const char* who, const path& exe, std::wstring_view arguments, const Outcome& run) {
+  std::printf("[ system ] %s %s (%s) -> exit %lu", Text(exe.filename().native()).c_str(),
+              Text(arguments).c_str(), who, run.exitCode);
+  if (FAILED(run.hr)) std::printf(", not run: %s", Text(HResultText(run.hr)).c_str());
+  std::printf("\n");
+  std::istringstream lines(run.Output());
+  for (std::string line; std::getline(lines, line);) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    std::printf("    %s\n", line.c_str());
+  }
 }
 
 // The line of |text| that starts at |at|, without its line end.
@@ -309,19 +332,6 @@ class System : public ::testing::Test {
   path BuildDll() const { return machineRoot_ / L"app" / buildName_ / kHandlerDll; }
   // The user's registry: the test account's hive, and HKLM.
   RegistryRoots Roots() const { return RegistryRoots{hive_, HKEY_LOCAL_MACHINE}; }
-
-  static void Print(const char* who, const path& exe, std::wstring_view arguments,
-                    const Outcome& run) {
-    std::printf("[ system ] %s %s (%s) -> exit %lu", Text(exe.filename().native()).c_str(),
-                Text(arguments).c_str(), who, run.exitCode);
-    if (FAILED(run.hr)) std::printf(", not run: %s", Text(HResultText(run.hr)).c_str());
-    std::printf("\n");
-    std::istringstream lines(run.Output());
-    for (std::string line; std::getline(lines, line);) {
-      if (!line.empty() && line.back() == '\r') line.pop_back();
-      std::printf("    %s\n", line.c_str());
-    }
-  }
 
   // As the test account, with the limited token of its logon.
   Outcome User(const path& exe, std::wstring_view arguments) {
@@ -495,6 +505,63 @@ class System : public ::testing::Test {
     EXPECT_TRUE(IEquals(task.actionPath, (machineRoot_ / kSettingsExe).native()))
         << Text(task.actionPath);
     EXPECT_EQ(task.actionArgs, kCheckTaskArguments);
+  }
+
+  // A standard user's own per-user step once an administrator made the protected task folder
+  // (the install for all users did): the standard account's --setup-user, with its own token,
+  // quiet and exit 0, puts its check task into that folder (not under the root-folder name),
+  // with both triggers and the installed settings executable, and sets its slots and zoom.
+  void ExpectStandardAccountsSetupUser() {
+    const TestAccount* standard = CurrentStandardAccount();
+    if (!standard) {
+      ADD_FAILURE() << "no standard account (a \"[ system ] the standard account\" line says why)";
+      return;
+    }
+    const Outcome run = standard->Run(InstalledCli(), L"--setup-user", kCommandTimeoutMs);
+    Print("standard account", InstalledCli(), L"--setup-user", run);
+    EXPECT_HRESULT_SUCCEEDED(run.hr);
+    EXPECT_EQ(run.exitCode, 0u);
+    EXPECT_EQ(run.Output(), "");
+    TaskLocation location;
+    TaskState task;
+    EXPECT_HRESULT_SUCCEEDED(DefaultTaskLocation(standard->sid(), &location));
+    EXPECT_HRESULT_SUCCEEDED(ReadTask(location, &task));
+    std::printf("[ system ] standard account's check task %s: after PdfCraft %d, at sign-in %d\n",
+                task.exists ? Text(task.path).c_str() : "(none)", task.afterPdfCraft,
+                task.atSignIn);
+    std::printf(
+        "[ system ] the standard account's --setup-user put its check task in the protected task "
+        "folder: %s\n",
+        task.exists && !task.atFallback ? "yes" : "no");
+    ASSERT_TRUE(task.exists);
+    EXPECT_FALSE(task.atFallback) << "under the root-folder name: " << Text(task.path);
+    EXPECT_TRUE(task.enabled);
+    EXPECT_TRUE(task.afterPdfCraft);
+    EXPECT_TRUE(task.atSignIn);
+    EXPECT_TRUE(IEquals(task.actionPath, (machineRoot_ / kSettingsExe).native()))
+        << Text(task.actionPath);
+    EXPECT_EQ(task.actionArgs, kCheckTaskArguments);
+    SlotValues slots;
+    ASSERT_HRESULT_SUCCEEDED(
+        ReadSlots(RegistryRoots{standard->hive(), HKEY_LOCAL_MACHINE}, &slots));
+    for (const auto& slot : slots) EXPECT_TRUE(slot && IsOurClsid(*slot));
+    std::optional<RegistryValue> zoom;
+    EXPECT_HRESULT_SUCCEEDED(ReadRegistryValue(standard->hive(), kRegKey, kZoomValueName, &zoom));
+    EXPECT_EQ(zoom ? RegistryDword(*zoom) : std::nullopt, std::optional<DWORD>(100));
+  }
+
+  // The standard account does not uninstall: the step for all users takes its slots, settings and
+  // task from its loaded hive and the task folder (ExpectNothingLeft checks), and its data folder,
+  // with the log of its --setup-user, stays as every such user's does. It never signs in again,
+  // so the folder goes here.
+  static void RemoveStandardAccountsDataFolder() {
+    const TestAccount* standard = CurrentStandardAccount();
+    if (!standard) return;
+    const path data = standard->Places().dataDir;
+    if (data.empty() || !Exists(data)) return;
+    std::printf(
+        "[ system ] the standard account's data folder (its log) removed by the tests: %s\n",
+        SUCCEEDED(RemoveTreeNoFollow(data)) ? "yes" : "no");
   }
 
   Status ReadStatus() {
@@ -755,6 +822,74 @@ class System : public ::testing::Test {
   std::wstring buildName_;
 };
 
+// ---- The task tests as a standard user -----------------------------------------------------
+
+// The check task's writing side from a real standard account (not a member of Administrators),
+// logged on interactively, before anything is installed: the integration tests' task tests, run
+// as it, must all pass but the one that needs a Windows session of the account's own, and the
+// protected task folder's tests must skip, since they need an administrator
+// (StandardAccountTaskTestProblems). Nothing of them may be left in Task Scheduler, and nothing
+// of the product anywhere (they write only test keys and test tasks of their own).
+TEST(StandardAccount, TaskTestsPassAndTheProtectedFolderOnesSkip) {
+  const TestAccount* standard = CurrentStandardAccount();
+  ASSERT_NE(standard, nullptr) << "no standard account (a \"[ system ] the standard account\" "
+                                  "line says why)";
+  // The test program and pdft-run-medium.exe, which the task tests point their tasks at, copied
+  // where the account can read them.
+  const path tools = standard->tempDir() / L"pdft-system-task-tests";
+  ASSERT_TRUE(MakeDirs(tools));
+  const auto removeTools = wil::scope_exit([&tools] { (void)RemoveTreeNoFollow(tools); });
+  for (const wchar_t* name : {kIntegrationTestsExe, L"pdft-run-medium.exe"}) {
+    const path from = path(test::SelfFolder()) / name;
+    ASSERT_TRUE(CopyFileW(from.c_str(), (tools / name).c_str(), FALSE)) << Text(from.native());
+  }
+  const std::wstring arguments =
+      std::wstring(L"--gtest_filter=") + kStandardAccountTaskFilter + L" --gtest_color=no";
+  const Outcome run = standard->Run(tools / kIntegrationTestsExe, arguments, kCommandTimeoutMs);
+  Print("standard account", tools / kIntegrationTestsExe, arguments, run);
+  // A run that could not start or was ended at the timeout fails below, after the clean-up: it
+  // may have registered test tasks and folders that are still there.
+
+  const std::vector<GTestCase> cases = ReadGTestCases(run.out);
+  size_t counts[4] = {};
+  for (const GTestCase& test : cases) {
+    ++counts[static_cast<size_t>(test.result)];
+    if (test.result == GTestCase::Result::kSkipped) {
+      std::printf("[ system ] as the standard account, %s skipped: %s\n", test.name.c_str(),
+                  test.skipReason.c_str());
+    }
+  }
+  std::printf(
+      "[ system ] task tests as the standard account: %zu passed, %zu skipped, %zu failed, %zu "
+      "did not finish (exit %lu)\n",
+      counts[static_cast<size_t>(GTestCase::Result::kPassed)],
+      counts[static_cast<size_t>(GTestCase::Result::kSkipped)],
+      counts[static_cast<size_t>(GTestCase::Result::kFailed)],
+      counts[static_cast<size_t>(GTestCase::Result::kUnfinished)], run.exitCode);
+  std::vector<std::string> problems = StandardAccountTaskTestProblems(cases, run.exitCode);
+  if (FAILED(run.hr)) {
+    problems.insert(problems.begin(),
+                    "the program did not run to its end: " + Text(HResultText(run.hr)));
+  }
+  for (const std::string& problem : problems) {
+    std::printf("[ system ] task tests as the standard account: %s\n", problem.c_str());
+  }
+  const std::vector<std::string> left = RemoveTaskTestLeftovers();
+  for (const std::string& line : left) {
+    std::printf("[ system ] left in Task Scheduler by the task tests: %s\n", line.c_str());
+  }
+  const std::vector<std::string> product = Leftovers();
+  if (!product.empty()) {
+    std::printf("[ system ] cleaning up what the task tests left:%s\n", Lines(product).c_str());
+    ForceClean();
+  }
+  std::printf("[ system ] task tests as the standard account as expected: %s\n",
+              problems.empty() && left.empty() && product.empty() ? "yes" : "no");
+  EXPECT_TRUE(problems.empty()) << Lines(problems);
+  EXPECT_TRUE(left.empty()) << Lines(left);
+  EXPECT_TRUE(product.empty()) << Lines(product);
+}
+
 // ---- Installed for all users, used, uninstalled --------------------------------------------
 
 TEST_F(System, InstallChecksZoomFixAndUninstall) {
@@ -792,6 +927,8 @@ TEST_F(System, InstallChecksZoomFixAndUninstall) {
   EXPECT_EQ(User(InstalledCli(), L"--setup-machine").exitCode, 7u);
   EXPECT_EQ(Admin(InstalledCli(), L"--setup-machine").exitCode, 0u);
   EXPECT_EQ(TaskFolderExists(kTaskFolder), std::optional<bool>(true));
+  // Another user of this PC, a standard one, sets itself up in the folder an administrator made.
+  ExpectStandardAccountsSetupUser();
 
   // The class for all users points at a build that is not there: --fix has the administrator
   // step point it at the newest complete build, through UAC.
@@ -808,10 +945,12 @@ TEST_F(System, InstallChecksZoomFixAndUninstall) {
 
   // The uninstall, from the installed executable: the running programs go to a trash folder
   // that is deleted at the restart. (Its log goes with the user's data folder, so its step's
-  // report is not read back; what is left shows whether the step worked.)
+  // report is not read back; what is left shows whether the step worked.) The standard
+  // account's part goes with the step for all users, but for its data folder.
   const Outcome uninstall = User(InstalledCli(), L"--uninstall --yes");
   EXPECT_EQ(uninstall.exitCode, 0u);
   EXPECT_FALSE(StoredZoom().has_value());
+  RemoveStandardAccountsDataFolder();
   ExpectNothingLeft();
 }
 

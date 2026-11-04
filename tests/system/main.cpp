@@ -5,10 +5,11 @@
 // PDFT_SYSTEM_TESTS_THROWAWAY_VM=1), the process is elevated, its registry writes reach the real
 // hive, and nothing of 1.x or 2.x is on this PC, which the tests would change or remove.
 // Otherwise it changes nothing and exits 77 (CTest's "skipped"), or 3 where the product is
-// installed. Only then does it make the account (after removing any an earlier run that was
-// ended from outside left), and it removes the account again however the tests end. They stop
-// before the first test when the account's programs could not make named objects in this session
-// (TestAccount::namedObjects).
+// installed. Only then does it make the accounts (after removing any an earlier run that was
+// ended from outside left): the test account, and then the standard account; it removes them
+// again however the tests end. They stop before the first test when the test account's programs
+// could not make named objects in this session (TestAccount::namedObjects). Without a usable
+// standard account the tests still run, and those that need it fail.
 
 #include <windows.h>
 
@@ -39,17 +40,19 @@ using namespace pdft::systest;
 
 std::string Text(std::wstring_view text) { return pdft::WideToUtf8Lossy(text); }
 
-// The account's own programs run with the limited token of its logon: pdft-run-medium
-// --check-token, copied where the account can read it, prints the token it runs with
-// ("elevation type 3" expected). False, with a line that says why, otherwise.
-bool CheckTheAccountsToken(const TestAccount& account) {
+// The account's own programs run with the token of its logon: pdft-run-medium --check-token,
+// copied where the account can read it, prints the token it runs with, and its line must hold
+// |expected| ("elevation type 3" for the test account's limited token). False, with a line that
+// says why (|otherwise| when the token is not the one expected), otherwise.
+bool CheckTheAccountsToken(const TestAccount& account, const char* expected,
+                           const char* otherwise) {
   const path helper = path(pdft::test::SelfFolder()) / L"pdft-run-medium.exe";
   const path tools = account.tempDir() / L"pdft-system-tools";
   const path copy = tools / helper.filename();
   std::error_code error;
   std::filesystem::create_directories(tools, error);
   if (error || !CopyFileW(helper.c_str(), copy.c_str(), FALSE)) {
-    std::printf("[ system ] check-token as the test account: cannot copy %s there\n",
+    std::printf("[ system ] check-token as the %s: cannot copy %s there\n", account.noun(),
                 Text(helper.native()).c_str());
     return false;
   }
@@ -58,32 +61,65 @@ bool CheckTheAccountsToken(const TestAccount& account) {
   std::string first = run.out.substr(0, run.out.find('\n'));
   if (!first.empty() && first.back() == '\r') first.pop_back();
   if (FAILED(run.hr)) {
-    std::printf("[ system ] check-token as the test account: not run: %s\n",
+    std::printf("[ system ] check-token as the %s: not run: %s\n", account.noun(),
                 Text(pdft::HResultText(run.hr)).c_str());
     return false;
   }
-  std::printf("[ system ] check-token as the test account: %s (exit 0x%08lX)\n", first.c_str(),
-              run.exitCode);
+  std::printf("[ system ] check-token as the %s: %s (exit 0x%08lX)\n", account.noun(),
+              first.c_str(), run.exitCode);
   if (first.empty()) {
     std::printf(
-        "[ system ] the test account's program printed nothing: it did not start properly (no "
-        "access to the window station or desktop gives 0xC0000142)\n");
+        "[ system ] the %s's program printed nothing: it did not start properly (no access to "
+        "the window station or desktop gives 0xC0000142)\n",
+        account.noun());
     return false;
   }
-  if (first.find("elevation type 3") == std::string::npos) {
-    std::printf(
-        "[ system ] the test account's programs do not run with its limited token (elevation "
-        "type 3), so UAC would not elevate them\n");
+  if (first.find(expected) == std::string::npos) {
+    std::printf("[ system ] %s\n", otherwise);
     return false;
   }
   return true;
 }
 
-// Makes the test account, checks that it is what the tests need, runs the tests as it, and
-// removes it again however they end (TestAccount's destructor).
+// Makes the standard account and checks that it is what its tests need: a standard user's token
+// (TestAccount::Create checks it), with which its programs start and may use this session's named
+// objects. nullptr, with a line that says why, otherwise (what was made is removed again).
+std::unique_ptr<TestAccount> MakeTheStandardAccount() {
+  std::string error;
+  std::unique_ptr<TestAccount> standard = TestAccount::Create(TestAccount::Kind::kStandard, &error);
+  if (!standard) {
+    std::printf("[ system ] the standard account could not be made: %s\n", error.c_str());
+    return nullptr;
+  }
+  std::printf(
+      "[ system ] the standard account: %s (%s), not a member of Administrators, with the token "
+      "of its interactive logon\n",
+      Text(standard->name()).c_str(), Text(standard->sid()).c_str());
+  std::printf("[ system ] standard account's %s\n",
+              Text(pdft::TokenFactsText(standard->tokenFacts())).c_str());
+  std::fflush(stdout);
+  if (const HRESULT named = standard->namedObjects(); FAILED(named)) {
+    std::printf(
+        "[ system ] the standard account is not used: it may not use this session's named "
+        "objects or make \"Global\\\" names, and that could not be granted to it (%s)\n",
+        Text(pdft::HResultText(named)).c_str());
+    return nullptr;
+  }
+  if (!CheckTheAccountsToken(*standard, "elevation type 1, elevated no",
+                             "the standard account's programs do not run with a standard "
+                             "user's token (elevation type 1, not elevated)")) {
+    std::printf("[ system ] the standard account is not used\n");
+    return nullptr;
+  }
+  return standard;
+}
+
+// Makes the test account, checks that it is what the tests need, makes the standard account,
+// runs the tests as them, and removes them again however they end (TestAccount's destructor).
 int RunAsTheTestAccount() {
   std::string error;
-  const std::unique_ptr<TestAccount> account = TestAccount::Create(&error);
+  const std::unique_ptr<TestAccount> account =
+      TestAccount::Create(TestAccount::Kind::kAdministrator, &error);
   if (!account) {
     std::printf("[ system ] the test account could not be made: %s\n", error.c_str());
     return 1;
@@ -95,7 +131,7 @@ int RunAsTheTestAccount() {
       "token of its interactive logon; the administrator: this process, elevated\n",
       Text(account->name()).c_str(), Text(account->sid()).c_str());
   std::printf("[ system ] test account's %s\n",
-              Text(pdft::TokenFactsText(account->limitedFacts())).c_str());
+              Text(pdft::TokenFactsText(account->tokenFacts())).c_str());
   std::printf("[ system ] its linked %s\n",
               Text(pdft::TokenFactsText(account->linkedFacts())).c_str());
   std::fflush(stdout);
@@ -108,7 +144,16 @@ int RunAsTheTestAccount() {
         Text(pdft::HResultText(named)).c_str());
     return 1;
   }
-  if (!CheckTheAccountsToken(*account)) return 1;
+  if (!CheckTheAccountsToken(*account, "elevation type 3",
+                             "the test account's programs do not run with its limited token "
+                             "(elevation type 3), so UAC would not elevate them")) {
+    return 1;
+  }
+  // Made after the test account, so it is removed before it.
+  const std::unique_ptr<TestAccount> standard = MakeTheStandardAccount();
+  SetCurrentStandardAccount(standard.get());
+  const auto forgetStandard = wil::scope_exit([] { SetCurrentStandardAccount(nullptr); });
+  std::fflush(stdout);
   return RUN_ALL_TESTS();
 }
 

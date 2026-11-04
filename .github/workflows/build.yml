@@ -10,8 +10,8 @@
 #   system-x64        informational, never blocks: the x64 system tests (ctest label "system")
 #                     from the x64 test bundle against the staged runtime artifact: the real
 #                     install for all users through UAC, the commands that use it, 1.1's state
-#                     replaced, the uninstall, and nothing left (not on pull requests, unless
-#                     called)
+#                     replaced, the uninstall, and nothing left; the task tests and --setup-user
+#                     as a standard account (not on pull requests, unless called)
 #
 # Repository variables (Settings > Secrets and variables > Actions > Variables), all optional:
 #   PDFT_WIN_X64_RUNNER  x64 runner label. Default windows-2025, which serves Visual Studio 2026
@@ -348,7 +348,8 @@ jobs:
   # on (EnableLUA=1) and ConsentPromptBehaviorAdmin=0, so the tests' unelevated commands (Medium
   # integrity, a standard user's token) have their administrator steps done through UAC without
   # a prompt. The program refuses to run without PDFT_SYSTEM_TESTS=1, unelevated, or where 1.x
-  # or 2.x is installed.
+  # or 2.x is installed. A standard account the tests make runs the bundle's integration tests'
+  # task tests, so the bundle's pdft_integration_tests is used here too.
   system-x64:
     needs: build
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || inputs.called) }}
@@ -408,7 +409,13 @@ jobs:
       # with the limited token of its interactive logon, so each administrator step must go
       # through UAC into its linked token; when it does not, the tests say so and stop. Its
       # programs run in the runner's session, whose named objects the tests let it use; when
-      # that cannot be granted, they say so and stop too.
+      # that cannot be granted, they say so and stop too. A second account, a standard user's
+      # (not in Administrators), must have had a standard user's token; the integration tests'
+      # task tests run as it must have come out as a standard user's (every TaskWriting test
+      # passed, but the one that needs a Windows session of the account's own, and every
+      # TaskFolderElevated test skipped as needing elevation) and left nothing behind, in Task
+      # Scheduler or of the product; and its own --setup-user after the install for all users
+      # must have put its check task into the protected task folder an administrator made.
       - name: Check that the system tests ran
         if: ${{ !cancelled() }}
         run: |
@@ -417,7 +424,10 @@ jobs:
           findstr /l /c:"[ system ] UAC did not elevate" "%LOG%" >nul && (echo ::error::UAC did not elevate the test account's administrator step on this runner; the [ system ] lines show the step's token& exit /b 1)
           findstr /l /c:"[ system ] test account's token: elevated no, elevation type 3 (limited)" "%LOG%" >nul || (echo ::error::The tests did not get a test account with a limited token: see the [ system ] lines& exit /b 1)
           findstr /l /c:"[ system ] the tests stop: the test account may not use this session's named objects" "%LOG%" >nul && (echo ::error::The test account could not be let into this session's named objects, so the app's commands could not make their lock as it; the [ system ] lines show the directory's permissions and which step was refused& exit /b 1)
-          findstr /l /c:"[ system ] this session's named objects: permissions put back no" "%LOG%" >nul && echo ::warning::The test account's entry could not be taken out of this session's named objects' permissions again; the [ system ] lines show why
+          findstr /l /c:"[ system ] standard account's token: elevated no, elevation type 1 (default)" "%LOG%" >nul || (echo ::error::The tests did not get a standard account with a standard user's token: see the [ system ] lines& exit /b 1)
+          findstr /l /c:"[ system ] task tests as the standard account as expected: yes" "%LOG%" >nul || (echo ::error::The task tests did not come out as a standard user's when run as the standard account, or left something behind; the [ system ] lines say what& exit /b 1)
+          findstr /l /c:"[ system ] the standard account's --setup-user put its check task in the protected task folder: yes" "%LOG%" >nul || (echo ::error::A standard user's --setup-user did not put its check task in the protected task folder the install made& exit /b 1)
+          findstr /l /c:"[ system ] this session's named objects: permissions put back no" "%LOG%" >nul && echo ::warning::A test account's entry could not be taken out of this session's named objects' permissions again; the [ system ] lines show why
           findstr /l /c:"[ system ] nothing left" "%LOG%" >nul || (echo ::error::The system tests did not run to the end& exit /b 1)
           findstr /l /c:"[ system ] machine-install reported through the asking process's pipe: yes" "%LOG%" >nul || (echo ::error::The elevated step's report did not come back through the asking process's pipe& exit /b 1)
           findstr /l /c:"[ system ] machine-install got administrator rights through UAC: yes" "%LOG%" >nul || (echo ::error::The step for all users did not get administrator rights through UAC& exit /b 1)

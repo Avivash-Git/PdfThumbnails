@@ -56,7 +56,7 @@ struct UserPlaces {
 };
 
 // The users whose state the tests look at: this process's own account (nothing may ever turn up
-// there), and the test account once there is one.
+// there), and the test account and the standard account once they are there.
 std::vector<UserPlaces> TestedUsers();
 
 // Everything of 1.x or 2.x found on this PC, one line each: the classes, .pdf slots that name the
@@ -79,6 +79,13 @@ void ForceClean();
 
 // Whether the Task Scheduler folder |folder| exists; std::nullopt when that cannot be told.
 std::optional<bool> TaskFolderExists(std::wstring_view folder);
+
+// Removes what the integration tests' task tests left in Task Scheduler: the folders and the
+// root-folder tasks whose names start with "<product>-Test" (theirs: \<product>-Test-<pid>-<GUID>
+// and \<product>-Test check <pid>-<GUID> ...), a folder with everything in it. One line for each
+// ("task folder \<name>: removed", or "left" when it is still there); empty when nothing was
+// left. A line saying so when Task Scheduler cannot be read.
+std::vector<std::string> RemoveTaskTestLeftovers();
 
 struct Outcome {
   HRESULT hr = E_FAIL;  // starting the program and waiting for it

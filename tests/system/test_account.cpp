@@ -34,6 +34,13 @@ namespace {
 using std::filesystem::path;
 
 TestAccount* g_current = nullptr;
+TestAccount* g_standard = nullptr;
+
+// The accounts this process made and has not deleted yet: never removed as an earlier run's.
+std::vector<std::wstring>& OwnAccounts() {
+  static std::vector<std::wstring> names;
+  return names;
+}
 
 // What a program run as the account may do with this process's window station and desktop:
 // enough to load user32 and show a (hidden) console.
@@ -161,8 +168,8 @@ void EndProcessesOf(PSID sid) noexcept {
 
 // Deletes the profile of the account |sid| (its folder and its ProfileList entry), trying again
 // for a while: Windows may hold its files a moment after it was unloaded. "yes", "none" when
-// it had no profile, else "no" (and a line that says why).
-const char* DeleteProfileOf(const std::wstring& sid) noexcept {
+// it had no profile, else "no" (and a line about |who| that says why).
+const char* DeleteProfileOf(const std::wstring& sid, const char* who) noexcept {
   DWORD lastError = ERROR_SUCCESS;
   for (int attempt = 0; attempt < 10; ++attempt) {
     if (attempt > 0) Sleep(1000);
@@ -170,13 +177,20 @@ const char* DeleteProfileOf(const std::wstring& sid) noexcept {
     lastError = GetLastError();
     if (lastError == ERROR_FILE_NOT_FOUND || lastError == ERROR_PATH_NOT_FOUND) return "none";
   }
-  std::printf("[ system ] test account: DeleteProfileW failed: %lu\n", lastError);
+  std::printf("[ system ] %s: DeleteProfileW failed: %lu\n", who, lastError);
   return "no";
+}
+
+bool IsOwnAccount(std::wstring_view name) {
+  for (const std::wstring& own : OwnAccounts()) {
+    if (IEquals(own, name)) return true;
+  }
+  return false;
 }
 
 // Removes the test accounts that earlier runs made and could not delete (they were ended from
 // outside: a timeout, a cancelled job), with their profiles: IsTestAccount's name and comment,
-// nothing else.
+// nothing else, and none that this process made and still has.
 void RemoveEarlierTestAccounts() {
   std::vector<std::wstring> names;
   DWORD resume = 0;
@@ -192,7 +206,8 @@ void RemoveEarlierTestAccounts() {
       for (DWORD i = 0; i < read; ++i) {
         if (users[i].usri1_name &&
             IsTestAccount(users[i].usri1_name,
-                          users[i].usri1_comment ? users[i].usri1_comment : L"")) {
+                          users[i].usri1_comment ? users[i].usri1_comment : L"") &&
+            !IsOwnAccount(users[i].usri1_name)) {
           names.emplace_back(users[i].usri1_name);
         }
       }
@@ -216,7 +231,8 @@ void RemoveEarlierTestAccounts() {
     }
     if (buffer) NetApiBufferFree(buffer);
     const NET_API_STATUS deleted = NetUserDel(nullptr, name.c_str());
-    const char* profile = sid.empty() ? "unknown (no SID)" : DeleteProfileOf(sid);
+    const char* profile =
+        sid.empty() ? "unknown (no SID)" : DeleteProfileOf(sid, "an earlier run's test account");
     std::printf(
         "[ system ] an earlier run's test account %ls (%ls) removed: account deleted %s, "
         "profile deleted %s\n",
@@ -503,17 +519,20 @@ std::vector<BYTE> LogonSidOf(HANDLE token) {
 
 // The SIDs that the lines about permissions name by what they are.
 struct KnownSids {
-  PSID account = nullptr;       // the test account
-  PSID accountLogon = nullptr;  // its logon session (the one of its interactive logon)
-  PSID ownLogon = nullptr;      // this process's logon session
+  const char* noun = "test account";  // what the lines call the account (TestAccount::noun)
+  PSID account = nullptr;             // the account
+  PSID accountLogon = nullptr;        // its logon session (the one of its interactive logon)
+  PSID ownLogon = nullptr;            // this process's logon session
 };
 
-// |sid| for the log: the test account's SIDs and this process's logon session by what they are,
-// a well-known SID (IsWellKnownKind) as it is, and any other only by its kind. No SID of the
+// |sid| for the log: the account's SIDs and this process's logon session by what they are, a
+// well-known SID (IsWellKnownKind) as it is, and any other only by its kind. No SID of the
 // runner's own accounts, nor of anyone else, is printed.
 std::string SidForLog(PSID sid, const KnownSids& known) {
-  if (known.account && EqualSid(sid, known.account)) return "the test account";
-  if (known.accountLogon && EqualSid(sid, known.accountLogon)) return "the test account's logon";
+  if (known.account && EqualSid(sid, known.account)) return std::string("the ") + known.noun;
+  if (known.accountLogon && EqualSid(sid, known.accountLogon)) {
+    return std::string("the ") + known.noun + "'s logon";
+  }
   if (known.ownLogon && EqualSid(sid, known.ownLogon)) return "this process's logon";
   if (IsNtSidOf(sid, SECURITY_LOGON_IDS_RID)) return "another logon";
   if (IsNtSidOf(sid, SECURITY_NT_NON_UNIQUE)) return "an account of this PC or its domain";
@@ -574,6 +593,10 @@ TestAccount* CurrentTestAccount() noexcept { return g_current; }
 
 void SetCurrentTestAccount(TestAccount* account) noexcept { g_current = account; }
 
+TestAccount* CurrentStandardAccount() noexcept { return g_standard; }
+
+void SetCurrentStandardAccount(TestAccount* account) noexcept { g_standard = account; }
+
 std::optional<std::string> WhyNoTestAccountHere() {
   AccountGuard guard;
   guard.systemTests = EnvironmentValue(kEnableEnv);
@@ -589,7 +612,7 @@ std::optional<std::string> WhyNoTestAccountHere() {
   return WhyNoTestAccount(guard);
 }
 
-std::unique_ptr<TestAccount> TestAccount::Create(std::string* error) {
+std::unique_ptr<TestAccount> TestAccount::Create(Kind kind, std::string* error) {
   error->clear();
   // Asked again right before anything is made, whatever the caller checked.
   if (const std::optional<std::string> why = WhyNoTestAccountHere()) {
@@ -598,6 +621,7 @@ std::unique_ptr<TestAccount> TestAccount::Create(std::string* error) {
   }
   RemoveEarlierTestAccounts();
   std::unique_ptr<TestAccount> account(new TestAccount());
+  account->kind_ = kind;
 
   // A random name that no account has.
   NET_API_STATUS lookup = NERR_Success;
@@ -657,6 +681,7 @@ std::unique_ptr<TestAccount> TestAccount::Create(std::string* error) {
     return nullptr;
   }
   account->created_ = true;
+  OwnAccounts().push_back(account->name_);
   const HRESULT made = account->LogOnAndLoad(&password, error);
   Wipe(&password);  // already wiped once it was used; this covers a failure before that
   if (FAILED(made)) return nullptr;  // the destructor removes what was made
@@ -689,22 +714,25 @@ HRESULT TestAccount::LogOnAndLoad(std::wstring* password, std::string* error) {
   }
   sid_ = sidText.get();
 
-  // A member of Administrators, by the group's well-known SID (its name depends on the language).
-  std::wstring group;
-  if (hr = AdministratorsGroupName(&group); FAILED(hr)) {
-    *error = Failed("looking up the Administrators group's name", hr);
-    return hr;
-  }
-  LOCALGROUP_MEMBERS_INFO_0 member = {sidBytes_.data()};
-  if (hr = NetResult(
-          NetLocalGroupAddMembers(nullptr, group.c_str(), 0, reinterpret_cast<LPBYTE>(&member), 1));
-      FAILED(hr)) {
-    *error = Failed("NetLocalGroupAddMembers (Administrators)", hr);
-    return hr;
+  // The test account: a member of Administrators, by the group's well-known SID (its name
+  // depends on the language). The standard account stays a member of Users alone.
+  if (kind_ == Kind::kAdministrator) {
+    std::wstring group;
+    if (hr = AdministratorsGroupName(&group); FAILED(hr)) {
+      *error = Failed("looking up the Administrators group's name", hr);
+      return hr;
+    }
+    LOCALGROUP_MEMBERS_INFO_0 member = {sidBytes_.data()};
+    if (hr = NetResult(NetLocalGroupAddMembers(nullptr, group.c_str(), 0,
+                                               reinterpret_cast<LPBYTE>(&member), 1));
+        FAILED(hr)) {
+      *error = Failed("NetLocalGroupAddMembers (Administrators)", hr);
+      return hr;
+    }
   }
 
   // Logged on as a person signs in. With UAC on, a member of Administrators gets its limited
-  // token from that, with the full one linked to it.
+  // token from that, with the full one linked to it; a standard user gets the only token it has.
   HANDLE token = nullptr;
   const BOOL loggedOn = LogonUserW(name_.c_str(), L".", password->c_str(),
                                    LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &token);
@@ -715,20 +743,29 @@ HRESULT TestAccount::LogOnAndLoad(std::wstring* password, std::string* error) {
     return hr;
   }
   token_.reset(token);
-  if (hr = ReadTokenFacts(token_.get(), &limited_); FAILED(hr)) {
+  if (hr = ReadTokenFacts(token_.get(), &facts_); FAILED(hr)) {
     *error = Failed("reading its token", hr);
     return hr;
   }
   TOKEN_LINKED_TOKEN linked = {};
   DWORD size = 0;
-  if (GetTokenInformation(token_.get(), TokenLinkedToken, &linked, sizeof(linked), &size)) {
+  if (kind_ == Kind::kAdministrator &&
+      GetTokenInformation(token_.get(), TokenLinkedToken, &linked, sizeof(linked), &size)) {
     const wil::unique_handle linkedToken(linked.LinkedToken);
     (void)ReadTokenFacts(linkedToken.get(), &linked_);
   }
-  if (limited_.elevationType != TokenElevationTypeLimited) {
-    *error = "its interactive logon gave this " + Text(TokenFactsText(limited_)) +
+  if (kind_ == Kind::kAdministrator && facts_.elevationType != TokenElevationTypeLimited) {
+    *error = "its interactive logon gave this " + Text(TokenFactsText(facts_)) +
              ", not a limited token (elevation type 3) with a full one linked to it: UAC "
              "could not elevate its programs";
+    return E_UNEXPECTED;
+  }
+  if (kind_ == Kind::kStandard &&
+      (facts_.elevated || facts_.elevationType != TokenElevationTypeDefault ||
+       facts_.administrators != TokenFacts::Group::kAbsent)) {
+    *error = "its interactive logon gave this " + Text(TokenFactsText(facts_)) +
+             ", not a standard user's token (not elevated, elevation type 1, without "
+             "Administrators)";
     return E_UNEXPECTED;
   }
 
@@ -817,7 +854,7 @@ void TestAccount::AllowDesktop() {
     if (!desktopGranted_) desktop_.reset();
   }
   std::printf(
-      "[ system ] the test account may use window station %s: %s; desktop %s: %s\n",
+      "[ system ] the %s may use window station %s: %s; desktop %s: %s\n", noun(),
       Text(stationName).c_str(), SUCCEEDED(station) ? "yes" : Text(HResultText(station)).c_str(),
       Text(desktopName).c_str(), SUCCEEDED(desktop) ? "yes" : Text(HResultText(desktop)).c_str());
 }
@@ -842,9 +879,9 @@ void TestAccount::AllowNamedObjects() {
   if (!ProcessIdToSessionId(GetCurrentProcessId(), &session)) {
     namedObjects_ = LastError();
     std::printf(
-        "[ system ] the test account may use the session's named objects: no (%s: this "
-        "process's session is unknown)\n",
-        Text(HResultText(namedObjects_)).c_str());
+        "[ system ] the %s may use the session's named objects: no (%s: this process's session "
+        "is unknown)\n",
+        noun(), Text(HResultText(namedObjects_)).c_str());
     return;
   }
   const std::wstring path = NamedObjectsDirectory(session);
@@ -853,7 +890,8 @@ void TestAccount::AllowNamedObjects() {
   if (wil::unique_handle own; OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, own.put())) {
     ownLogon = LogonSidOf(own.get());
   }
-  const KnownSids known = {sidBytes_.data(), accountLogon.empty() ? nullptr : accountLogon.data(),
+  const KnownSids known = {noun(), sidBytes_.data(),
+                           accountLogon.empty() ? nullptr : accountLogon.data(),
                            ownLogon.empty() ? nullptr : ownLogon.data()};
 
   // Its permissions as they are, printed once, and what the account's programs get there now.
@@ -892,10 +930,10 @@ void TestAccount::AllowNamedObjects() {
         "; it may make objects in \\BaseNamedObjects (\"Global\\\" names): " + YesNo(global);
   }
   std::printf(
-      "[ system ] this session's named objects %s: %s; the test account may make objects there as "
-      "its programs do: %s (%s)%s\n",
-      Text(path).c_str(), permissions.c_str(), SUCCEEDED(before) ? "yes" : "no", how.c_str(),
-      globalText.c_str());
+      "[ system ] this session's named objects %s: %s; the %s may make objects there as its "
+      "programs do: %s (%s)%s\n",
+      Text(path).c_str(), permissions.c_str(), noun(), SUCCEEDED(before) ? "yes" : "no",
+      how.c_str(), globalText.c_str());
 
   HRESULT hr = before;
   if (FAILED(before) && session == 0) {
@@ -904,7 +942,7 @@ void TestAccount::AllowNamedObjects() {
                 Text(path).c_str());
   } else if (FAILED(before)) {
     const PSID grantee = byLogon ? known.accountLogon : sidBytes_.data();
-    std::printf("[ system ] granting the test account%s 0x%08lX on %s for this run\n",
+    std::printf("[ system ] granting the %s%s 0x%08lX on %s for this run\n", noun(),
                 byLogon ? "'s logon" : "", static_cast<unsigned long>(kNamedObjectRights),
                 Text(path).c_str());
     hr =
@@ -924,15 +962,15 @@ void TestAccount::AllowNamedObjects() {
       if (SUCCEEDED(hr)) hr = before;
       how = Text(HResultText(hr));
     }
-    std::printf("[ system ] the test account may make objects there as its programs do: %s (%s)\n",
+    std::printf("[ system ] the %s may make objects there as its programs do: %s (%s)\n", noun(),
                 SUCCEEDED(hr) ? "yes" : "no", how.c_str());
   }
-  std::printf("[ system ] the test account may use the session's named objects: %s\n",
+  std::printf("[ system ] the %s may use the session's named objects: %s\n", noun(),
               YesNo(hr).c_str());
   if (SUCCEEDED(hr) && FAILED(global)) {
     // The session's own sign-in may well be refused there too; the app's lock is a "Global\"
     // name, and nothing here grants that.
-    std::printf("[ system ] the test account may not make \"Global\\\" names (%s)\n",
+    std::printf("[ system ] the %s may not make \"Global\\\" names (%s)\n", noun(),
                 Text(HResultText(global)).c_str());
     hr = global;
   }
@@ -951,9 +989,9 @@ void TestAccount::RestoreNamedObjects() noexcept {
       entry = "was gone already";
     }
     std::printf(
-        "[ system ] this session's named objects: permissions put back %s (0x%08lX; the test "
-        "account's entry %s)\n",
-        SUCCEEDED(hr) ? "yes" : "no", static_cast<unsigned long>(hr), entry);
+        "[ system ] this session's named objects: permissions put back %s (0x%08lX; the %s's "
+        "entry %s)\n",
+        SUCCEEDED(hr) ? "yes" : "no", static_cast<unsigned long>(hr), noun(), entry);
     std::fflush(stdout);
   }
   namedObjectsGrantee_.clear();
@@ -966,6 +1004,7 @@ void TestAccount::EndItsProcesses() noexcept {
 
 TestAccount::~TestAccount() {
   if (g_current == this) g_current = nullptr;
+  if (g_standard == this) g_standard = nullptr;
   if (!created_) return;  // nothing was made
   EndItsProcesses();
   RestoreDesktop();
@@ -976,7 +1015,7 @@ TestAccount::~TestAccount() {
     const EnabledPrivileges hives({SE_BACKUP_NAME, SE_RESTORE_NAME});
     unloaded = UnloadUserProfile(token_.get(), profile_.hProfile) != FALSE;
     if (!unloaded) {
-      std::printf("[ system ] test account: unloading its profile failed: 0x%08lX\n",
+      std::printf("[ system ] %s: unloading its profile failed: 0x%08lX\n", noun(),
                   static_cast<unsigned long>(LastError()));
     }
     profileLoaded_ = false;
@@ -985,23 +1024,28 @@ TestAccount::~TestAccount() {
   const NET_API_STATUS status = NetUserDel(nullptr, name_.c_str());
   const bool deleted = status == NERR_Success;
   if (!deleted) {
-    std::printf("[ system ] test account: NetUserDel failed: 0x%08lX\n",
+    std::printf("[ system ] %s: NetUserDel failed: 0x%08lX\n", noun(),
                 static_cast<unsigned long>(NetResult(status)));
   }
+  std::erase_if(OwnAccounts(), [this](const std::wstring& own) { return own == name_; });
   // The profile goes after the account, whenever its SID is known: a LoadUserProfileW that
   // failed part of the way may have left its folder and its ProfileList entry.
-  const char* profileDeleted = sid_.empty() ? "unknown (no SID)" : DeleteProfileOf(sid_);
+  const char* profileDeleted = sid_.empty() ? "unknown (no SID)" : DeleteProfileOf(sid_, noun());
   std::printf(
-      "[ system ] test account %ls (%ls) removed: profile unloaded %s, account deleted %s, "
-      "profile deleted %s\n",
-      name_.c_str(), sid_.empty() ? L"no SID" : sid_.c_str(), unloaded ? "yes" : "no",
+      "[ system ] %s %ls (%ls) removed: profile unloaded %s, account deleted %s, profile "
+      "deleted %s\n",
+      noun(), name_.c_str(), sid_.empty() ? L"no SID" : sid_.c_str(), unloaded ? "yes" : "no",
       deleted ? "yes" : "no", profileDeleted);
   std::fflush(stdout);
 }
 
+const char* TestAccount::noun() const {
+  return kind_ == Kind::kStandard ? "standard account" : "test account";
+}
+
 UserPlaces TestAccount::Places() const {
   UserPlaces places;
-  places.who = "the test account";
+  places.who = std::string("the ") + noun();
   places.hive = hive();
   places.sid = sid_;
   places.userRoot = userRoot_;

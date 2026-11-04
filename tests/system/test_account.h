@@ -1,4 +1,4 @@
-// The user the system tests act as: a local account of their own, made for one run and deleted at
+// The users the system tests act as: local accounts of their own, made for one run and deleted at
 // its end, also after failures.
 //
 // A filtered copy of the runner's own token is not what a person signed in as an administrator
@@ -10,13 +10,19 @@
 // service) and, with ConsentPromptBehaviorAdmin=0, elevates into the linked token without a
 // prompt.
 //
-// It is made only where WhyNoTestAccount (account_rules.h) allows it, which needs, besides
+// The standard account is a second one, made and logged on the same way but never added to
+// Administrators (NetUserAdd makes it a member of Users only): its token is not elevated and has
+// no linked token (elevation type 1), as a person's who signs in to a standard account. The task
+// tests run as it, and so does a standard user's own --setup-user (system_test.cpp).
+//
+// They are made only where WhyNoTestAccount (account_rules.h) allows it, which needs, besides
 // PDFT_SYSTEM_TESTS=1, GITHUB_ACTIONS=true with RUNNER_ENVIRONMENT=github-hosted or
-// PDFT_SYSTEM_TESTS_THROWAWAY_VM=1: never on a PC someone uses. Its password is made in memory,
+// PDFT_SYSTEM_TESTS_THROWAWAY_VM=1: never on a PC someone uses. Each password is made in memory,
 // handed to NetUserAdd and LogonUserW only, and wiped once the account is logged on; it is never
-// printed or written anywhere. The privileges this needs (backup and restore for its hive, debug
-// to end its programs) are enabled only while they are used, so the installer's commands the
-// tests run with this process's token have them as a real installer has them: disabled.
+// printed or written anywhere. The privileges this needs (backup and restore for a hive, debug
+// to end an account's programs) are enabled only while they are used, so the installer's
+// commands the tests run with this process's token have them as a real installer has them:
+// disabled.
 
 #pragma once
 
@@ -38,6 +44,9 @@ namespace pdft::systest {
 
 class TestAccount {
  public:
+  // The test account (an ordinary member of Administrators), or the standard account.
+  enum class Kind { kAdministrator, kStandard };
+
   TestAccount(const TestAccount&) = delete;
   TestAccount& operator=(const TestAccount&) = delete;
   // Ends what still runs as the account, takes its entries out of the permissions of the window
@@ -47,21 +56,26 @@ class TestAccount {
   ~TestAccount();
 
   // Makes the account where WhyNoTestAccountHere allows it, after removing the test accounts
-  // earlier runs could not delete (IsTestAccount, with their profiles): a random name, a random
-  // password, a
-  // member of Administrators (the group named by its well-known SID), logged on interactively
+  // earlier runs could not delete (IsTestAccount, with their profiles; never one this process
+  // made and still has): a random name, a random password, for kAdministrator a member of
+  // Administrators (the group named by its well-known SID), logged on interactively
   // (LogonUserW), its profile loaded (LoadUserProfileW) and its environment built
   // (CreateEnvironmentBlock); lets it use this process's window station and desktop, and this
   // session's named objects (namedObjects()). nullptr with |error| set when a step failed (never
-  // with the password); what was made by then is removed again.
-  static std::unique_ptr<TestAccount> Create(std::string* error);
+  // with the password), also when its token is not what |kind| needs; what was made by then is
+  // removed again.
+  static std::unique_ptr<TestAccount> Create(Kind kind, std::string* error);
 
+  Kind kind() const { return kind_; }
+  // How the lines about it name it: "test account" or "standard account".
+  const char* noun() const;
   const std::wstring& name() const { return name_; }
   const std::wstring& sid() const { return sid_; }
-  // The token of its interactive logon: the limited one.
+  // The token of its interactive logon (for a member of Administrators, the limited one).
   HANDLE token() const { return token_.get(); }
-  // The facts of that token and of its linked (full) token.
-  const TokenFacts& limitedFacts() const { return limited_; }
+  // The facts of that token and of its linked (full) token; a standard account's token has no
+  // linked token, and its linked facts are the defaults.
+  const TokenFacts& tokenFacts() const { return facts_; }
   const TokenFacts& linkedFacts() const { return linked_; }
   // Its HKEY_CURRENT_USER: the hive LoadUserProfileW loaded (HKEY_USERS\<SID>).
   HKEY hive() const { return static_cast<HKEY>(profile_.hProfile); }
@@ -79,7 +93,7 @@ class TestAccount {
   // Its hive, SID and the product's per-user install and data folders in its profile.
   UserPlaces Places() const;
 
-  // Runs |exe| with |arguments| (already quoted) as the account, with its limited token, its
+  // Runs |exe| with |arguments| (already quoted) as the account, with token(), its
   // environment and its profile folder as the working folder (CreateProcessWithTokenW), standard
   // output and error each into a pipe, standard input from the null device, a hidden console of
   // its own; ended after |timeoutMs| (hr is then HRESULT_FROM_WIN32(ERROR_TIMEOUT)).
@@ -97,12 +111,13 @@ class TestAccount {
   void RestoreNamedObjects() noexcept;
   void EndItsProcesses() noexcept;
 
+  Kind kind_ = Kind::kAdministrator;
   std::wstring name_;
   std::wstring sid_;
   std::vector<BYTE> sidBytes_;
   bool created_ = false;
   wil::unique_handle token_;
-  TokenFacts limited_;
+  TokenFacts facts_;
   TokenFacts linked_;
   PROFILEINFOW profile_ = {};
   bool profileLoaded_ = false;
@@ -129,7 +144,12 @@ class TestAccount {
 TestAccount* CurrentTestAccount() noexcept;
 void SetCurrentTestAccount(TestAccount* account) noexcept;
 
-// Why the test account must not be made in this process: WhyNoTestAccount with this process's
+// The standard account of this run (main.cpp sets it for the time the tests run); nullptr when
+// there is none (a "[ system ] the standard account" line says why).
+TestAccount* CurrentStandardAccount() noexcept;
+void SetCurrentStandardAccount(TestAccount* account) noexcept;
+
+// Why the test accounts must not be made in this process: WhyNoTestAccount with this process's
 // facts (the environment, its token, the registry check, Leftovers()). Call after COM is set up.
 std::optional<std::string> WhyNoTestAccountHere();
 

@@ -8,6 +8,7 @@
 
 #include <cstdio>
 #include <cwchar>
+#include <memory>
 #include <utility>
 
 #include "account_rules.h"
@@ -50,6 +51,84 @@ std::vector<std::pair<std::string, path>> UserFolders(const UserPlaces& user) {
     folders.emplace_back("the per-user folder of " + user.who, user.userRoot);
   if (!user.dataDir.empty()) folders.emplace_back("the data folder of " + user.who, user.dataDir);
   return folders;
+}
+
+HRESULT ConnectTaskService(wil::com_ptr_nothrow<ITaskService>* service) {
+  HRESULT hr = CoCreateInstance(__uuidof(TaskScheduler), nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(service->put()));
+  VARIANT empty;
+  VariantInit(&empty);
+  if (SUCCEEDED(hr)) hr = (*service)->Connect(empty, empty, empty, empty);
+  return hr;
+}
+
+HRESULT GetTaskFolder(ITaskService* service, std::wstring_view path,
+                      wil::com_ptr_nothrow<ITaskFolder>* folder) {
+  const wil::unique_bstr name = wil::make_bstr_nothrow(std::wstring(path).c_str());
+  if (!name) return E_OUTOFMEMORY;
+  return service->GetFolder(name.get(), folder->put());
+}
+
+// The names of the tasks (|tasks|, hidden ones too) or of the subfolders in |folder|; what cannot
+// be read is left out.
+std::vector<std::wstring> NamesIn(ITaskFolder* folder, bool tasks) {
+  std::vector<std::wstring> names;
+  const auto add = [&names](const wil::unique_bstr& name) {
+    if (name) names.emplace_back(name.get(), SysStringLen(name.get()));
+  };
+  LONG count = 0;
+  if (tasks) {
+    wil::com_ptr_nothrow<IRegisteredTaskCollection> all;
+    if (FAILED(folder->GetTasks(TASK_ENUM_HIDDEN, all.put())) || FAILED(all->get_Count(&count))) {
+      return names;
+    }
+    for (LONG index = 1; index <= count; ++index) {
+      VARIANT item;
+      VariantInit(&item);
+      item.vt = VT_I4;
+      item.lVal = index;
+      wil::com_ptr_nothrow<IRegisteredTask> task;
+      wil::unique_bstr name;
+      if (SUCCEEDED(all->get_Item(item, task.put())) && SUCCEEDED(task->get_Name(name.put()))) {
+        add(name);
+      }
+    }
+    return names;
+  }
+  wil::com_ptr_nothrow<ITaskFolderCollection> all;
+  if (FAILED(folder->GetFolders(0, all.put())) || FAILED(all->get_Count(&count))) return names;
+  for (LONG index = 1; index <= count; ++index) {
+    VARIANT item;
+    VariantInit(&item);
+    item.vt = VT_I4;
+    item.lVal = index;
+    wil::com_ptr_nothrow<ITaskFolder> subfolder;
+    wil::unique_bstr name;
+    if (SUCCEEDED(all->get_Item(item, subfolder.put())) &&
+        SUCCEEDED(subfolder->get_Name(name.put()))) {
+      add(name);
+    }
+  }
+  return names;
+}
+
+// Deletes the task folder |path| with its tasks and subfolders, as far as this process may (best
+// effort; a few levels deep at most).
+void RemoveTaskFolderTree(ITaskService* service, const std::wstring& path, int depth) {
+  wil::com_ptr_nothrow<ITaskFolder> folder;
+  if (depth > 4 || FAILED(GetTaskFolder(service, path, std::addressof(folder)))) return;
+  for (const std::wstring& name : NamesIn(folder.get(), true)) {
+    if (const wil::unique_bstr text = wil::make_bstr_nothrow(name.c_str())) {
+      folder->DeleteTask(text.get(), 0);
+    }
+  }
+  for (const std::wstring& name : NamesIn(folder.get(), false)) {
+    RemoveTaskFolderTree(service, path + L"\\" + name, depth + 1);
+  }
+  wil::com_ptr_nothrow<ITaskFolder> root;
+  const wil::unique_bstr text = wil::make_bstr_nothrow(path.c_str());
+  if (text && SUCCEEDED(GetTaskFolder(service, L"\\", std::addressof(root))))
+    root->DeleteFolder(text.get(), 0);
 }
 
 Outcome ToOutcome(const test::CapturedRun& captured) {
@@ -151,23 +230,46 @@ std::vector<UserPlaces> TestedUsers() {
   (void)GetDataDir(&self.dataDir);
   users.push_back(std::move(self));
   if (const TestAccount* account = CurrentTestAccount()) users.push_back(account->Places());
+  if (const TestAccount* standard = CurrentStandardAccount()) users.push_back(standard->Places());
   return users;
 }
 
 std::optional<bool> TaskFolderExists(std::wstring_view folder) {
   wil::com_ptr_nothrow<ITaskService> service;
-  HRESULT hr = CoCreateInstance(__uuidof(TaskScheduler), nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(service.put()));
-  VARIANT empty;
-  VariantInit(&empty);
-  if (SUCCEEDED(hr)) hr = service->Connect(empty, empty, empty, empty);
-  const wil::unique_bstr name = wil::make_bstr_nothrow(std::wstring(folder).c_str());
-  if (SUCCEEDED(hr) && !name) hr = E_OUTOFMEMORY;
+  HRESULT hr = ConnectTaskService(std::addressof(service));
   wil::com_ptr_nothrow<ITaskFolder> found;
-  if (SUCCEEDED(hr)) hr = service->GetFolder(name.get(), found.put());
+  if (SUCCEEDED(hr)) hr = GetTaskFolder(service.get(), folder, std::addressof(found));
   if (SUCCEEDED(hr)) return true;
   if (IsTaskNotFound(hr)) return false;
   return std::nullopt;
+}
+
+std::vector<std::string> RemoveTaskTestLeftovers() {
+  std::vector<std::string> lines;
+  wil::com_ptr_nothrow<ITaskService> service;
+  wil::com_ptr_nothrow<ITaskFolder> root;
+  HRESULT hr = ConnectTaskService(std::addressof(service));
+  if (SUCCEEDED(hr)) hr = GetTaskFolder(service.get(), L"\\", std::addressof(root));
+  if (FAILED(hr)) {
+    lines.push_back("Task Scheduler's root folder cannot be read: " + Text(HResultText(hr)));
+    return lines;
+  }
+  const std::wstring start = std::wstring(kProductName) + L"-Test";
+  for (const std::wstring& name : NamesIn(root.get(), false)) {
+    if (!IStartsWith(name, start)) continue;
+    RemoveTaskFolderTree(service.get(), L"\\" + name, 0);
+    wil::com_ptr_nothrow<ITaskFolder> still;
+    const bool gone =
+        IsTaskNotFound(GetTaskFolder(service.get(), L"\\" + name, std::addressof(still)));
+    lines.push_back("task folder \\" + Text(name) + (gone ? ": removed" : ": left"));
+  }
+  for (const std::wstring& name : NamesIn(root.get(), true)) {
+    if (!IStartsWith(name, start)) continue;
+    const wil::unique_bstr text = wil::make_bstr_nothrow(name.c_str());
+    const bool gone = text && SUCCEEDED(root->DeleteTask(text.get(), 0));
+    lines.push_back("task \\" + Text(name) + (gone ? ": removed" : ": left"));
+  }
+  return lines;
 }
 
 std::vector<std::string> Leftovers() {

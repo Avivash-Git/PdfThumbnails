@@ -45,6 +45,35 @@ bool HoldsTheName(std::wstring_view password, std::wstring_view accountName) noe
   return false;
 }
 
+// The test name after |tag| at the start of |line| (up to the first space: an end line goes on
+// with its time); std::nullopt when the line does not start with |tag|.
+std::optional<std::string_view> NameAfter(std::string_view line, std::string_view tag) {
+  if (!line.starts_with(tag)) return std::nullopt;
+  line.remove_prefix(tag.size());
+  return line.substr(0, line.find(' '));
+}
+
+std::string ResultText(const GTestCase& test) {
+  switch (test.result) {
+    case GTestCase::Result::kPassed:
+      return "passed";
+    case GTestCase::Result::kFailed:
+      return "failed";
+    case GTestCase::Result::kSkipped:
+      return "skipped (" + test.skipReason + ")";
+    case GTestCase::Result::kUnfinished:
+      break;
+  }
+  return "did not finish";
+}
+
+bool StartsWithOneOf(std::string_view text, std::span<const char* const> starts) {
+  for (const char* start : starts) {
+    if (text.starts_with(start)) return true;
+  }
+  return false;
+}
+
 }  // namespace
 
 std::optional<std::string> WhyNotAThrowawayPc(std::wstring_view systemTests,
@@ -62,8 +91,8 @@ std::optional<std::string> WhyNotAThrowawayPc(std::wstring_view systemTests,
         "neither GITHUB_ACTIONS=true with RUNNER_ENVIRONMENT=github-hosted (a runner GitHub "
         "hosts; a self-hosted runner may be a PC someone uses) nor "
         "PDFT_SYSTEM_TESTS_THROWAWAY_VM=1 (a throw-away virtual machine) says that this PC is "
-        "thrown away after the run, and the tests make and delete a local administrator account "
-        "on it");
+        "thrown away after the run, and the tests make and delete local accounts on it (an "
+        "administrator and a standard user)");
   }
   return std::nullopt;
 }
@@ -126,6 +155,89 @@ std::optional<std::wstring> PasswordFromRandom(std::span<const BYTE> random,
     return std::nullopt;
   }
   return std::optional<std::wstring>(std::move(password));  // moved: no copy left behind
+}
+
+std::vector<GTestCase> ReadGTestCases(std::string_view output) {
+  std::vector<GTestCase> cases;
+  bool reasonNext = false;
+  for (size_t start = 0; start < output.size();) {
+    size_t end = output.find('\n', start);
+    if (end == std::string_view::npos) end = output.size();
+    std::string_view line = output.substr(start, end - start);
+    start = end + 1;
+    if (line.ends_with('\r')) line.remove_suffix(1);
+    // The lists after this line name tests again, the end lines' way but without their time.
+    if (line.starts_with("[==========] ") && line.find(" ran.") != std::string_view::npos) break;
+    // Only a test that has not ended yet takes a result.
+    GTestCase* running = !cases.empty() && cases.back().result == GTestCase::Result::kUnfinished
+                             ? &cases.back()
+                             : nullptr;
+    if (reasonNext) {
+      reasonNext = false;
+      if (running && !line.starts_with('[')) {
+        running->skipReason = line;
+        continue;
+      }
+    }
+    if (const std::optional<std::string_view> name = NameAfter(line, "[ RUN      ] ")) {
+      cases.push_back(GTestCase{std::string(*name)});
+      continue;
+    }
+    if (line.ends_with(": Skipped")) {
+      reasonNext = true;
+      continue;
+    }
+    struct EndTag {
+      std::string_view tag;
+      GTestCase::Result result;
+    };
+    for (const EndTag& ending : {EndTag{"[       OK ] ", GTestCase::Result::kPassed},
+                                 EndTag{"[  FAILED  ] ", GTestCase::Result::kFailed},
+                                 EndTag{"[  SKIPPED ] ", GTestCase::Result::kSkipped}}) {
+      const std::optional<std::string_view> name = NameAfter(line, ending.tag);
+      if (name && running && running->name == *name) running->result = ending.result;
+    }
+  }
+  return cases;
+}
+
+std::vector<std::string> StandardAccountTaskTestProblems(const std::vector<GTestCase>& cases,
+                                                         DWORD exitCode) {
+  std::vector<std::string> problems;
+  if (exitCode != 0) problems.push_back("the test program exited " + std::to_string(exitCode));
+  bool writing = false;
+  bool folder = false;
+  for (const GTestCase& test : cases) {
+    if (test.name.starts_with("TaskWriting.")) {
+      writing = true;
+      if (test.result == GTestCase::Result::kPassed) continue;
+      if (test.result == GTestCase::Result::kSkipped && test.name == kSessionTaskTest &&
+          StartsWithOneOf(test.skipReason, kNoSessionSkips)) {
+        continue;
+      }
+      problems.push_back(test.name + " " + ResultText(test) +
+                         ": every TaskWriting test must pass for a standard user");
+    } else if (test.name.starts_with("TaskFolderElevated.")) {
+      folder = true;
+      if (test.result == GTestCase::Result::kSkipped &&
+          test.skipReason.starts_with(kNeedsElevationSkip)) {
+        continue;
+      }
+      problems.push_back(test.name + " " + ResultText(test) +
+                         ": the protected task folder's tests must skip for a standard user, who "
+                         "is not elevated");
+    } else {
+      problems.push_back(test.name + " ran, which the filter leaves out");
+    }
+  }
+  if (!writing) problems.push_back("no TaskWriting test ran");
+  if (!folder) problems.push_back("no TaskFolderElevated test ran");
+  for (const char* required : kStandardAccountRequiredTests) {
+    bool ran = false;
+    for (const GTestCase& test : cases) ran = ran || test.name == required;
+    if (!ran) problems.push_back(std::string(required) + " did not run");
+  }
+  return problems;
 }
 
 std::wstring_view PendingRenamePath(std::wstring_view entry) noexcept {
