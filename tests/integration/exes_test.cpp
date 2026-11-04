@@ -29,6 +29,7 @@
 #include "json_check.h"
 #include "medium_il.h"
 #include "project_config.h"
+#include "rebuild.h"
 #include "snapshot.h"
 #include "strings.h"
 #include "system_probes.h"
@@ -592,6 +593,120 @@ TEST_P(Exes, UninstallWithoutYesAndWithoutAConsoleIsAUsageError) {
   EXPECT_NE(run.err.find("--yes"), std::string::npos) << run.err;
   EXPECT_EQ(run.err.find("Cannot run here"), std::string::npos) << run.err;
   EXPECT_EQ(run.out, "");
+}
+
+// The value of the environment variable |name|; empty when it is not set or longer than 31.
+std::wstring EnvironmentValue(const wchar_t* name) {
+  wchar_t value[32] = {};
+  const DWORD length = GetEnvironmentVariableW(name, value, ARRAYSIZE(value));
+  return length > 0 && length < ARRAYSIZE(value) ? std::wstring(value, length) : std::wstring();
+}
+
+// A runner GitHub hosts, thrown away after the job. GITHUB_ACTIONS=true alone is not enough: it is
+// also set on a self-hosted runner, which may be a PC someone uses, and by tools that run a
+// workflow locally.
+bool OnGitHubHostedRunner() {
+  return EnvironmentValue(L"GITHUB_ACTIONS") == L"true" &&
+         EnvironmentValue(L"RUNNER_ENVIRONMENT") == L"github-hosted";
+}
+
+// Why the elevated --refresh tests must not start the executable here, or nothing when they may.
+// Elevated, only the rebuild's own elevation refusal, the code under test, would keep a run from
+// ending File Explorer and deleting the thumbnail cache, so they run only where both are thrown
+// away after the job: elevated with the real registry on a runner GitHub hosts.
+std::optional<std::string> WhyAnElevatedRefreshMayNotRunHere(const ProcessContext& context) {
+  if (!context.elevated) return "not elevated here (CI runs elevated)";
+  if (context.virtualization != Virtualization::kNo) {
+    return "elevated, but the registry may be virtualized here, so it is not certain which "
+           "refusal answers first";
+  }
+  if (!OnGitHubHostedRunner()) {
+    return "elevated, but not on a runner GitHub hosts (GITHUB_ACTIONS=true with "
+           "RUNNER_ENVIRONMENT=github-hosted): only the refusal under test would keep this PC's "
+           "File Explorer and thumbnail cache from a real rebuild";
+  }
+  return std::nullopt;
+}
+
+// Why --refresh must not be started here, or nothing when it may be. A real rebuild would end
+// File Explorer and delete the thumbnail cache, so it is started only where it must be refused
+// before it reads anything: where the virtualization guard refuses every writing command
+// (WhyAWritingCommandMayNotRunHere), and elevated with the real registry on a runner GitHub hosts
+// (WhyAnElevatedRefreshMayNotRunHere), where the rebuild refuses an administrator process. That
+// holds for its usage errors too, so a parser that let one through could still change nothing.
+std::optional<std::string> WhyARefreshMayNotRunHere() {
+  const std::optional<std::string> why = WhyAWritingCommandMayNotRunHere(nullptr);
+  if (!why) return std::nullopt;
+  ProcessContext context;
+  if (FAILED(GetProcessContext(ContextProbe::kWrite, &context))) {
+    return "the process context could not be read";
+  }
+  const std::optional<std::string> whyElevated = WhyAnElevatedRefreshMayNotRunHere(context);
+  if (!whyElevated) return std::nullopt;
+  return *why + "; " + *whyElevated;
+}
+
+// --refresh --full writes, so where the virtualization guard refuses writing commands it stops
+// there (exit 8) before it reads anything or asks.
+TEST_P(Exes, RefreshFullIsRefusedWhereWritesAreSwallowed) {
+  std::wstring ancestor;
+  if (const std::optional<std::string> why = WhyAWritingCommandMayNotRunHere(&ancestor)) {
+    GTEST_SKIP() << *why;
+  }
+  test::CapturedRun run;
+  RUN_OR_SKIP(L"--refresh --full --yes", run);
+  std::printf("%ls --refresh --full --yes -> exit %lu: %s", GetParam(), run.exitCode,
+              run.err.c_str());
+  EXPECT_EQ(run.exitCode, 8u);
+  EXPECT_EQ(run.err.rfind("Cannot run here: ", 0), 0u) << run.err;
+  EXPECT_NE(run.err.find(WideToUtf8Lossy(ancestor)), std::string::npos) << run.err;
+  EXPECT_EQ(run.out, "");
+}
+
+// Elevated with the real registry on a runner GitHub hosts (CI), --refresh --full stops at the
+// rebuild's elevation refusal (exit 8) before it reads anything or asks: File Explorer must not
+// run as administrator, and an elevated process may not end the user's.
+TEST_P(Exes, RefreshFullIsRefusedElevated) {
+  ProcessContext context;
+  ASSERT_HRESULT_SUCCEEDED(GetProcessContext(ContextProbe::kWrite, &context));
+  if (const std::optional<std::string> why = WhyAnElevatedRefreshMayNotRunHere(context)) {
+    GTEST_SKIP() << *why;
+  }
+  test::CapturedRun run;
+  RUN_OR_SKIP(L"--refresh --full --yes", run);
+  std::printf("%ls --refresh --full --yes (elevated) -> exit %lu: %s", GetParam(), run.exitCode,
+              run.err.c_str());
+  EXPECT_EQ(run.exitCode, 8u);
+  EXPECT_EQ(run.err.rfind(
+                WideToUtf8Lossy(RefreshFullRefusalMessage(RebuildRefusal::kElevated, context)), 0),
+            0u)
+      << run.err;
+  EXPECT_EQ(run.out, "");
+}
+
+// --refresh --full restarts File Explorer: without --yes and without a console to ask on it is a
+// usage error before anything is read, and so are --folder with --full and --yes without --full.
+// Started only where the command would be refused anyway (WhyARefreshMayNotRunHere).
+TEST_P(Exes, RefreshUsageErrors) {
+  if (const std::optional<std::string> why = WhyARefreshMayNotRunHere()) {
+    GTEST_SKIP() << *why;
+  }
+  struct Case {
+    const wchar_t* arguments;
+    const char* says;
+  };
+  for (const Case& c : {Case{L"--refresh --full", "needs --yes when there is no console"},
+                        Case{L"--refresh --folder x --full", "--folder and --full cannot be"},
+                        Case{L"--refresh --yes", "--yes goes with --full"}}) {
+    test::CapturedRun run;
+    RUN_OR_SKIP(c.arguments, run);
+    std::printf("%ls %ls -> exit %lu: %s", GetParam(), c.arguments, run.exitCode, run.err.c_str());
+    EXPECT_EQ(run.exitCode, 2u) << WideToUtf8Lossy(c.arguments);
+    EXPECT_NE(run.err.find(c.says), std::string::npos) << run.err;
+    EXPECT_NE(run.err.find("Run --help"), std::string::npos) << run.err;
+    EXPECT_EQ(run.err.find("Cannot run here"), std::string::npos) << run.err;
+    EXPECT_EQ(run.out, "");
+  }
 }
 
 // Options that do not fit are usage errors before anything is read, anywhere.

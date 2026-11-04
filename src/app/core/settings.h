@@ -2,7 +2,9 @@
 // RegistryRoots, so tests use a private key):
 //
 //   Zoom                 REG_DWORD  thumbnail zoom in percent; the handler reads it too
-//   ConfirmFullRefresh   REG_DWORD  0 = rebuild the thumbnail cache without asking (default 1)
+//   ConfirmFullRefresh   REG_DWORD  0 = the settings window rebuilds the thumbnail cache without
+//                                   asking (its "Don't ask again"; the command line uses --yes)
+//                                   (default 1)
 //   State\LastCheckTime        REG_QWORD  FILETIME (UTC) of the last recorded check
 //        \LastCheckResult      REG_DWORD  its exit code
 //        \LastCheckSummary     REG_SZ     one line saying what it found or did

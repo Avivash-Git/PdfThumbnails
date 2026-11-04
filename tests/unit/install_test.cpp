@@ -3,7 +3,7 @@
 // code (a step without administrator rights, or refused below an app package, included), the class
 // path the elevated side may write for all users, the user hives it cleans, the per-user files the
 // uninstall removes, the trash folders the status reports, and the texts of --install, --uninstall,
-// --uninstall-cleanup and --zoom.
+// --uninstall-cleanup, --zoom and --refresh --full.
 
 #include <windows.h>
 
@@ -16,8 +16,10 @@
 #include <vector>
 
 #include "commands.h"
+#include "context.h"
 #include "file_ops.h"
 #include "project_config.h"
+#include "rebuild.h"
 #include "registration.h"
 #include "snapshot_fixtures.h"
 #include "strings.h"
@@ -299,7 +301,8 @@ TEST(UninstallTexts, Report) {
   result.machineLeft = true;
   lines = UninstallReport(result);
   ASSERT_EQ(lines.size(), 3u);
-  EXPECT_EQ(lines[0].rfind(L"--rebuild-thumbnails: this build cannot", 0), 0u) << lines[0];
+  EXPECT_EQ(lines[0].rfind(L"--rebuild-thumbnails: this build does not", 0), 0u) << lines[0];
+  EXPECT_NE(lines[0].find(L"--refresh --full"), std::wstring::npos) << lines[0];
   EXPECT_NE(lines[1].find(L"declined"), std::wstring::npos);
   EXPECT_NE(lines[2].find(L"still installed"), std::wstring::npos);
 
@@ -491,9 +494,10 @@ TEST(ZoomTexts, OriginAndSaved) {
   EXPECT_EQ(ZoomText(decision), L"Zoom: 100 % (default)");
   const std::wstring saved = ZoomSavedText(150);
   EXPECT_EQ(saved.rfind(L"Zoom set to 150 %.", 0), 0u) << saved;
-  // The thumbnail refresh is not in this build: nothing may send the user to it.
-  EXPECT_EQ(saved.find(L"--refresh"), std::wstring::npos);
-  EXPECT_EQ(saved.find(L"--"), std::wstring::npos);
+  // The only refresh this build has is the full rebuild, and the text says what it costs.
+  EXPECT_NE(saved.find(L"run --refresh --full (restarts File Explorer)."), std::wstring::npos)
+      << saved;
+  EXPECT_EQ(saved.find(L"--folder"), std::wstring::npos) << saved;
 }
 
 TEST(UninstallTexts, NeedsYesWithoutAConsole) {
@@ -506,6 +510,55 @@ TEST(UninstallTexts, NeedsYesWithoutAConsole) {
   args.verb = Verb::kInstall;
   args.yes = false;
   EXPECT_FALSE(UninstallNeedsYes(args, false));
+}
+
+// Only the full rebuild asks; --refresh without --full has no question to answer.
+TEST(RefreshTexts, NeedsYesWithoutAConsole) {
+  CliArgs args;
+  args.verb = Verb::kRefresh;
+  args.full = true;
+  EXPECT_TRUE(RefreshNeedsYes(args, false));
+  EXPECT_FALSE(RefreshNeedsYes(args, true));
+  args.yes = true;
+  EXPECT_FALSE(RefreshNeedsYes(args, false));
+  args.yes = false;
+  args.full = false;
+  EXPECT_FALSE(RefreshNeedsYes(args, false));
+  args.folders = {L"C:\\a"};
+  EXPECT_FALSE(RefreshNeedsYes(args, false));
+  args.verb = Verb::kUninstall;
+  args.folders.clear();
+  args.full = true;
+  EXPECT_FALSE(RefreshNeedsYes(args, false));
+}
+
+// A registry that may be virtualized gets the line every writing command gives there; the
+// rebuild's own refusals get its texts; a stop before anything changed has no refusal line.
+TEST(RefreshTexts, Refusals) {
+  ProcessContext context;
+  context.userAccount = L"PC\\tester";
+  context.packagedAncestor = L"Example_1.0.0.0_x64__abcdefghijklm";
+  context.virtualization = Virtualization::kYes;
+  EXPECT_EQ(RefreshFullRefusalMessage(RebuildRefusal::kVirtualized, context),
+            CannotRunHereMessage(context));
+  EXPECT_NE(RefreshFullRefusalMessage(RebuildRefusal::kVirtualized, context)
+                .find(L"Example_1.0.0.0_x64__abcdefghijklm"),
+            std::wstring::npos);
+  for (const RebuildRefusal refusal :
+       {RebuildRefusal::kElevated, RebuildRefusal::kOtherShellUser,
+        RebuildRefusal::kNoRestartBelowPackage, RebuildRefusal::kOwnProcessHoldsCache,
+        RebuildRefusal::kFileOperation}) {
+    const std::wstring message = RefreshFullRefusalMessage(refusal, context);
+    EXPECT_FALSE(message.empty()) << static_cast<int>(refusal);
+    EXPECT_EQ(message, RebuildRefusalText(refusal, context));
+  }
+  EXPECT_EQ(RefreshFullRefusalMessage(RebuildRefusal::kElevated, context)
+                .rfind(L"Cannot run here: running as administrator.", 0),
+            0u);
+  EXPECT_NE(RefreshFullRefusalMessage(RebuildRefusal::kOtherShellUser, context).find(L"PC\\tester"),
+            std::wstring::npos);
+  EXPECT_TRUE(RefreshFullRefusalMessage(RebuildRefusal::kCancelled, context).empty());
+  EXPECT_TRUE(RefreshFullRefusalMessage(RebuildRefusal::kNone, context).empty());
 }
 
 }  // namespace

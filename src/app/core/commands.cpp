@@ -4,11 +4,13 @@
 #include <wil/result_macros.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
 #include <filesystem>
 #include <memory>
+#include <stop_token>
 #include <string_view>
 #include <vector>
 
@@ -17,6 +19,7 @@
 #include "diagnostics.h"
 #include "elevation.h"
 #include "evaluate.h"
+#include "explorer_settings.h"
 #include "install.h"
 #include "instance.h"
 #include "json.h"
@@ -24,6 +27,7 @@
 #include "log.h"
 #include "paths.h"
 #include "project_config.h"
+#include "rebuild.h"
 #include "registration.h"
 #include "registry_roots.h"
 #include "settings.h"
@@ -759,6 +763,158 @@ int RunZoomCommand(const CliArgs& args, const ProcessContext& context, Output& o
   return Code(ExitCode::kOk);
 }
 
+// ---- --refresh ------------------------------------------------------------------------------
+
+// The running refresh's stop source and the event set once it has finished, for the console's
+// control handler; null while none runs. Constant-initialised, as startup.h requires.
+constinit std::atomic<std::stop_source*> g_consoleStop{nullptr};
+constinit std::atomic<HANDLE> g_workDone{nullptr};
+// Handlers that may still be using the two: ~ConsoleStop waits until there are none.
+constinit std::atomic<int> g_handlersInside{0};
+// Whether StopOnConsoleControl is installed; once it is, it stays for the rest of the process.
+constinit std::atomic<bool> g_handlerInstalled{false};
+
+// How long closing the console waits for a running refresh.
+constexpr DWORD kCloseWaitMs = 4000;
+
+// Ctrl+C and Ctrl+Break ask the running refresh to stop and keep the process alive. Closing the
+// console ends the process when this returns, so a rebuild past its point of no return gets a few
+// seconds to finish deleting. Signing out and shutting down never get here: Windows sends them
+// only to console processes that load neither user32.dll nor gdi32.dll, and both executables
+// import user32.dll, so those end the process without notice.
+BOOL WINAPI StopOnConsoleControl(DWORD type) noexcept {
+  const bool interrupt = type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT;
+  if (!interrupt && type != CTRL_CLOSE_EVENT) return FALSE;
+  ++g_handlersInside;
+  if (std::stop_source* stop = g_consoleStop.load()) stop->request_stop();
+  if (type == CTRL_CLOSE_EVENT) {
+    if (const HANDLE done = g_workDone.load()) WaitForSingleObject(done, kCloseWaitMs);
+  }
+  --g_handlersInside;
+  return TRUE;
+}
+
+// Sends the console's control signals to |stop| while it lives (StopOnConsoleControl; without a
+// console there are none). The handler is installed the first time and never removed: a Ctrl+C
+// that ends the question's read reaches it on another thread, possibly only after the command has
+// returned, and without it Windows would then end the process with STATUS_CONTROL_C_EXIT instead
+// of the command's exit code. Going away, it sets |done|, which a handler for the console closing
+// waits on, and then waits for any handler still running. |stop| and |done| must outlive it.
+class ConsoleStop {
+ public:
+  ConsoleStop(std::stop_source* stop, HANDLE done) noexcept : done_(done) {
+    g_workDone.store(done);
+    g_consoleStop.store(stop);
+    if (!g_handlerInstalled.load()) {
+      g_handlerInstalled.store(SetConsoleCtrlHandler(StopOnConsoleControl, TRUE) != FALSE);
+    }
+  }
+  ConsoleStop(const ConsoleStop&) = delete;
+  ConsoleStop& operator=(const ConsoleStop&) = delete;
+  ~ConsoleStop() {
+    if (done_) SetEvent(done_);
+    g_consoleStop.store(nullptr);
+    g_workDone.store(nullptr);
+    // A handler that read them before they were cleared may still be using them.
+    while (g_handlersInside.load() != 0) Sleep(1);
+  }
+
+ private:
+  HANDLE done_ = nullptr;
+};
+
+// --refresh --full: the refusals first (they read nothing but the context and AutoRestartShell),
+// then the question, the operation lock and the rebuild (rebuild.h).
+int RunRefreshCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
+  if (!args.full) {
+    out.Error(
+        L"--refresh without --full is not available in this build yet; use --refresh --full.");
+    return Code(ExitCode::kFailed);
+  }
+  // Refused before the question: what the context decides, then whether Windows restarts File
+  // Explorer by itself, which a package above this process needs.
+  RebuildRefusal refusal = DecideRebuildRefusal(RebuildConditionsOf(context, true));
+  if (refusal == RebuildRefusal::kNone) {
+    bool autoRestart = true;
+    if (const HRESULT hr = ReadAutoRestartShell(RegistryRoots{}, &autoRestart); FAILED(hr)) {
+      Log(LogLevel::kWarning, L"refresh", L"refresh full failed hr=" + HResultText(hr));
+      out.Error(RebuildFailureText(hr));
+      return Code(ExitCode::kFailed);
+    }
+    refusal = DecideRebuildRefusal(RebuildConditionsOf(context, autoRestart));
+  }
+  if (refusal != RebuildRefusal::kNone) {
+    Log(LogLevel::kWarning, L"refresh",
+        std::wstring(L"refresh full refused=") + RebuildRefusalToken(refusal));
+    out.Error(RefreshFullRefusalMessage(refusal, context));
+    return Code(ExitCode::kWrongContext);
+  }
+
+  // From here Ctrl+C stops it, until it ends the first process or deletes the first file.
+  std::stop_source stop;
+  wil::unique_event_nothrow done;
+  (void)done.create(wil::EventOptions::ManualReset);
+  ConsoleStop consoleStop(&stop, done.get());
+  if (!args.yes && !AskYesNo(out, RebuildQuestion())) {
+    out.Line(L"Nothing changed.");
+    return Code(ExitCode::kCancelled);
+  }
+  // Stopped by Ctrl+C before the rebuild started, so nothing changed.
+  const auto stopped = [&out] {
+    Log(LogLevel::kWarning, L"refresh",
+        std::wstring(L"refresh full refused=") + RebuildRefusalToken(RebuildRefusal::kCancelled));
+    out.Line(L"Nothing changed.");
+    return Code(ExitCode::kCancelled);
+  };
+  if (stop.stop_requested()) return stopped();
+
+  std::optional<OperationLock> lock;
+  const HRESULT locked = OperationLock::Acquire(kCheckLockWaitMs, &lock);
+  // The wait cannot be interrupted, so a Ctrl+C during it is answered once it ends, whatever
+  // it gave.
+  if (stop.stop_requested()) return stopped();
+  if (locked == OperationLock::kBusy || locked == OperationLock::kTakenByLowerIntegrity) {
+    out.Error(kBusyMessage);
+    return Code(ExitCode::kBusy);
+  }
+  if (locked == kNamedObjectsRefusedHr) {
+    Log(LogLevel::kWarning, L"refresh",
+        L"refresh result=failed named-objects-refused hr=" + HResultText(kNamedObjectsRefusedHr));
+    out.Error(NamedObjectsRefusedMessage());
+    return Code(ExitCode::kFailed);
+  }
+  if (FAILED(locked)) {
+    out.Error(RebuildFailureText(locked));
+    return Code(ExitCode::kFailed);
+  }
+  if (lock->sessionOnly()) Log(LogLevel::kWarning, L"refresh", L"refresh lock=session-only");
+  if (lock->abandoned()) Log(LogLevel::kWarning, L"refresh", L"refresh lock=abandoned");
+
+  RebuildOptions options;
+  options.context = context;
+  const auto progress = [&out](RebuildPhase phase) {
+    const std::wstring line = RebuildProgressText(phase);
+    if (!line.empty()) out.Line(line);
+  };
+  RebuildResult result;
+  if (const HRESULT hr =
+          RebuildThumbnailCache(options, RealRebuildSystem(), progress, stop.get_token(), &result);
+      FAILED(hr)) {
+    out.Error(RebuildFailureText(hr));
+    return Code(ExitCode::kFailed);
+  }
+  if (result.refusal == RebuildRefusal::kCancelled) {
+    out.Line(L"Nothing changed.");
+  } else if (result.refusal != RebuildRefusal::kNone) {
+    out.Error(RefreshFullRefusalMessage(result.refusal, context));
+  } else if (FAILED(result.failure)) {
+    out.Error(RebuildFailureText(result.failure));
+  } else {
+    for (const std::wstring& line : RebuildReport(result)) out.Line(line);
+  }
+  return Code(RebuildExitCode(result));
+}
+
 HRESULT CopyToClipboard(std::wstring_view text) noexcept {
   // Another program may hold the clipboard for a moment.
   bool opened = false;
@@ -1050,8 +1206,9 @@ std::vector<std::wstring> UninstallReport(const UninstallResult& result) {
   const std::wstring product = kProductName;
   if (result.rebuildNotAvailable) {
     lines.push_back(
-        L"--rebuild-thumbnails: this build cannot rebuild the thumbnail cache yet; thumbnails "
-        L"File Explorer already made stay until Windows makes them again.");
+        L"--rebuild-thumbnails: this build does not rebuild the thumbnail cache during an "
+        L"uninstall yet; to clear the thumbnails File Explorer already made, run --refresh --full "
+        L"(restarts File Explorer).");
   }
   if (result.run) {
     switch (result.run->outcome) {
@@ -1168,12 +1325,21 @@ std::wstring ZoomText(const ZoomDecision& decision) {
 
 std::wstring ZoomSavedText(int zoom) {
   return L"Zoom set to " + std::to_wstring(ClampZoom(zoom)) +
-         L" %. Thumbnails made from now on use it; thumbnails File Explorer already made keep "
-         L"their old zoom until Windows makes them again (this build cannot refresh them).";
+         L" %. Thumbnails made from now on use it. To redo the ones File Explorer already made, "
+         L"run --refresh --full (restarts File Explorer).";
 }
 
 bool UninstallNeedsYes(const CliArgs& args, bool canAskOnConsole) noexcept {
   return args.verb == Verb::kUninstall && !args.yes && !canAskOnConsole;
+}
+
+bool RefreshNeedsYes(const CliArgs& args, bool canAskOnConsole) noexcept {
+  return args.verb == Verb::kRefresh && args.full && !args.yes && !canAskOnConsole;
+}
+
+std::wstring RefreshFullRefusalMessage(RebuildRefusal refusal, const ProcessContext& context) {
+  if (refusal == RebuildRefusal::kVirtualized) return CannotRunHereMessage(context);
+  return RebuildRefusalText(refusal, context);
 }
 
 bool ShouldStartSettingsWindow(DWORD consoleProcessCount, bool hasConsoleWindow) noexcept {
@@ -1261,6 +1427,12 @@ int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWin
               L" for all users and needs --yes when there is no console to ask on. Run --help");
     return Code(ExitCode::kUsage);
   }
+  if (RefreshNeedsYes(args, CanAskOnConsole())) {
+    out.Error(
+        L"--refresh --full restarts File Explorer and needs --yes when there is no console to ask "
+        L"on. Run --help");
+    return Code(ExitCode::kUsage);
+  }
 
   ProcessContext context;
   const HRESULT hr = GetProcessContext(ProbeFor(args), &context);
@@ -1334,6 +1506,9 @@ int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWin
       break;
     case Verb::kZoom:
       code = RunZoomCommand(args, context, out);
+      break;
+    case Verb::kRefresh:
+      code = RunRefreshCommand(args, context, out);
       break;
     default:
       out.Error(std::wstring(Describe(args.verb).name) + L" is not available in this build yet");

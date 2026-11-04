@@ -82,6 +82,9 @@ RebuildConditions RebuildConditionsOf(const ProcessContext& context,
 // below a package where Windows will not restart File Explorer.
 RebuildRefusal DecideRebuildRefusal(const RebuildConditions& c) noexcept;
 
+// The log's word for |refusal| (pure): "elevated", "other-shell-user" and so on; "none" for kNone.
+const wchar_t* RebuildRefusalToken(RebuildRefusal refusal) noexcept;
+
 // The desktop's shell (the process that owns GetShellWindow).
 struct ShellProcess {
   DWORD pid = 0;

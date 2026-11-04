@@ -125,12 +125,13 @@ jobs:
       # tests that only an elevated runner can run (the protected task folder, a standard user's
       # task in it, another account's tasks at the user's task names, --checks refused elevated
       # and run at Medium where nothing is installed, the writing commands --setup-user,
-      # --migrate-v1, --install and --uninstall refused elevated, --diagnostics without the log
-      # and --diagnostics --out refused elevated, --setup-machine in test places, and
-      # --uninstall-cleanup removing its part for all users in test places) skip quietly
-      # elsewhere, so each must have printed its own line here. The canary under
-      # HKEY_LOCAL_MACHINE\Software\Classes runs unelevated too, but prints its line only where it
-      # ran elevated and found real writes, so that line must be here as well.
+      # --migrate-v1, --install, --uninstall and --refresh --full refused elevated (the last only
+      # on a runner GitHub hosts), --diagnostics without the log and --diagnostics --out refused
+      # elevated, --setup-machine in test places, and --uninstall-cleanup removing its part for
+      # all users in test places) skip quietly elsewhere, so each must have printed its own line
+      # here. The canary under HKEY_LOCAL_MACHINE\Software\Classes runs unelevated too, but prints
+      # its line only where it ran elevated and found real writes, so that line must be here as
+      # well.
       - name: Check the elevated test paths
         if: env.PDFT_ARCH == 'x64'
         run: |
@@ -156,6 +157,7 @@ jobs:
           findstr /l /c:" --migrate-v1 (elevated) -> exit 8" "%LOG%" || (echo ::error::--migrate-v1 was not refused elevated& exit /b 1)
           findstr /l /c:" --install (elevated) -> exit 8" "%LOG%" || (echo ::error::--install was not refused elevated& exit /b 1)
           findstr /l /c:" --uninstall --yes (elevated) -> exit 8" "%LOG%" || (echo ::error::--uninstall was not refused elevated& exit /b 1)
+          findstr /l /c:" --refresh --full --yes (elevated) -> exit 8" "%LOG%" || (echo ::error::--refresh --full was not refused elevated& exit /b 1)
           findstr /l /c:" --diagnostics --out (elevated) -> exit 8" "%LOG%" || (echo ::error::--diagnostics --out was not refused elevated& exit /b 1)
           findstr /l /c:"[ setup ] --setup-machine in test places (elevated) -> exit " "%LOG%" || (echo ::error::--setup-machine did not run elevated in test places& exit /b 1)
           findstr /l /c:"[ install ] --uninstall-cleanup machine part in test places (elevated): removed" "%LOG%" || (echo ::error::--uninstall-cleanup did not remove the part for all users elevated in test places& exit /b 1)
@@ -295,6 +297,7 @@ jobs:
           findstr /l /c:" --migrate-v1 (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--migrate-v1 was not refused elevated& exit /b 1)
           findstr /l /c:" --install (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--install was not refused elevated& exit /b 1)
           findstr /l /c:" --uninstall --yes (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--uninstall was not refused elevated& exit /b 1)
+          findstr /l /c:" --refresh --full --yes (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--refresh --full was not refused elevated& exit /b 1)
           findstr /l /c:" --diagnostics --out (elevated) -> exit 8" t\Testing\Temporary\LastTest.log || (echo ::error::--diagnostics --out was not refused elevated& exit /b 1)
           findstr /l /c:"[ setup ] --setup-machine in test places (elevated) -> exit " t\Testing\Temporary\LastTest.log || (echo ::error::--setup-machine did not run elevated in test places& exit /b 1)
           findstr /l /c:"[ install ] --uninstall-cleanup machine part in test places (elevated): removed" t\Testing\Temporary\LastTest.log || (echo ::error::--uninstall-cleanup did not remove the part for all users elevated in test places& exit /b 1)

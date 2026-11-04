@@ -35,28 +35,6 @@ std::wstring Leaf(std::wstring_view image) {
   return std::wstring(image.substr(image.find_last_of(L"\\/") + 1));
 }
 
-const wchar_t* RefusalToken(RebuildRefusal refusal) noexcept {
-  switch (refusal) {
-    case RebuildRefusal::kElevated:
-      return L"elevated";
-    case RebuildRefusal::kVirtualized:
-      return L"virtualized";
-    case RebuildRefusal::kOtherShellUser:
-      return L"other-shell-user";
-    case RebuildRefusal::kNoRestartBelowPackage:
-      return L"no-restart-below-package";
-    case RebuildRefusal::kOwnProcessHoldsCache:
-      return L"own-process-holds-cache";
-    case RebuildRefusal::kFileOperation:
-      return L"file-operation";
-    case RebuildRefusal::kCancelled:
-      return L"cancelled";
-    case RebuildRefusal::kNone:
-      return L"none";
-  }
-  return L"none";
-}
-
 const wchar_t* ShellToken(ShellOutcome outcome) noexcept {
   switch (outcome) {
     case ShellOutcome::kNotEnded:
@@ -104,7 +82,8 @@ size_t ReopenWanted(const RebuildResult& r) noexcept {
 void LogResult(const RebuildResult& r, ExitCode code) noexcept try {
   const LogLevel level = code == ExitCode::kOk ? LogLevel::kInfo : LogLevel::kWarning;
   if (r.refusal != RebuildRefusal::kNone) {
-    Log(level, kLogComponent, std::wstring(L"refresh full refused=") + RefusalToken(r.refusal));
+    Log(level, kLogComponent,
+        std::wstring(L"refresh full refused=") + RebuildRefusalToken(r.refusal));
     return;
   }
   if (FAILED(r.failure)) {
@@ -177,6 +156,28 @@ RebuildRefusal DecideRebuildRefusal(const RebuildConditions& c) noexcept {
   if (c.otherShellUser) return RebuildRefusal::kOtherShellUser;
   if (c.belowPackage && !c.autoRestartShell) return RebuildRefusal::kNoRestartBelowPackage;
   return RebuildRefusal::kNone;
+}
+
+const wchar_t* RebuildRefusalToken(RebuildRefusal refusal) noexcept {
+  switch (refusal) {
+    case RebuildRefusal::kElevated:
+      return L"elevated";
+    case RebuildRefusal::kVirtualized:
+      return L"virtualized";
+    case RebuildRefusal::kOtherShellUser:
+      return L"other-shell-user";
+    case RebuildRefusal::kNoRestartBelowPackage:
+      return L"no-restart-below-package";
+    case RebuildRefusal::kOwnProcessHoldsCache:
+      return L"own-process-holds-cache";
+    case RebuildRefusal::kFileOperation:
+      return L"file-operation";
+    case RebuildRefusal::kCancelled:
+      return L"cancelled";
+    case RebuildRefusal::kNone:
+      return L"none";
+  }
+  return L"none";
 }
 
 HolderRole ClassifyHolder(const Holder& holder, DWORD ownPid, DWORD ownSession,

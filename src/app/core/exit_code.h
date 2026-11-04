@@ -10,7 +10,7 @@ enum class ExitCode : int {
   kOk = 0,            // done; healthy
   kProblems = 1,      // problems remain, or a step is incomplete (e.g. a restart is pending)
   kUsage = 2,         // the command line is wrong
-  kCancelled = 3,     // the user cancelled (declined the UAC prompt, or answered "no")
+  kCancelled = 3,     // the user cancelled (declined UAC, answered "no", Ctrl+C before a change)
   kBusy = 4,          // another operation held the lock for too long
   kFailed = 5,        // failed; the log has the HRESULT
   kNotInstalled = 6,  // the product is not installed
@@ -32,7 +32,8 @@ inline constexpr ExitCodeInfo kExitCodes[] = {
     {ExitCode::kProblems, L"problems remain, or a step is incomplete"},
     {ExitCode::kUsage, L"usage error"},
     {ExitCode::kCancelled,
-     L"cancelled (the administrator prompt was declined, or the answer was no)"},
+     L"cancelled (the administrator prompt was declined, the answer was no, or Ctrl+C stopped it "
+     L"before anything changed)"},
     {ExitCode::kBusy, L"busy: another check or change did not finish within 30 seconds"},
     {ExitCode::kFailed, L"failed (the log has the error code)"},
     {ExitCode::kNotInstalled, L"not installed"},

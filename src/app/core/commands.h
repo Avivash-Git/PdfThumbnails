@@ -13,6 +13,7 @@
 #include "install.h"
 #include "mode.h"
 #include "output.h"
+#include "rebuild.h"
 #include "settings.h"
 #include "uninstall.h"
 
@@ -28,8 +29,8 @@ using OpenWindowFn = int (*)() noexcept;
 //   --elevated <step>: the elevated half of a change (ElevatedMain, elevation.h).
 //   No command in the command-line executable: starts the settings executable when this
 //   console is its own (started by a double-click), else prints the help.
-//   --fix --take-back, and --uninstall, without --yes and without a console to ask on: exit 2
-//   before anything is read (TakeBackNeedsYes, UninstallNeedsYes).
+//   --fix --take-back, --uninstall and --refresh --full, without --yes and without a console to
+//   ask on: exit 2 before anything is read (TakeBackNeedsYes, UninstallNeedsYes, RefreshNeedsYes).
 //   Everything else: reads the process context. A command that writes runs the registry canary
 //   first and stops with exit 8 when the registry is (or may be) virtualized; on a PC where no
 //   packaged app explains that, the refusal is logged. Then the log (ShouldLog), the installer
@@ -53,8 +54,14 @@ using OpenWindowFn = int (*)() noexcept;
 //     --uninstall    removes the product for all users (uninstall.h; asks first, or --yes)
 //     --uninstall-cleanup  the uninstaller's step; always exit 0
 //     --zoom         prints the zoom and where it comes from, or saves a new one (refused
-//                    elevated: 8); the thumbnails already made are not refreshed by this build
-//   Commands not built yet say so and exit 5.
+//                    elevated: 8); the thumbnails already made keep the old zoom, and it names
+//                    --refresh --full for them
+//     --refresh --full  rebuilds the thumbnail cache, which restarts File Explorer (rebuild.h).
+//                    Before it asks (or takes --yes) it refuses an administrator process, another
+//                    account's File Explorer, and a package above it where Windows does not
+//                    restart File Explorer (8); "no", or Ctrl+C before anything changed: 3; exit
+//                    0, 1, 3, 4, 5, 8
+//   --refresh without --full is not built yet: it says so and exits 5.
 // May throw std::bad_alloc; AppMain's callers catch everything.
 int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWindow);
 
@@ -170,13 +177,24 @@ std::vector<std::wstring> UninstallCleanupErrors(HRESULT hr, const UninstallClea
 // std::bad_alloc.
 std::wstring ZoomText(const ZoomDecision& decision);
 
-// What --zoom <n> prints once it saved the zoom (pure). Names no command this build lacks. May
+// What --zoom <n> prints once it saved the zoom (pure): the thumbnails File Explorer already made
+// keep the old zoom until --refresh --full rebuilds them. Names no command this build lacks. May
 // throw std::bad_alloc.
 std::wstring ZoomSavedText(int zoom);
 
 // --uninstall removes the product for all users, so it must be confirmed (pure): it needs --yes
 // unless standard input is a console with a window to ask on.
 bool UninstallNeedsYes(const CliArgs& args, bool canAskOnConsole) noexcept;
+
+// --refresh --full restarts File Explorer, so it must be confirmed (pure): it needs --yes unless
+// standard input is a console with a window to ask on.
+bool RefreshNeedsYes(const CliArgs& args, bool canAskOnConsole) noexcept;
+
+// Why --refresh --full was refused (pure), for standard error: CannotRunHereMessage where the
+// registry may be virtualized, RebuildRefusalText otherwise. Empty for kNone and kCancelled (a
+// stop before anything changed says "Nothing changed." on standard output). May throw
+// std::bad_alloc.
+std::wstring RefreshFullRefusalMessage(RebuildRefusal refusal, const ProcessContext& context);
 
 // The answer to a [y/N] question means yes (pure): "y" or "yes", ignoring case and surrounding
 // white space. Anything else, nothing included, is no.

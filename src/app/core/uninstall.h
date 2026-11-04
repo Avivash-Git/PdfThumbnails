@@ -19,8 +19,9 @@
 //   failed but the administrator step did not get administrator rights (the part stays); 8 when
 //   nothing else failed but the administrator step refused to run below an app package (the part
 //   stays).
-//   --rebuild-thumbnails belongs to the thumbnail refresh, which this build does not have: it is
-//   accepted and said so, and the uninstall goes on.
+//   --rebuild-thumbnails: this build does not rebuild the thumbnail cache during an uninstall
+//   yet (--refresh --full does it on its own): it is accepted and said so, and the uninstall goes
+//   on.
 //
 // machine-uninstall (elevated): the class for all users; every user's check task (the shared task
 // folder) and 1.x's task; the install folder for all users, files in use (its own executable
