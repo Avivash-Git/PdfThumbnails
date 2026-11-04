@@ -151,4 +151,6 @@ without the questions) and decides Pass A for the extraction variants. It also r
 Explorer on the desktop is another account's (a test account), but it refuses where Smart App
 Control is on. It changes the zoom like the whole experiment, so run it only where that does no
 harm. It is the `e2e` label's test ([Tests](BUILDING.md#tests)): no CTest test is registered for
-it, so no preset or `ctest` run starts it.
+it, so no preset or `ctest` run starts it. CI's `system-x64` job runs it as the system tests'
+throw-away test account, after the install for all users (with `--timing-files 200`): its
+verdict is in that job's log, on the lines that start with `[ system ] refresh experiment`.

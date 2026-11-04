@@ -126,7 +126,11 @@
 #                             afterwards; a second one, a standard account, runs the integration
 #                             tests' task tests (TaskWriting must pass, TaskFolderElevated must
 #                             skip) and its own --setup-user into the protected task folder the
-#                             install made; runs only with PDFT_SYSTEM_TESTS=1 and GITHUB_ACTIONS=
+#                             install made; as the test account, with thumbtest: the thumbnail
+#                             refresh experiment's automatic part, --refresh --full refused while
+#                             File Explorer is another account's, and what the thumbnail cache
+#                             keeps once the uninstall has unregistered the handler (printed, not
+#                             judged); runs only with PDFT_SYSTEM_TESTS=1 and GITHUB_ACTIONS=
 #                             true with RUNNER_ENVIRONMENT=github-hosted or
 #                             PDFT_SYSTEM_TESTS_THROWAWAY_VM=1, elevated, where nothing of 1.x or
 #                             2.x is installed (the CI job system-x64), else skipped (77)
@@ -358,7 +362,8 @@ endif()
 # Installs, uses and uninstalls the app for real (HKLM, HKCU, Program Files, Task Scheduler, UAC)
 # from a staged runtime, as a local administrator account it makes for the run and deletes
 # afterwards, with a standard account made the same way for the task tests (it runs
-# pdft_integration_tests next to it): only on a throw-away PC (the CI job system-x64). The
+# pdft_integration_tests next to it); the administrator account also runs thumbtest next to it on
+# its own thumbnail cache: only on a throw-away PC (the CI job system-x64). The
 # program itself refuses to run unless PDFT_SYSTEM_TESTS=1 and GITHUB_ACTIONS=true with
 # RUNNER_ENVIRONMENT=github-hosted or PDFT_SYSTEM_TESTS_THROWAWAY_VM=1, it is elevated and nothing
 # of 1.x or 2.x is installed; the test presets leave the label out. 1.x's shipped files for its
@@ -380,6 +385,10 @@ if(TARGET pdft_appcore)
   # The test accounts' tokens are checked with pdft-run-medium --check-token, and the standard
   # account runs the integration tests' task tests (with pdft-run-medium for their tasks).
   add_dependencies(pdft_system_tests pdft_run_medium pdft_integration_tests)
+  # The test account runs thumbtest for the thumbnail refresh (the test bundle carries it too).
+  if(TARGET thumbtest)
+    add_dependencies(pdft_system_tests thumbtest)
+  endif()
   set(_pdft_v1_fixture "${PROJECT_SOURCE_DIR}/PdfThumbnails.ps1"
                        "${PROJECT_SOURCE_DIR}/PdfThumbnails.cmd" "${PROJECT_SOURCE_DIR}/LICENSE")
   add_custom_command(TARGET pdft_system_tests POST_BUILD

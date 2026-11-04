@@ -11,7 +11,10 @@
 #                     from the x64 test bundle against the staged runtime artifact: the real
 #                     install for all users through UAC, the commands that use it, 1.1's state
 #                     replaced, the uninstall, and nothing left; the task tests and --setup-user
-#                     as a standard account (not on pull requests, unless called)
+#                     as a standard account; the thumbnail refresh experiment's automatic part
+#                     and the cache after the uninstall; then, on a runner GitHub hosts only,
+#                     what the thumbnail-cache rebuild finds on the runner and the rebuild for
+#                     real (not on pull requests, unless called)
 #
 # Repository variables (Settings > Secrets and variables > Actions > Variables), all optional:
 #   PDFT_WIN_X64_RUNNER  x64 runner label. Default windows-2025, which serves Visual Studio 2026
@@ -356,7 +359,9 @@ jobs:
   # integrity, a standard user's token) have their administrator steps done through UAC without
   # a prompt. The program refuses to run without PDFT_SYSTEM_TESTS=1, unelevated, or where 1.x
   # or 2.x is installed. A standard account the tests make runs the bundle's integration tests'
-  # task tests, so the bundle's pdft_integration_tests is used here too.
+  # task tests, so the bundle's pdft_integration_tests is used here too, and the test account runs
+  # the bundle's thumbtest. After the tests, on a runner GitHub hosts only, the last steps look at
+  # the runner's own File Explorer and thumbnail cache and rebuild that cache for real.
   system-x64:
     needs: build
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || inputs.called) }}
@@ -402,7 +407,7 @@ jobs:
 
       # Every command and its output is in the log, each line of the tests' own starting with
       # "[ system ]".
-      - name: System tests (install, use, 1.1 replaced, uninstall)
+      - name: System tests (install, use, 1.1 replaced, thumbnail refresh, uninstall)
         env:
           PDFT_SYSTEM_TESTS: "1"
         run: |
@@ -422,7 +427,12 @@ jobs:
       # passed, but the one that needs a Windows session of the account's own, and every
       # TaskFolderElevated test skipped as needing elevation) and left nothing behind, in Task
       # Scheduler or of the product; and its own --setup-user after the install for all users
-      # must have put its check task into the protected task folder an administrator made.
+      # must have put its check task into the protected task folder an administrator made. The
+      # test account's --refresh --full --yes must have been refused while File Explorer was the
+      # runner's, and File Explorer's process must have stayed the same (where the test finds no
+      # File Explorer of another account's, it says so and does not run the command, and this
+      # fails). The refresh experiment's verdict and the cache after the uninstall are among the
+      # [ system ] lines, informational.
       - name: Check that the system tests ran
         if: ${{ !cancelled() }}
         run: |
@@ -438,6 +448,7 @@ jobs:
           findstr /l /c:"[ system ] nothing left" "%LOG%" >nul || (echo ::error::The system tests did not run to the end& exit /b 1)
           findstr /l /c:"[ system ] machine-install reported through the asking process's pipe: yes" "%LOG%" >nul || (echo ::error::The elevated step's report did not come back through the asking process's pipe& exit /b 1)
           findstr /l /c:"[ system ] machine-install got administrator rights through UAC: yes" "%LOG%" >nul || (echo ::error::The step for all users did not get administrator rights through UAC& exit /b 1)
+          findstr /l /c:"[ system ] --refresh --full --yes as the test account -> exit 8, File Explorer's process unchanged: yes" "%LOG%" >nul || (echo ::error::The test account's --refresh --full was not refused for the runner's File Explorer, or File Explorer's process changed; the [ system ] lines say what& exit /b 1)
 
       - name: Upload logs
         if: ${{ !cancelled() }}
@@ -447,3 +458,49 @@ jobs:
           path: t/Testing/Temporary/
           if-no-files-found: ignore
           retention-days: 7
+
+      # Only on a runner GitHub hosts, on the runner's own account through pdft-run-medium (Medium
+      # integrity, a standard user's rights), after the system tests (which must find nothing of
+      # the product on this account first): what the thumbnail-cache rebuild would find here (the
+      # shell's account and integrity, File Explorer's processes, AutoRestartShell, the folder
+      # windows, the cache files and, by image name, the programs that hold them), and the
+      # integration tests' probes of the same (disabled elsewhere). It ends nothing and deletes
+      # nothing, but one probe runs the Explorer test: a probe PDF in %TEMP% made into a thumbnail
+      # that is not stored. Counts and image names only.
+      - name: File Explorer and the thumbnail cache on this runner (runners GitHub hosts only)
+        if: ${{ !cancelled() && runner.environment == 'github-hosted' }}
+        timeout-minutes: 5
+        run: |
+          rem The system tests' own opt-in, checked again here: never on a runner of your own.
+          if /i not "%GITHUB_ACTIONS%"=="true" (echo Not run: this is not GitHub Actions.& exit /b 0)
+          if /i not "%RUNNER_ENVIRONMENT%"=="github-hosted" (echo Not run: this is not a runner GitHub hosts.& exit /b 0)
+          t\pdft-run-medium.exe -- t\thumbtest.exe shellinfo --windows --holders
+          t\pdft-run-medium.exe -- t\pdft_integration_tests.exe --gtest_also_run_disabled_tests --gtest_filter=RefreshProbe.* --gtest_color=no
+          exit /b 0
+
+      # Informational, and only on a runner GitHub hosts (the runner is thrown away afterwards):
+      # the thumbnail-cache rebuild for real, as --refresh --full --yes on the runner's own account
+      # through pdft-run-medium, with one folder window open. It ends the File Explorer and
+      # thumbnail processes that hold the runner's thumbnail cache, where this token may end them,
+      # deletes the cache, waits for File Explorer to come back and opens the window again. Where
+      # the runner's File Explorer runs elevated, it may end nothing, and File Explorer's pid
+      # stays. The rebuild's log lines and the state afterwards are printed, nothing is judged. The
+      # last step, after the logs' upload, so nothing after it needs File Explorer.
+      - name: Rebuild the runner's thumbnail cache (runners GitHub hosts only)
+        if: ${{ !cancelled() && runner.environment == 'github-hosted' }}
+        timeout-minutes: 5
+        run: |
+          rem The system tests' own opt-in, checked again here: never on a runner of your own.
+          if /i not "%GITHUB_ACTIONS%"=="true" (echo Not run: this is not GitHub Actions.& exit /b 0)
+          if /i not "%RUNNER_ENVIRONMENT%"=="github-hosted" (echo Not run: this is not a runner GitHub hosts.& exit /b 0)
+          set "WINDOW=%RUNNER_TEMP%\pdft-rebuild-window"
+          set "LOG=%LOCALAPPDATA%\PdfThumbnails\Logs\PdfThumbnails.log"
+          mkdir "%WINDOW%" || exit /b 0
+          start "" explorer.exe "%WINDOW%"
+          powershell -NoProfile -Command "Start-Sleep -Seconds 5"
+          t\pdft-run-medium.exe -- t\thumbtest.exe shellinfo --windows
+          t\pdft-run-medium.exe -- runtime\PdfThumbnailsCli.exe --refresh --full --yes
+          echo --refresh --full --yes at Medium integrity: exit %ERRORLEVEL%
+          findstr /l /c:" refresh full " "%LOG%"
+          t\pdft-run-medium.exe -- t\thumbtest.exe shellinfo --windows --holders
+          exit /b 0

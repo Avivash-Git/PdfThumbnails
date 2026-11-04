@@ -20,6 +20,13 @@
 // install for all users has made the protected task folder; its state is checked like the test
 // account's.
 //
+// With the install for all users in place, the test account also runs the thumbnail refresh
+// experiment's automatic part (thumbtest experiment --non-interactive) on its own thumbnail cache,
+// has --refresh --full refused while File Explorer on the desktop is another account's (the
+// runner's), and asks its cache what became of two thumbnails once the uninstall unregistered the
+// handler. The experiment's verdict and that answer are printed, not judged: they are this
+// runner's, and a PC of the maintainer's decides.
+//
 // Lines starting with "[ system ]" are what the CI job looks for.
 
 #include <windows.h>
@@ -39,6 +46,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "account_rules.h"
@@ -51,6 +59,8 @@
 #include "migrate_v1.h"
 #include "paths.h"
 #include "project_config.h"
+#include "rebuild.h"
+#include "refresh_judge.h"
 #include "registration.h"
 #include "registry_roots.h"
 #include "settings.h"
@@ -58,6 +68,7 @@
 #include "system_env.h"
 #include "tasks.h"
 #include "test_account.h"
+#include "test_pdfs.h"
 #include "zoom.h"
 
 namespace pdft::systest {
@@ -78,6 +89,28 @@ constexpr std::string_view kExplorerTestFindings[] = {"LiveTestFailed", "LiveTes
 // The integration tests, next to this program (in the build folder and in the test bundle): the
 // standard account runs their task tests.
 constexpr wchar_t kIntegrationTestsExe[] = L"pdft_integration_tests.exe";
+
+// thumbtest, next to this program too: the test account runs it for the thumbnail refresh.
+constexpr wchar_t kThumbtestExe[] = L"thumbtest.exe";
+
+// The refresh experiment's automatic part fills the cache at every size, so it gets longer than
+// one command; its timing folder is kept small, since this runner's timings decide nothing.
+constexpr DWORD kExperimentTimeoutMs = 20 * 60 * 1000;
+constexpr int kExperimentTimingFiles = 200;
+
+// The starts of the experiment's lines that are repeated as "[ system ] refresh experiment:
+// <line>".
+constexpr std::string_view kExperimentLines[] = {
+    // The sizes, the baseline and the check that the thumbnail process sees the new zoom.
+    "size ", "VALID ", "EXCLUDED ", "sanity check",
+    // The verdicts per folder, and what they decide.
+    "PASS ", "FAIL ", "HELD ", "CHANGED ", "INVALID ", "Pass A", "No Pass A",
+    // Why it stopped, and what it put back.
+    "STOPPED:", "zoom: ", "File Explorer not restarted:"};
+
+// The eviction question asks the cache about these two files at one size the refresh makes again.
+constexpr UINT kEvictionSize = 256;
+constexpr const wchar_t* kEvictionFiles[] = {L"01-portrait.pdf", L"02-landscape.pdf"};
 
 // Set once UAC did not elevate the test account's step: every test needs that, so the ones after
 // stop at once instead of failing for reasons that follow from it.
@@ -199,6 +232,55 @@ std::string LineAt(const std::string& text, size_t at) {
   std::string line = text.substr(at, end == std::string::npos ? std::string::npos : end - at);
   if (!line.empty() && line.back() == '\r') line.pop_back();
   return line;
+}
+
+// The lines of a program's output |text|, without their line ends.
+std::vector<std::string> OutputLines(const std::string& text) {
+  std::vector<std::string> lines;
+  std::istringstream stream(text);
+  for (std::string line; std::getline(stream, line);) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    lines.push_back(std::move(line));
+  }
+  return lines;
+}
+
+// The SID of the account process |pid| runs as ("S-1-5-..."); empty when it cannot be read.
+std::wstring ProcessUserSid(DWORD pid) {
+  const wil::unique_handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+  wil::unique_handle token;
+  if (!process || !OpenProcessToken(process.get(), TOKEN_QUERY, token.put())) return {};
+  alignas(TOKEN_USER) BYTE user[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+  DWORD size = 0;
+  wil::unique_hlocal_string text;
+  if (!GetTokenInformation(token.get(), TokenUser, user, sizeof(user), &size) ||
+      !ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(user)->User.Sid, text.put())) {
+    return {};
+  }
+  return text.get();
+}
+
+// What became of the thumbnails |before| holds, in |after|: "<k> kept, <e> evicted, <r>
+// replaced". Kept: cached with the same size and thumbnail ID; replaced: cached with another;
+// evicted: not cached any more.
+std::string EvictionText(const std::vector<test::CacheRecord>& before,
+                         const std::vector<test::CacheRecord>& after) {
+  size_t kept = 0, evicted = 0, replaced = 0;
+  for (const test::CacheRecord& was : before) {
+    if (!was.cached) continue;
+    const auto now = std::find_if(after.begin(), after.end(), [&was](const test::CacheRecord& r) {
+      return r.key == was.key && r.size == was.size;
+    });
+    if (now == after.end() || !now->cached) {
+      ++evicted;
+    } else if (now->w == was.w && now->h == was.h && now->id == was.id) {
+      ++kept;
+    } else {
+      ++replaced;
+    }
+  }
+  return std::to_string(kept) + " kept, " + std::to_string(evicted) + " evicted, " +
+         std::to_string(replaced) + " replaced";
 }
 
 // The member at |keys| below |root|; nullptr when one is missing.
@@ -811,6 +893,119 @@ class System : public ::testing::Test {
     EXPECT_TRUE(MigratedFromV1());
   }
 
+  // ---- The thumbnail refresh and the cache rebuild ----
+
+  // thumbtest, copied where the test account can run it: three folders down in the scratch
+  // folder, since the experiment writes its report three folders up from itself
+  // (out\refresh-experiment from a build's bin folder), which keeps that in the scratch folder
+  // too. Empty when it cannot be copied.
+  path CopyThumbtest() {
+    const path from = path(test::SelfFolder()) / kThumbtestExe;
+    const path bin = scratch_ / L"out" / L"build" / L"bin";
+    if (!Exists(from)) {
+      ADD_FAILURE() << Text(from.native()) << " is missing (the build makes it with the tools, "
+                    << "and the test bundle carries it)";
+      return {};
+    }
+    if (!MakeDirs(bin) || !CopyFileW(from.c_str(), (bin / kThumbtestExe).c_str(), FALSE)) {
+      ADD_FAILURE() << "cannot copy " << Text(from.native()) << " (error " << GetLastError() << ")";
+      return {};
+    }
+    return bin / kThumbtestExe;
+  }
+
+  // The last line of the test account's log that contains |text|; empty when there is none.
+  std::string LastLogLine(std::string_view text) const {
+    std::ifstream file(UserLog(), std::ios::binary);
+    if (!file.good()) return {};
+    const std::string log((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    const size_t at = log.rfind(text);
+    if (at == std::string::npos) return {};
+    const size_t start = log.rfind('\n', at);
+    return LineAt(log, start == std::string::npos ? 0 : start + 1);
+  }
+
+  // The refresh experiment's automatic part as the test account (thumbtest experiment
+  // --non-interactive), with the installed command-line executable and its folder in the scratch
+  // folder: it sets the account's zoom to 100 % and 142 % and puts it back, fills the account's
+  // thumbnail cache with synthetic PDFs at every size, makes them again with each extraction
+  // variant and judges them by the bitmaps' sizes (Pass A). Its verdict is printed, not judged:
+  // the experiment must only have reached one (exit 0, or 1 without a pass or after a stop) and
+  // put the zoom back.
+  void RunRefreshExperiment(const path& thumbtest) {
+    const std::optional<DWORD> zoom = StoredZoom();
+    const std::wstring arguments = L"experiment --non-interactive --cli " +
+                                   test::QuoteArgument(InstalledCli().native()) + L" --root " +
+                                   test::QuoteArgument((scratch_ / L"experiment").native()) +
+                                   L" --timing-files " + std::to_wstring(kExperimentTimingFiles);
+    const Outcome run = CurrentTestAccount()->Run(thumbtest, arguments, kExperimentTimeoutMs);
+    Print("user", thumbtest, arguments, run);
+    for (const std::string& line : OutputLines(run.out)) {
+      if (std::any_of(std::begin(kExperimentLines), std::end(kExperimentLines),
+                      [&line](std::string_view start) { return line.starts_with(start); })) {
+        std::printf("[ system ] refresh experiment: %s\n", line.c_str());
+      }
+    }
+    if (FAILED(run.hr)) {
+      // Not started, or ended at its time limit: there is no exit code to read.
+      const std::string why =
+          run.hr == HRESULT_FROM_WIN32(ERROR_TIMEOUT)
+              ? "ended after " + std::to_string(kExperimentTimeoutMs / 60000) + " minutes"
+              : Text(HResultText(run.hr));
+      std::printf("[ system ] refresh experiment as the test account: no verdict (%s)\n",
+                  why.c_str());
+      ADD_FAILURE() << "running " << Text(thumbtest.native()) << ": " << why;
+    } else {
+      std::printf("[ system ] refresh experiment as the test account: exit %lu\n", run.exitCode);
+      EXPECT_TRUE(run.exitCode == 0 || run.exitCode == 1)
+          << "the experiment did not reach a verdict (2: it cannot run here, 8: refused here)";
+    }
+    EXPECT_EQ(StoredZoom(), zoom) << "the experiment did not put the zoom back";
+  }
+
+  // --refresh --full --yes as the test account while File Explorer on this desktop is another
+  // account's (the runner's): refused before anything changes (exit 8, logged as
+  // other-shell-user), and File Explorer's process is the same one afterwards. It runs only once
+  // that refusal is certain, with a shell that runs as another account than the test account;
+  // otherwise a line says why it did not run.
+  void ExpectRebuildRefusedForAnotherAccountsExplorer() {
+    const char* what = "--refresh --full --yes as the test account";
+    const std::optional<ShellProcess> before = RealRebuildSystem().Shell();
+    const std::wstring owner = before ? ProcessUserSid(before->pid) : std::wstring();
+    if (!before || owner.empty() || IEquals(owner, sid_)) {
+      std::printf("[ system ] %s: not run (%s)\n", what,
+                  !before         ? "no File Explorer on this desktop"
+                  : owner.empty() ? "File Explorer's account cannot be read"
+                                  : "File Explorer is the test account's own");
+      return;
+    }
+    const Outcome run = User(InstalledCli(), L"--refresh --full --yes");
+    const std::optional<ShellProcess> after = RealRebuildSystem().Shell();
+    const bool same =
+        after && after->pid == before->pid && CompareFileTime(&after->start, &before->start) == 0;
+    std::printf("[ system ] %s -> exit %lu, File Explorer's process unchanged: %s\n", what,
+                run.exitCode, same ? "yes" : "no");
+    EXPECT_EQ(run.exitCode, 8u) << run.Output();
+    EXPECT_TRUE(same) << "File Explorer (pid " << before->pid << ") is not the process it was";
+    const std::string logged = LastLogLine(" refresh full ");
+    if (!logged.empty()) std::printf("[ system ] log: %s\n", logged.c_str());
+    EXPECT_NE(logged.find("refresh full refused=other-shell-user"), std::string::npos) << logged;
+  }
+
+  // The eviction files' thumbnails at kEvictionSize, as the test account's cache answers for them
+  // (thumbtest incache, which only asks), read back from the record it writes as |name|.tsv in
+  // the scratch folder.
+  std::vector<test::CacheRecord> AskTheCache(const path& thumbtest, const path& folder,
+                                             std::wstring_view name) {
+    const path record = scratch_ / (std::wstring(name) + L".tsv");
+    (void)User(thumbtest, L"incache --sizes " + std::to_wstring(kEvictionSize) + L" --record " +
+                              test::QuoteArgument(record.native()) + L" " +
+                              test::QuoteArgument(folder.native()));
+    std::vector<test::CacheRecord> records;
+    EXPECT_TRUE(test::ReadRecords(record, &records)) << "no record: " << Text(record.native());
+    return records;
+  }
+
   path scratch_;  // in the test account's temp folder; removed after the test
   path stage_;
   path machineRoot_;
@@ -1075,6 +1270,72 @@ TEST_F(System, UninstallCleanupAsTheInstallersUninstaller) {
   if (Exists(dataDir_)) {
     const Outcome uninstall = User(Cli(), L"--uninstall --yes");
     EXPECT_TRUE(uninstall.exitCode == 0 || uninstall.exitCode == 6) << uninstall.Output();
+  }
+  ExpectNothingLeft();
+}
+
+// ---- The thumbnail refresh and the cache rebuild -----------------------------------------
+
+// With the install for all users, on the test account's thumbnail cache: whether the Explorer
+// test leaves its process holding the cache (the settings window runs it in its own), the refresh
+// experiment's automatic part, --refresh --full refused while File Explorer is the runner's, and
+// the eviction question: what the cache answers for two thumbnails it held once the uninstall has
+// unregistered the handler, and again after a forced extraction (kept, evicted or replaced;
+// printed, not judged).
+TEST_F(System, ThumbnailRefreshAndRebuildAsTheUser) {
+  const path thumbtest = CopyThumbtest();
+  ASSERT_FALSE(thumbtest.empty());
+  // Two synthetic PDFs the test account can read: the scratch folder is in its temp folder.
+  const path eviction = scratch_ / L"eviction";
+  ASSERT_TRUE(MakeDirs(eviction));
+  for (const test::GeneratedFile& file : test::MakeTestPdfs()) {
+    if (std::find(std::begin(kEvictionFiles), std::end(kEvictionFiles), file.name) !=
+        std::end(kEvictionFiles)) {
+      ASSERT_TRUE(WriteFileText(eviction / file.name, file.bytes)) << Text(file.name);
+    }
+  }
+
+  const Outcome install = User(Cli(), L"--install --machine");
+  ASSERT_NO_FATAL_FAILURE(ExpectAdministratorRights(L"machine-install", install));
+  ExpectInstalledForAllUsers();
+
+  // Read-only: the holders of the account's cache files by image name, once the Explorer test has
+  // run in that process.
+  const Outcome info = User(thumbtest, L"shellinfo --holders --after-explorer-test");
+  for (const std::string& line : OutputLines(info.out)) {
+    if (line.starts_with("this process holds a cache file")) {
+      std::printf("[ system ] the test account's shellinfo: %s\n", line.c_str());
+    }
+  }
+  RunRefreshExperiment(thumbtest);
+  ExpectRebuildRefusedForAnotherAccountsExplorer();
+
+  // The thumbnails made and stored while the handler is registered.
+  const std::wstring extract =
+      L"cache " + std::to_wstring(kEvictionSize) + L" - " + test::QuoteArgument(eviction.native());
+  (void)User(thumbtest, extract);
+  const std::vector<test::CacheRecord> before =
+      AskTheCache(thumbtest, eviction, L"eviction-before");
+  const size_t cached = static_cast<size_t>(std::count_if(
+      before.begin(), before.end(), [](const test::CacheRecord& r) { return r.cached; }));
+  std::printf("[ system ] eviction: %zu of %zu thumbnails cached at %u before the uninstall\n",
+              cached, std::size(kEvictionFiles), kEvictionSize);
+
+  const Outcome uninstall = User(InstalledCli(), L"--uninstall --yes");
+  EXPECT_EQ(uninstall.exitCode, 0u);
+  const std::vector<test::CacheRecord> unregistered =
+      AskTheCache(thumbtest, eviction, L"eviction-after");
+  const Outcome forced = User(thumbtest, extract);
+  const std::vector<test::CacheRecord> extracted =
+      AskTheCache(thumbtest, eviction, L"eviction-forced");
+  if (cached == 0) {
+    std::printf(
+        "[ system ] eviction after the uninstall: not answered (nothing was cached before it)\n");
+  } else {
+    std::printf("[ system ] eviction after the uninstall: %s\n",
+                EvictionText(before, unregistered).c_str());
+    std::printf("[ system ] eviction after the uninstall and a forced extraction (exit %lu): %s\n",
+                forced.exitCode, EvictionText(before, extracted).c_str());
   }
   ExpectNothingLeft();
 }
