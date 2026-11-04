@@ -901,8 +901,10 @@ HRESULT CopyOpenFileVerified(HANDLE from, const std::filesystem::path& to,
   std::wstring unique;
   RETURN_IF_FAILED(PDFT_TRACE(NewHexName(&unique)));
   const std::filesystem::path temporary = folder / (name + L"." + unique + L".tmp");
-  wil::unique_hfile target(CreateFileW(temporary.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, 0,
-                                       nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+  // A path that names a pipe gives its server an identification token at most.
+  wil::unique_hfile target(CreateFileW(
+      temporary.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
+      FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
   if (!target) return PDFT_TRACE_DETAIL(LastErrorOr(E_FAIL), name);
   // From here on every failure deletes the temporary file again.
   auto discard = wil::scope_exit([&]() noexcept { DeleteOnClose(target.get()); });

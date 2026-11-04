@@ -81,13 +81,13 @@ bool IsRegularFile(HANDLE file) noexcept {
 
 // Opens |path| to delete it, as itself (a link at the end is not followed), when it is a regular
 // file, and returns where it really is in |finalPath|. An empty handle otherwise (missing, in use,
-// a link, a folder).
+// a link, a folder). A path that names a pipe gives its server an identification token at most.
 wil::unique_hfile OpenFileToDelete(const std::wstring& path, std::wstring* finalPath) noexcept {
   finalPath->clear();
-  wil::unique_hfile file(CreateFileW(path.c_str(), DELETE | FILE_READ_ATTRIBUTES,
-                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                     nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT,
-                                     nullptr));
+  wil::unique_hfile file(CreateFileW(
+      path.c_str(), DELETE | FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+      FILE_FLAG_OPEN_REPARSE_POINT | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
   if (!file || !IsRegularFile(file.get()) || FAILED(FinalPath(file.get(), finalPath))) {
     return wil::unique_hfile();
   }
@@ -239,9 +239,11 @@ HRESULT WriteProbe(std::filesystem::path* path, std::wstring* finalPath) noexcep
   std::filesystem::path probe = dir / ProbeFileName(id);
   const std::string bytes = ProbePdfBytes();
   // CREATE_NEW: never over a file (or a link) that is already there. A probe that is not written
-  // whole goes again through this handle, never by its path.
-  wil::unique_hfile file(CreateFileW(probe.c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
-                                     FILE_ATTRIBUTE_NORMAL, nullptr));
+  // whole goes again through this handle, never by its path. Should %TEMP% name a pipe, its
+  // server gets an identification token at most.
+  wil::unique_hfile file(CreateFileW(
+      probe.c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
+      FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
   RETURN_LAST_ERROR_IF(!file);
   auto discard = wil::scope_exit([&]() noexcept { (void)DeleteThroughHandle(file.get()); });
   DWORD written = 0;
@@ -389,11 +391,14 @@ HRESULT SweepStaleProbes(const std::filesystem::path& directory, int* removed) n
   std::filesystem::path dir = directory;
   if (dir.empty()) RETURN_IF_FAILED(TempDirectory(&dir));
   // The folder itself, never what a junction or link in its place leads to. It stays open: the
-  // probes are listed from this handle, and each one deleted must lie in this very folder.
-  wil::unique_hfile folder(
-      CreateFileW(dir.c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
-                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-                  FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+  // probes are listed from this handle, and each one deleted must lie in this very folder. A
+  // path that names a pipe gives its server an identification token at most.
+  wil::unique_hfile folder(CreateFileW(dir.c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                       nullptr, OPEN_EXISTING,
+                                       FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT |
+                                           SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                                       nullptr));
   if (!folder) {
     const DWORD error = GetLastError();
     if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return S_OK;
@@ -480,10 +485,12 @@ HRESULT ValidateTestFile(const std::filesystem::path& path, std::filesystem::pat
     return HRESULT_FROM_WIN32(ERROR_BAD_PATHNAME);
   }
   // Attributes only, sharing everything; links followed; folders open too (backup semantics),
-  // so they can be told apart from missing files.
-  wil::unique_hfile file(CreateFileW(full.c_str(), FILE_READ_ATTRIBUTES,
-                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                     nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+  // so they can be told apart from missing files. A path that names a pipe gives its server an
+  // identification token at most.
+  wil::unique_hfile file(CreateFileW(
+      full.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      nullptr, OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
   if (!file) {
     const DWORD code = GetLastError();
     const bool missing = code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND ||

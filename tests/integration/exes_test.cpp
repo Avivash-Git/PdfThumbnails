@@ -13,6 +13,8 @@
 #include <wil/resource.h>
 
 #include <cstdio>
+#include <fstream>
+#include <iterator>
 #include <optional>
 #include <set>
 #include <string>
@@ -295,6 +297,29 @@ TEST_P(Exes, ElevatedDiagnosticsReadNoLogAndWriteNoFile) {
       << run.err;
   EXPECT_EQ(run.out, "");
   EXPECT_EQ(GetFileAttributesW(file.c_str()), INVALID_FILE_ATTRIBUTES);
+}
+
+// Not elevated, --diagnostics --out replaces a file that is already there with the report, as
+// UTF-8 with a byte order mark, and says where it went. Apart from that file it only reads.
+TEST_P(Exes, DiagnosticsOutReplacesTheFile) {
+  ProcessContext context;
+  ASSERT_HRESULT_SUCCEEDED(GetProcessContext(ContextProbe::kNone, &context));
+  if (context.elevated) GTEST_SKIP() << "elevated here (--out is refused there)";
+
+  test::TempDir dir(L"diagnostics");
+  ASSERT_TRUE(dir.ok());
+  const std::wstring file = dir.File(L"report.txt");
+  std::ofstream(file, std::ios::binary) << "an older report";
+  test::CapturedRun run;
+  RUN_OR_SKIP(L"--diagnostics --out " + test::QuoteArgument(file), run);
+  EXPECT_EQ(run.exitCode, 0u) << run.err;
+  EXPECT_EQ(run.err, "");
+  EXPECT_EQ(run.out.rfind("Diagnostics written to ", 0), 0u) << run.out;
+  std::ifstream stream(file, std::ios::binary);
+  const std::string text{std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
+  EXPECT_EQ(text.rfind("\xEF\xBB\xBF" + WideToUtf8Lossy(kProductName) + " diagnostics", 0), 0u)
+      << text.substr(0, 200);
+  EXPECT_EQ(text.find("an older report"), std::string::npos);
 }
 
 // --check and --fix write, so they run only where the guard refuses them (exit 8) before they

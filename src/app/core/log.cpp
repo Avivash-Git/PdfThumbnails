@@ -58,11 +58,13 @@ void Resolve(LogState& state) {
 
 // The log file, opened for appending only: every WriteFile lands at its end, whatever another
 // process wrote in between. Shared for reading, writing and deleting, so other processes can log
-// and readers never block a rotation.
+// and readers never block a rotation. A path that names a pipe gives its server an
+// identification token at most.
 wil::unique_hfile OpenForAppend(const std::wstring& path) {
-  HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA | FILE_READ_ATTRIBUTES,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  HANDLE file =
+      CreateFileW(path.c_str(), FILE_APPEND_DATA | FILE_READ_ATTRIBUTES,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS,
+                  FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
   return wil::unique_hfile(file);
 }
 

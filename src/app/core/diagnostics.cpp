@@ -166,9 +166,11 @@ HRESULT ReadFileTail(const std::filesystem::path& file, DWORD maxBytes, std::wst
   text->clear();
   *startsMidLine = false;
   *missing = false;
-  wil::unique_hfile handle(CreateFileW(file.c_str(), GENERIC_READ,
-                                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+  // A path that names a pipe gives its server an identification token at most.
+  wil::unique_hfile handle(CreateFileW(
+      file.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+      nullptr));
   if (!handle) {
     const DWORD error = GetLastError();
     if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {

@@ -1107,10 +1107,13 @@ HRESULT WriteReportFile(const std::wstring& path, std::wstring_view text, bool* 
     *refused = true;
     return HRESULT_FROM_WIN32(ERROR_DIRECTORY);
   }
-  // A link made in the meantime is replaced, never followed.
-  wil::unique_hfile file(
-      CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
-                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+  // A link made in the meantime is replaced, never followed. A path that names a pipe gives its
+  // server an identification token at most.
+  wil::unique_hfile file(CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                     CREATE_ALWAYS,
+                                     FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
+                                         SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                                     nullptr));
   RETURN_LAST_ERROR_IF(!file);
   if (GetFileType(file.get()) != FILE_TYPE_DISK) {
     // "CON", "NUL" and the like open a device; nothing was truncated.
