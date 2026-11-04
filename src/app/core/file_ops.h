@@ -151,15 +151,15 @@ inline constexpr size_t kRunOnceMaxChars = 260;
 [[nodiscard]] HRESULT FindRunOnceRemovals(const RegistryRoots& roots,
                                           std::vector<std::wstring>* names) noexcept;
 
-// ---- Deleting a file by its contents --------------------------------------------------------
+// ---- Deleting one file ----------------------------------------------------------------------
 
-// What DeleteFileIfContent found.
+// What DeleteFileIfContent and DeleteRegularFile found.
 enum class ContentDelete {
   kDeleted,
   kMissing,   // nothing of that name
   kMismatch,  // a regular file, but its contents are none of the expected ones: kept
   kNotAFile,  // a folder, a link or junction, a device: kept, never followed
-  kInUse,     // another process has it open for writing or deleting, or runs or maps it: kept
+  kInUse,     // another process has it open in a way that forbids this, or runs or maps it: kept
 };
 
 // Deletes |file| if it is a regular file (never a link: the name itself is opened) whose SHA-256
@@ -170,6 +170,17 @@ enum class ContentDelete {
 [[nodiscard]] HRESULT DeleteFileIfContent(const std::filesystem::path& file,
                                           std::span<const Sha256Digest> allowed,
                                           ContentDelete* result) noexcept;
+
+// Deletes |file| if it is a regular file (never a link or junction: the name itself is opened,
+// and what it is is checked through that handle), even while other programs keep it open, as
+// long as they allow deleting it; a read-only file goes too. Others' reading and writing go on
+// on the file they have open; the name is free at once where the file system allows it (POSIX
+// semantics). S_OK with *result: kDeleted, kMissing, kNotAFile, or kInUse (a program has it open
+// without allowing deletion, or maps it as an image). Windows answers "access denied" both for a
+// file mapped as an image and for one this user may not delete, so the second is kInUse too. A
+// failure only for other errors; E_INVALIDARG for a relative path.
+[[nodiscard]] HRESULT DeleteRegularFile(const std::filesystem::path& file,
+                                        ContentDelete* result) noexcept;
 
 // ---- Who else could change a build folder ---------------------------------------------------
 // Elevated code copies a build from a folder and registers it for every user, so nobody but the

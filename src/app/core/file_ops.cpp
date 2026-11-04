@@ -153,6 +153,47 @@ HRESULT DeletePlainFile(const std::filesystem::path& file, DWORD attributes) noe
   return LastErrorOr(E_FAIL);
 }
 
+// Deletes the file open as |file| (with DELETE, FILE_READ_ATTRIBUTES and FILE_WRITE_ATTRIBUTES),
+// read-only or not, with POSIX semantics where the file system has them. S_OK with *result
+// kDeleted, or kInUse when Windows refuses it as in use; a failure for other errors.
+HRESULT DeleteByHandle(HANDLE file, ContentDelete* result) noexcept {
+  FILE_DISPOSITION_INFO_EX dispositionEx = {};
+  dispositionEx.Flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS |
+                        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE;
+  if (!SetFileInformationByHandle(file, FileDispositionInfoEx, &dispositionEx,
+                                  sizeof(dispositionEx))) {
+    const DWORD error = GetLastError();
+    if (error != ERROR_INVALID_PARAMETER && error != ERROR_NOT_SUPPORTED &&
+        error != ERROR_INVALID_FUNCTION) {
+      if (IsFileInUseError(HRESULT_FROM_WIN32(error))) {
+        *result = ContentDelete::kInUse;
+        return S_OK;
+      }
+      return HRESULT_FROM_WIN32(error);
+    }
+    // File systems without the newer form: clear read-only, then the classic disposition.
+    FILE_BASIC_INFO basic = {};
+    if (GetFileInformationByHandleEx(file, FileBasicInfo, &basic, sizeof(basic)) &&
+        (basic.FileAttributes & FILE_ATTRIBUTE_READONLY)) {
+      basic.FileAttributes &= ~FILE_ATTRIBUTE_READONLY;
+      if (basic.FileAttributes == 0) basic.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+      SetFileInformationByHandle(file, FileBasicInfo, &basic, sizeof(basic));
+    }
+    FILE_DISPOSITION_INFO disposition = {};
+    disposition.DeleteFile = TRUE;
+    if (!SetFileInformationByHandle(file, FileDispositionInfo, &disposition, sizeof(disposition))) {
+      const HRESULT hr = LastErrorOr(E_FAIL);
+      if (IsFileInUseError(hr)) {
+        *result = ContentDelete::kInUse;
+        return S_OK;
+      }
+      return hr;
+    }
+  }
+  *result = ContentDelete::kDeleted;
+  return S_OK;
+}
+
 // What one removal pass found: entries in use, and the first error of each kind.
 struct RemoveState {
   std::vector<std::filesystem::path> held;  // in use
@@ -1170,44 +1211,37 @@ HRESULT DeleteFileIfContent(const std::filesystem::path& file,
       return S_OK;
     }
   }
-  FILE_DISPOSITION_INFO_EX dispositionEx = {};
-  dispositionEx.Flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS |
-                        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE;
-  if (!SetFileInformationByHandle(handle.get(), FileDispositionInfoEx, &dispositionEx,
-                                  sizeof(dispositionEx))) {
-    const DWORD error = GetLastError();
-    if (error != ERROR_INVALID_PARAMETER && error != ERROR_NOT_SUPPORTED &&
-        error != ERROR_INVALID_FUNCTION) {
-      if (IsFileInUseError(HRESULT_FROM_WIN32(error))) {
-        *result = ContentDelete::kInUse;
-        return S_OK;
-      }
-      return HRESULT_FROM_WIN32(error);
-    }
-    // File systems without the newer form: clear read-only, then the classic disposition.
-    FILE_BASIC_INFO basic = {};
-    if (GetFileInformationByHandleEx(handle.get(), FileBasicInfo, &basic, sizeof(basic)) &&
-        (basic.FileAttributes & FILE_ATTRIBUTE_READONLY)) {
-      basic.FileAttributes &= ~FILE_ATTRIBUTE_READONLY;
-      if (basic.FileAttributes == 0) basic.FileAttributes = FILE_ATTRIBUTE_NORMAL;
-      SetFileInformationByHandle(handle.get(), FileBasicInfo, &basic, sizeof(basic));
-    }
-    FILE_DISPOSITION_INFO disposition = {};
-    disposition.DeleteFile = TRUE;
-    if (!SetFileInformationByHandle(handle.get(), FileDispositionInfo, &disposition,
-                                    sizeof(disposition))) {
-      const HRESULT hr = LastErrorOr(E_FAIL);
-      if (IsFileInUseError(hr)) {
-        *result = ContentDelete::kInUse;
-        return S_OK;
-      }
-      return hr;
-    }
-  }
-  *result = ContentDelete::kDeleted;
-  return S_OK;
+  return DeleteByHandle(handle.get(), result);
 }
 CATCH_RETURN();
+
+HRESULT DeleteRegularFile(const std::filesystem::path& file, ContentDelete* result) noexcept {
+  *result = ContentDelete::kMissing;
+  RETURN_HR_IF(E_INVALIDARG, !file.is_absolute());
+  // Others may go on reading, writing and deleting it, as with DeleteFileW: only a program that
+  // does not allow deleting it keeps it. A path that names a pipe gives its server an
+  // identification token at most.
+  wil::unique_hfile handle(
+      CreateFileW(file.c_str(), DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                  FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS |
+                      SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                  nullptr));
+  if (!handle) {
+    const DWORD error = GetLastError();
+    if (IsMissingError(error)) return S_OK;
+    if (IsFileInUseError(HRESULT_FROM_WIN32(error))) {
+      *result = ContentDelete::kInUse;
+      return S_OK;
+    }
+    return HRESULT_FROM_WIN32(error);
+  }
+  if (FAILED(CheckRegularFile(handle.get()))) {
+    *result = ContentDelete::kNotAFile;
+    return S_OK;
+  }
+  return DeleteByHandle(handle.get(), result);
+}
 
 std::optional<BroadAccess> FindBroadAccess(PSECURITY_DESCRIPTOR descriptor, ACCESS_MASK mask,
                                            PSID user, std::span<const PSID> domains) {

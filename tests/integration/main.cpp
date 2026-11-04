@@ -36,6 +36,10 @@
 //   hold-file <path>             opens the file <path> for reading, sharing only reading (so it
 //                                can be neither deleted nor renamed), prints "held", and keeps
 //                                it open until its standard input closes
+//   hold-deletable <path>        opens the file <path> for reading, writing and deleting, sharing
+//                                only deleting, prints "held", and once its standard input
+//                                closes appends "+" through that handle, reads the file from its
+//                                start and prints "read=<contents>"
 //   parent                       prints this process's parent process id (GetParentProcessId)
 //                                as "parent=<id>", or "parent=none"
 //   report <exit code> <line>... connects to its parent's elevation report pipe the way the
@@ -216,6 +220,29 @@ int HoldFile(const wchar_t* path) {
   return 0;
 }
 
+// Holds |path| the way a program that lets others delete it does, and goes on using it.
+int HoldDeletable(const wchar_t* path) {
+  wil::unique_hfile file(CreateFileW(path, GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_DELETE,
+                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+  if (!file) return 3;
+  Print("held\n");
+  WaitForInputToClose();
+  DWORD written = 0;
+  if (!SetFilePointerEx(file.get(), LARGE_INTEGER{}, nullptr, FILE_END) ||
+      !WriteFile(file.get(), "+", 1, &written, nullptr) || written != 1 ||
+      !SetFilePointerEx(file.get(), LARGE_INTEGER{}, nullptr, FILE_BEGIN)) {
+    return 4;
+  }
+  std::string text;
+  char buffer[256];
+  DWORD read = 0;
+  while (ReadFile(file.get(), buffer, sizeof(buffer), &read, nullptr) && read > 0) {
+    text.append(buffer, read);
+  }
+  Print("read=" + text + "\n");
+  return 0;
+}
+
 int Parent() {
   DWORD parent = 0;
   if (FAILED(pdft::GetParentProcessId(&parent))) {
@@ -316,6 +343,7 @@ int wmain(int argc, wchar_t** argv) {
     if (mode == L"apply-task" && argc == 7) return ApplyTask(argv[3], argv[4], argv[5], argv[6]);
     if (mode == L"make-folder" && argc == 4) return MakeFolder(argv[3]);
     if (mode == L"hold-file" && argc == 4) return HoldFile(argv[3]);
+    if (mode == L"hold-deletable" && argc == 4) return HoldDeletable(argv[3]);
     if (mode == L"parent" && argc == 3) return Parent();
     if (mode == L"report" && argc >= 4) return Report(argc, argv);
     if (mode == L"report-step" && argc >= 6) return ReportStep(argc, argv);

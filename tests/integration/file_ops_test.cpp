@@ -1,10 +1,11 @@
 // File operations (file_ops.h) on folders this test makes under %TEMP%\pdft-tests: reparse point
 // checks, the verified copy, removal that never follows links, files in use (held open by this
-// test, or mapped as an image like a loaded DLL), the trash folder, the build-folder check on
-// folders made with known permissions (and with links and a mount point on the way or inside),
-// holding a build's folder while it is copied, and the RunOnce clean-up values in private
-// registry keys (ScopedRegistrySandbox). Never queues a deletion at restart: unelevated that call
-// is only checked to be refused, and the elevated path runs in the system tests.
+// test or by a child of it, or mapped as an image like a loaded DLL), the trash folder, deleting
+// one file while another process keeps it open, the build-folder check on folders made with
+// known permissions (and with links and a mount point on the way or inside), holding a build's
+// folder while it is copied, and the RunOnce clean-up values in private registry keys
+// (ScopedRegistrySandbox). Never queues a deletion at restart: unelevated that call is only
+// checked to be refused, and the elevated path runs in the system tests.
 
 #include <windows.h>
 
@@ -29,6 +30,7 @@
 #include "elevation.h"
 #include "instance.h"
 #include "legacy.h"
+#include "medium_il.h"
 #include "paths.h"
 #include "project_config.h"
 #include "registry_sandbox.h"
@@ -62,6 +64,11 @@ std::string ReadFileText(const path& file) {
 }
 
 bool Exists(const path& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
+
+bool IsReparsePoint(const path& p) {
+  const DWORD attributes = GetFileAttributesW(p.c_str());
+  return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT);
+}
 
 bool MakeDir(const path& p) { return CreateDirectoryW(p.c_str(), nullptr) != FALSE; }
 
@@ -359,6 +366,121 @@ TEST(Trash, DeletingAtRestartNeedsAnAdministrator) {
   ASSERT_TRUE(WriteFileText(file, "x"));
   EXPECT_EQ(ScheduleDeleteAtRestart(file), HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED));
   EXPECT_TRUE(Exists(file));
+}
+
+// ---- deleting one file ----
+
+// A program that lets others delete a file it has open does not keep it: the name is free at
+// once, and the program goes on reading and writing the file it has. The child holds it for
+// reading, writing and deleting and shares only deleting, which the delete by contents cannot
+// share.
+TEST(DeleteRegular, GoesWhileAnotherProcessAllowsIt) {
+  test::TempDir dir(L"delete");
+  ASSERT_TRUE(dir.ok());
+  const path file = path(dir.path()) / L"shared.db";
+  ASSERT_TRUE(WriteFileText(file, "held"));
+  test::PipedChild child;
+  ASSERT_EQ(child.Start(test::SelfPath(),
+                        L"--pdft-child hold-deletable " + test::QuoteArgument(file.native())),
+            S_OK);
+  ASSERT_EQ(child.ReadLine(), "held");
+
+  ContentDelete result = ContentDelete::kMissing;
+  ASSERT_EQ(DeleteFileIfContent(file, {}, &result), S_OK);
+  EXPECT_EQ(result, ContentDelete::kInUse);
+  ASSERT_EQ(DeleteRegularFile(file, &result), S_OK);
+  EXPECT_EQ(result, ContentDelete::kDeleted);
+  EXPECT_FALSE(Exists(file));
+  ASSERT_TRUE(WriteFileText(file, "new"));
+
+  child.CloseInput();
+  EXPECT_EQ(child.ReadLine(), "read=held+");
+  EXPECT_EQ(child.Wait(10000), 0u);
+  EXPECT_EQ(ReadFileText(file), "new");
+  ASSERT_EQ(DeleteRegularFile(file, &result), S_OK);
+  EXPECT_EQ(result, ContentDelete::kDeleted);
+  ASSERT_EQ(DeleteRegularFile(file, &result), S_OK);
+  EXPECT_EQ(result, ContentDelete::kMissing);
+}
+
+// A program that has the file open without letting others delete it keeps it, and so does one
+// that maps it as an image (a copy of a Windows DLL loaded as a resource: nothing in it runs).
+TEST(DeleteRegular, KeptWhileInUse) {
+  test::TempDir dir(L"delete");
+  ASSERT_TRUE(dir.ok());
+  const path root = dir.path();
+  const path file = root / L"held.db";
+  ASSERT_TRUE(WriteFileText(file, "held"));
+  ContentDelete result = ContentDelete::kDeleted;
+  {
+    test::PipedChild child;
+    ASSERT_EQ(child.Start(test::SelfPath(),
+                          L"--pdft-child hold-file " + test::QuoteArgument(file.native())),
+              S_OK);
+    ASSERT_EQ(child.ReadLine(), "held");
+    ASSERT_EQ(DeleteRegularFile(file, &result), S_OK);
+    EXPECT_EQ(result, ContentDelete::kInUse);
+    EXPECT_EQ(ReadFileText(file), "held");
+    child.CloseInput();
+    EXPECT_EQ(child.Wait(10000), 0u);
+  }
+  ASSERT_EQ(DeleteRegularFile(file, &result), S_OK);
+  EXPECT_EQ(result, ContentDelete::kDeleted);
+
+  wchar_t system[MAX_PATH] = {};
+  ASSERT_NE(GetSystemDirectoryW(system, MAX_PATH), 0u);
+  const path dll = root / L"held.dll";
+  ASSERT_TRUE(CopyFileW((path(system) / L"version.dll").c_str(), dll.c_str(), TRUE));
+  wil::unique_hmodule image(LoadLibraryExW(dll.c_str(), nullptr, LOAD_LIBRARY_AS_IMAGE_RESOURCE));
+  ASSERT_TRUE(image) << GetLastError();
+  ASSERT_EQ(DeleteRegularFile(dll, &result), S_OK);
+  EXPECT_EQ(result, ContentDelete::kInUse);
+  EXPECT_TRUE(Exists(dll));
+  image.reset();
+  ASSERT_EQ(DeleteRegularFile(dll, &result), S_OK);
+  EXPECT_EQ(result, ContentDelete::kDeleted);
+}
+
+// A read-only file goes too. A folder, a junction or a file link is no regular file: it stays,
+// and so does what it leads to.
+TEST(DeleteRegular, OnlyRegularFiles) {
+  test::TempDir dir(L"delete");
+  ASSERT_TRUE(dir.ok());
+  const path root = dir.path();
+  const path file = root / L"read-only.db";
+  ASSERT_TRUE(WriteFileText(file, "read-only"));
+  ASSERT_TRUE(SetFileAttributesW(file.c_str(), FILE_ATTRIBUTE_READONLY));
+  ContentDelete result = ContentDelete::kMissing;
+  ASSERT_EQ(DeleteRegularFile(file, &result), S_OK);
+  EXPECT_EQ(result, ContentDelete::kDeleted);
+  EXPECT_FALSE(Exists(file));
+  ASSERT_EQ(DeleteRegularFile(root / L"missing" / L"x.db", &result), S_OK);
+  EXPECT_EQ(result, ContentDelete::kMissing);
+
+  const path target = root / L"target";
+  const path kept = target / L"kept.db";
+  ASSERT_TRUE(MakeDir(target));
+  ASSERT_TRUE(WriteFileText(kept, "kept"));
+  ASSERT_EQ(DeleteRegularFile(target, &result), S_OK);
+  EXPECT_EQ(result, ContentDelete::kNotAFile);
+  const path junction = root / L"junction";
+  ASSERT_TRUE(MakeDir(junction));
+  ASSERT_TRUE(test::MakeJunction(junction.native(), target.native()));
+  ASSERT_EQ(DeleteRegularFile(junction, &result), S_OK);
+  EXPECT_EQ(result, ContentDelete::kNotAFile);
+  EXPECT_TRUE(IsReparsePoint(junction));
+  // A file link, where this account may create one (Developer Mode or the privilege).
+  const path link = root / L"link.db";
+  if (CreateSymbolicLinkW(link.c_str(), kept.c_str(),
+                          SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+    ASSERT_EQ(DeleteRegularFile(link, &result), S_OK);
+    EXPECT_EQ(result, ContentDelete::kNotAFile);
+    EXPECT_TRUE(IsReparsePoint(link));
+  } else {
+    std::printf("symbolic links: not allowed here, only the junction is tried\n");
+  }
+  EXPECT_EQ(ReadFileText(kept), "kept");
+  EXPECT_EQ(DeleteRegularFile(L"relative.db", &result), E_INVALIDARG);
 }
 
 // ---- the clean-up at the next sign-in, in private keys ----
