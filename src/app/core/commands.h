@@ -51,7 +51,10 @@ using OpenWindowFn = int (*)() noexcept;
 //                    (setup.h); --migrate-v1 asks for administrator rights for its part for all
 //                    users
 //     --install      (developer builds) installs from this executable's folder (install.h)
-//     --uninstall    removes the product for all users (uninstall.h; asks first, or --yes)
+//     --uninstall    removes the product for all users (uninstall.h; asks first, or --yes); with
+//                    --rebuild-thumbnails it also rebuilds the thumbnail cache (rebuild.h), which
+//                    restarts File Explorer, and the question says so where the context allows
+//                    the rebuild; Ctrl+C then stops it before it removes anything (3)
 //     --uninstall-cleanup  the uninstaller's step; always exit 0
 //     --zoom         prints the zoom and where it comes from, or saves a new one (refused
 //                    elevated: 8); the thumbnails already made keep the old zoom, and it names
@@ -132,6 +135,10 @@ std::wstring InstallRefusalMessage(const InstallResult& result);
 // Why --uninstall refuses an elevated process (pure). Starts like CannotRunHereMessage.
 std::wstring UninstallElevatedRefusalMessage();
 
+// What --uninstall asks (pure; without " [y/N]"): with --rebuild-thumbnails, that File Explorer
+// restarts too. May throw std::bad_alloc.
+std::wstring UninstallQuestion(bool rebuildThumbnails);
+
 // What --install, --fix, --migrate-v1 and --uninstall say when their administrator step did not
 // get administrator rights (LackedAdministratorRights; exit 7), before the step's own report
 // (pure). Not the line of a declined prompt (exit 3).
@@ -162,8 +169,9 @@ std::wstring NamedObjectsRefusedMessage();
 std::wstring WindowNamedObjectsRefusedMessage();
 
 // What --uninstall prints after it ran (pure; not for a refusal, a lock it did not get or the
-// installer's uninstaller): the thumbnail rebuild it cannot do, the part for all users, files left
-// for the next sign-in, and the result. May throw std::bad_alloc.
+// installer's uninstaller): what the thumbnail rebuild did (RebuildReport), or in one line why it
+// was not rebuilt; the part for all users, files left for the next sign-in, and the result. May
+// throw std::bad_alloc.
 std::vector<std::wstring> UninstallReport(const UninstallResult& result);
 
 // What --uninstall-cleanup writes to its error output (pure; it exits 0 whatever this says): that

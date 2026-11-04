@@ -46,6 +46,18 @@ void Failed(std::vector<std::wstring>* failures, const wchar_t* step, HRESULT hr
                       HResultText(hr));
 }
 
+// What makes the rebuild of --uninstall --rebuild-thumbnails a step that failed: File Explorer did
+// not come back (what starting it gave, or ERROR_TIMEOUT where it was not started), or a cache file
+// could not be deleted. A rebuild that was refused or could not start changed nothing; programs
+// left alone that keep cache files are only reported.
+std::optional<HRESULT> RebuildStepFailure(const RebuildResult& rebuild) noexcept {
+  if (rebuild.shell == ShellOutcome::kNotBack) {
+    return FAILED(rebuild.startError) ? rebuild.startError : HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+  }
+  if (rebuild.failed > 0) return rebuild.firstFileError;
+  return std::nullopt;
+}
+
 DWORD Attributes(const std::filesystem::path& path) noexcept {
   return GetFileAttributesW(path.c_str());
 }
@@ -513,13 +525,39 @@ HRESULT Uninstall(const UninstallOptions& options, const RegistryRoots& roots,
     result->code = ExitCode::kNotInstalled;
     return S_OK;
   }
-  result->rebuildNotAvailable = options.rebuildThumbnails;
+  // Stopped before anything is removed: nothing changed.
+  if (options.stop.stop_requested()) {
+    result->refusal = UninstallRefusal::kCancelled;
+    result->code = ExitCode::kCancelled;
+    return S_OK;
+  }
 
   // 1. This user's registration.
   RETURN_IF_FAILED(RemoveUserRegistration(roots, probes, before, &result->user));
   failures.insert(failures.end(), result->user.failures.begin(), result->user.failures.end());
 
-  // 2. The part for all users, by the settings executable installed there: the only one the
+  // 2. The thumbnail cache, now that File Explorer no longer finds the handler for this user. The
+  // lock is held, and the snapshot above ran no Explorer test, so this process holds no cache file.
+  if (options.rebuildThumbnails) {
+    RebuildOptions rebuildOptions;
+    rebuildOptions.context = context;
+    const RebuildSystem& system =
+        options.rebuildSystem ? *options.rebuildSystem : RealRebuildSystem();
+    RebuildResult rebuild;
+    if (const HRESULT hr = RebuildThumbnailCache(rebuildOptions, system, options.rebuildProgress,
+                                                 options.stop, &rebuild);
+        FAILED(hr)) {
+      // Out of memory before anything changed: not rebuilt, and the uninstall goes on.
+      rebuild = RebuildResult{};
+      rebuild.failure = hr;
+    }
+    if (const std::optional<HRESULT> failure = RebuildStepFailure(rebuild)) {
+      Failed(&failures, L"rebuild", *failure);
+    }
+    result->rebuild = std::move(rebuild);
+  }
+
+  // 3. The part for all users, by the settings executable installed there: the only one the
   // elevated side accepts.
   result->machinePart = before.machineClass.has_value() || machineRootExists;
   if (result->machinePart) {
@@ -555,7 +593,7 @@ HRESULT Uninstall(const UninstallOptions& options, const RegistryRoots& roots,
                                                               : L"none") +
           L" failures=" + std::to_wstring(failures.size()));
 
-  // 3. This user's files, the log's folder included: nothing is logged after this.
+  // 4. This user's files, the log's folder included: nothing is logged after this.
   if (options.dataDir.empty()) DisableLog();
   RETURN_IF_FAILED(RemoveUserFiles(roots, paths.userRoot, dataDir, &result->files));
   failures.insert(failures.end(), result->files.failures.begin(), result->files.failures.end());

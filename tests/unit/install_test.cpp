@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -295,14 +296,17 @@ TEST(UninstallTexts, Report) {
   EXPECT_EQ(lines[0],
             std::wstring(kProductName) + L" removed. PDF files show their app icon again.");
 
-  result.rebuildNotAvailable = true;
+  // A rebuild that was refused: one line first, before the part for all users.
+  result.rebuild = RebuildResult{};
+  result.rebuild->refusal = RebuildRefusal::kFileOperation;
   result.run = ElevatedRun{};
   result.run->outcome = ElevatedOutcome::kCancelled;
   result.machineLeft = true;
   lines = UninstallReport(result);
   ASSERT_EQ(lines.size(), 3u);
-  EXPECT_EQ(lines[0].rfind(L"--rebuild-thumbnails: this build does not", 0), 0u) << lines[0];
-  EXPECT_NE(lines[0].find(L"--refresh --full"), std::wstring::npos) << lines[0];
+  EXPECT_EQ(lines[0],
+            L"The thumbnail cache was not rebuilt: File Explorer is copying, moving or deleting "
+            L"files.");
   EXPECT_NE(lines[1].find(L"declined"), std::wstring::npos);
   EXPECT_NE(lines[2].find(L"still installed"), std::wstring::npos);
 
@@ -358,6 +362,79 @@ TEST(UninstallTexts, Report) {
   EXPECT_NE(lines[0].find(L"no " + std::wstring(kSettingsExe)), std::wstring::npos);
   EXPECT_EQ(lines[0].find(L"--install") != std::wstring::npos, kDevInstall);
   EXPECT_EQ(lines[1], L"Some files are in use; they are removed when you next sign in.");
+}
+
+// The question names the restart of File Explorer only when the uninstall rebuilds the cache.
+TEST(UninstallTexts, Question) {
+  EXPECT_EQ(UninstallQuestion(false),
+            L"Remove " + std::wstring(kProductName) + L" for all users of this PC?");
+  const std::wstring rebuild = UninstallQuestion(true);
+  EXPECT_EQ(rebuild, L"Remove " + std::wstring(kProductName) +
+                         L" for all users of this PC, and rebuild the thumbnail cache (restarts "
+                         L"File Explorer)?");
+  EXPECT_EQ(rebuild.find(L"[y/N]"), std::wstring::npos);
+}
+
+// A rebuild that ran prints the rebuild's own report before the uninstall's lines; one that was
+// refused or could not start is one line saying why, never "Nothing changed." (the uninstall went
+// on) and never a command to run (this program is gone afterwards).
+TEST(UninstallTexts, TheThumbnailRebuild) {
+  UninstallResult result;
+  result.rebuild = RebuildResult{};
+  result.rebuild->committed = true;
+  result.rebuild->cacheFiles = 3;
+  result.rebuild->deleted = 3;
+  result.rebuild->ended = 1;
+  result.rebuild->shell = ShellOutcome::kBack;
+  const std::vector<std::wstring> rebuilt = RebuildReport(*result.rebuild);
+  std::vector<std::wstring> lines = UninstallReport(result);
+  ASSERT_EQ(lines.size(), rebuilt.size() + 1);
+  EXPECT_TRUE(std::equal(rebuilt.begin(), rebuilt.end(), lines.begin()));
+  EXPECT_EQ(lines[0], L"Thumbnail cache cleared: 3 of 3 cache files deleted.");
+  EXPECT_EQ(lines.back(),
+            std::wstring(kProductName) + L" removed. PDF files show their app icon again.");
+
+  // Not back: the rebuild's line says what to do; the failure it is listed as keeps the last line.
+  result.rebuild->shell = ShellOutcome::kNotBack;
+  result.rebuild->start = ShellStart::kBelowPackage;
+  result.failures = {L"rebuild: 0x800705B4"};
+  lines = UninstallReport(result);
+  ASSERT_EQ(lines.size(), RebuildReport(*result.rebuild).size());
+  EXPECT_TRUE(std::any_of(lines.begin(), lines.end(), [](const std::wstring& line) {
+    return line.starts_with(L"File Explorer did not start again. Start it from Task Manager");
+  }));
+
+  const auto notRebuilt = [](const RebuildResult& rebuild) {
+    UninstallResult uninstall;
+    uninstall.rebuild = rebuild;
+    const std::vector<std::wstring> report = UninstallReport(uninstall);
+    EXPECT_EQ(report.size(), 2u);
+    return report.empty() ? std::wstring() : report[0];
+  };
+  for (const RebuildRefusal refusal :
+       {RebuildRefusal::kElevated, RebuildRefusal::kVirtualized, RebuildRefusal::kOtherShellUser,
+        RebuildRefusal::kNoRestartBelowPackage, RebuildRefusal::kOwnProcessHoldsCache,
+        RebuildRefusal::kFileOperation, RebuildRefusal::kCancelled}) {
+    RebuildResult rebuild;
+    rebuild.refusal = refusal;
+    const std::wstring line = notRebuilt(rebuild);
+    EXPECT_EQ(line.rfind(L"The thumbnail cache was not rebuilt: ", 0), 0u)
+        << static_cast<int>(refusal);
+    EXPECT_TRUE(line.ends_with(L".")) << static_cast<int>(refusal);
+    EXPECT_EQ(line.find(L"Nothing changed"), std::wstring::npos) << WideToUtf8Lossy(line);
+    EXPECT_EQ(line.find(L"--refresh"), std::wstring::npos) << WideToUtf8Lossy(line);
+  }
+  RebuildResult refused;
+  refused.refusal = RebuildRefusal::kOtherShellUser;
+  EXPECT_EQ(notRebuilt(refused),
+            L"The thumbnail cache was not rebuilt: File Explorer on this desktop belongs to "
+            L"another account, and the thumbnail cache is each account's own.");
+
+  RebuildResult failed;
+  failed.failure = HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK);
+  EXPECT_NE(notRebuilt(failed).find(L"link or junction"), std::wstring::npos);
+  failed.failure = E_FAIL;
+  EXPECT_EQ(notRebuilt(failed), L"The thumbnail cache was not rebuilt: 0x80004005.");
 }
 
 // Keys left in other users' hives, with the class and the install folders gone, are said as

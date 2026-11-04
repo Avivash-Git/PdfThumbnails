@@ -575,6 +575,67 @@ int RunMigrateV1Command(const CliArgs& args, const ProcessContext& context, Outp
   return Code(result.code);
 }
 
+// ---- Ctrl+C and closing the console ---------------------------------------------------------
+
+// The stop source of the running --refresh (or --uninstall --rebuild-thumbnails) and the event set
+// once it has finished, for the console's control handler; null while none runs.
+// Constant-initialised, as startup.h requires.
+constinit std::atomic<std::stop_source*> g_consoleStop{nullptr};
+constinit std::atomic<HANDLE> g_workDone{nullptr};
+// Handlers that may still be using the two: ~ConsoleStop waits until there are none.
+constinit std::atomic<int> g_handlersInside{0};
+// Whether StopOnConsoleControl is installed; once it is, it stays for the rest of the process.
+constinit std::atomic<bool> g_handlerInstalled{false};
+
+// How long closing the console waits for a running command.
+constexpr DWORD kCloseWaitMs = 4000;
+
+// Ctrl+C and Ctrl+Break ask the running command to stop and keep the process alive. Closing the
+// console ends the process when this returns, so a rebuild past its point of no return gets a few
+// seconds to finish deleting. Signing out and shutting down never get here: Windows sends them
+// only to console processes that load neither user32.dll nor gdi32.dll, and both executables
+// import user32.dll, so those end the process without notice.
+BOOL WINAPI StopOnConsoleControl(DWORD type) noexcept {
+  const bool interrupt = type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT;
+  if (!interrupt && type != CTRL_CLOSE_EVENT) return FALSE;
+  ++g_handlersInside;
+  if (std::stop_source* stop = g_consoleStop.load()) stop->request_stop();
+  if (type == CTRL_CLOSE_EVENT) {
+    if (const HANDLE done = g_workDone.load()) WaitForSingleObject(done, kCloseWaitMs);
+  }
+  --g_handlersInside;
+  return TRUE;
+}
+
+// Sends the console's control signals to |stop| while it lives (StopOnConsoleControl; without a
+// console there are none). The handler is installed the first time and never removed: a Ctrl+C
+// that ends the question's read reaches it on another thread, possibly only after the command has
+// returned, and without it Windows would then end the process with STATUS_CONTROL_C_EXIT instead
+// of the command's exit code. Going away, it sets |done|, which a handler for the console closing
+// waits on, and then waits for any handler still running. |stop| and |done| must outlive it.
+class ConsoleStop {
+ public:
+  ConsoleStop(std::stop_source* stop, HANDLE done) noexcept : done_(done) {
+    g_workDone.store(done);
+    g_consoleStop.store(stop);
+    if (!g_handlerInstalled.load()) {
+      g_handlerInstalled.store(SetConsoleCtrlHandler(StopOnConsoleControl, TRUE) != FALSE);
+    }
+  }
+  ConsoleStop(const ConsoleStop&) = delete;
+  ConsoleStop& operator=(const ConsoleStop&) = delete;
+  ~ConsoleStop() {
+    if (done_) SetEvent(done_);
+    g_consoleStop.store(nullptr);
+    g_workDone.store(nullptr);
+    // A handler that read them before they were cleared may still be using them.
+    while (g_handlersInside.load() != 0) Sleep(1);
+  }
+
+ private:
+  HANDLE done_ = nullptr;
+};
+
 // ---- --install, --uninstall, --uninstall-cleanup, --zoom ------------------------------------
 
 int RunInstallCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
@@ -653,14 +714,36 @@ int RunUninstallCommand(const CliArgs& args, const ProcessContext& context, Outp
     out.Error(UninstallElevatedRefusalMessage());
     return Code(ExitCode::kWrongContext);
   }
-  if (!args.yes &&
-      !AskYesNo(out, L"Remove " + std::wstring(kProductName) + L" for all users of this PC?")) {
+  // The question names the restart of File Explorer only when the context leaves the rebuild
+  // possible; the report says why it was not done otherwise.
+  const RebuildRefusal contextRefusal = DecideRebuildRefusal(RebuildConditionsOf(context, true));
+  const bool rebuild = args.rebuildThumbnails && contextRefusal == RebuildRefusal::kNone;
+  // With the rebuild, Ctrl+C stops the uninstall before it removes anything. Later it only keeps
+  // the rebuild from starting, and the uninstall goes on: once the rebuild has ended File
+  // Explorer, it finishes and brings File Explorer back.
+  std::stop_source stop;
+  wil::unique_event_nothrow done;
+  std::optional<ConsoleStop> consoleStop;
+  if (rebuild) {
+    (void)done.create(wil::EventOptions::ManualReset);
+    consoleStop.emplace(&stop, done.get());
+  }
+  if (!args.yes && !AskYesNo(out, UninstallQuestion(rebuild))) {
+    out.Line(L"Nothing changed.");
+    return Code(ExitCode::kCancelled);
+  }
+  if (stop.stop_requested()) {
     out.Line(L"Nothing changed.");
     return Code(ExitCode::kCancelled);
   }
   UninstallOptions options;
   options.yes = args.yes;
   options.rebuildThumbnails = args.rebuildThumbnails;
+  options.rebuildProgress = [&out](RebuildPhase phase) {
+    const std::wstring line = RebuildProgressText(phase);
+    if (!line.empty()) out.Line(line);
+  };
+  options.stop = stop.get_token();
   options.context = context;
   options.launcher = LaunchElevatedWithShell;
   options.runner = RunProgramAndWait;
@@ -681,6 +764,9 @@ int RunUninstallCommand(const CliArgs& args, const ProcessContext& context, Outp
       out.Error(std::wstring(kProductName) +
                 L" is not installed here; there is nothing to remove.");
       return Code(result.code);
+    case UninstallRefusal::kCancelled:
+      out.Line(L"Nothing changed.");
+      return Code(result.code);
     case UninstallRefusal::kNone:
       break;
   }
@@ -692,6 +778,11 @@ int RunUninstallCommand(const CliArgs& args, const ProcessContext& context, Outp
                std::to_wstring(result.innoExit) + L").");
     } else if (result.code == ExitCode::kCancelled) {
       out.Line(L"The installer's uninstaller did not start: it was cancelled.");
+    }
+    if (args.rebuildThumbnails) {
+      out.Line(
+          L"The thumbnail cache was not rebuilt: the installer's uninstaller does not "
+          L"rebuild it.");
     }
     PrintFailures(result.failures, out);
     return Code(result.code);
@@ -764,64 +855,6 @@ int RunZoomCommand(const CliArgs& args, const ProcessContext& context, Output& o
 }
 
 // ---- --refresh ------------------------------------------------------------------------------
-
-// The running refresh's stop source and the event set once it has finished, for the console's
-// control handler; null while none runs. Constant-initialised, as startup.h requires.
-constinit std::atomic<std::stop_source*> g_consoleStop{nullptr};
-constinit std::atomic<HANDLE> g_workDone{nullptr};
-// Handlers that may still be using the two: ~ConsoleStop waits until there are none.
-constinit std::atomic<int> g_handlersInside{0};
-// Whether StopOnConsoleControl is installed; once it is, it stays for the rest of the process.
-constinit std::atomic<bool> g_handlerInstalled{false};
-
-// How long closing the console waits for a running refresh.
-constexpr DWORD kCloseWaitMs = 4000;
-
-// Ctrl+C and Ctrl+Break ask the running refresh to stop and keep the process alive. Closing the
-// console ends the process when this returns, so a rebuild past its point of no return gets a few
-// seconds to finish deleting. Signing out and shutting down never get here: Windows sends them
-// only to console processes that load neither user32.dll nor gdi32.dll, and both executables
-// import user32.dll, so those end the process without notice.
-BOOL WINAPI StopOnConsoleControl(DWORD type) noexcept {
-  const bool interrupt = type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT;
-  if (!interrupt && type != CTRL_CLOSE_EVENT) return FALSE;
-  ++g_handlersInside;
-  if (std::stop_source* stop = g_consoleStop.load()) stop->request_stop();
-  if (type == CTRL_CLOSE_EVENT) {
-    if (const HANDLE done = g_workDone.load()) WaitForSingleObject(done, kCloseWaitMs);
-  }
-  --g_handlersInside;
-  return TRUE;
-}
-
-// Sends the console's control signals to |stop| while it lives (StopOnConsoleControl; without a
-// console there are none). The handler is installed the first time and never removed: a Ctrl+C
-// that ends the question's read reaches it on another thread, possibly only after the command has
-// returned, and without it Windows would then end the process with STATUS_CONTROL_C_EXIT instead
-// of the command's exit code. Going away, it sets |done|, which a handler for the console closing
-// waits on, and then waits for any handler still running. |stop| and |done| must outlive it.
-class ConsoleStop {
- public:
-  ConsoleStop(std::stop_source* stop, HANDLE done) noexcept : done_(done) {
-    g_workDone.store(done);
-    g_consoleStop.store(stop);
-    if (!g_handlerInstalled.load()) {
-      g_handlerInstalled.store(SetConsoleCtrlHandler(StopOnConsoleControl, TRUE) != FALSE);
-    }
-  }
-  ConsoleStop(const ConsoleStop&) = delete;
-  ConsoleStop& operator=(const ConsoleStop&) = delete;
-  ~ConsoleStop() {
-    if (done_) SetEvent(done_);
-    g_consoleStop.store(nullptr);
-    g_workDone.store(nullptr);
-    // A handler that read them before they were cleared may still be using them.
-    while (g_handlersInside.load() != 0) Sleep(1);
-  }
-
- private:
-  HANDLE done_ = nullptr;
-};
 
 // --refresh --full: the refusals first (they read nothing but the context and AutoRestartShell),
 // then the question, the operation lock and the rebuild (rebuild.h).
@@ -1201,14 +1234,55 @@ std::wstring WindowNamedObjectsRefusedMessage() {
          kNamedObjectsRefusedCauses;
 }
 
+std::wstring UninstallQuestion(bool rebuildThumbnails) {
+  std::wstring question = L"Remove " + std::wstring(kProductName) + L" for all users of this PC";
+  if (rebuildThumbnails) question += L", and rebuild the thumbnail cache (restarts File Explorer)";
+  return question + L"?";
+}
+
+namespace {
+
+// Why the uninstall's rebuild changed nothing, for "The thumbnail cache was not rebuilt: <reason>."
+// (the uninstall itself went on, so not "Nothing changed."); empty when it ran.
+std::wstring RebuildNotDoneReason(const RebuildResult& rebuild) {
+  switch (rebuild.refusal) {
+    case RebuildRefusal::kElevated:
+      return L"running as administrator, and File Explorer must not run as administrator";
+    case RebuildRefusal::kVirtualized:
+      return L"it could not be confirmed that changes made from here reach Windows";
+    case RebuildRefusal::kOtherShellUser:
+      return L"File Explorer on this desktop belongs to another account, and the thumbnail cache "
+             L"is each account's own";
+    case RebuildRefusal::kNoRestartBelowPackage:
+      return L"Windows is set not to restart File Explorer by itself, and this program does not "
+             L"start it from inside an app package (the terminal it runs in)";
+    case RebuildRefusal::kOwnProcessHoldsCache:
+      return L"this process has the thumbnail cache open itself";
+    case RebuildRefusal::kFileOperation:
+      return L"File Explorer is copying, moving or deleting files";
+    case RebuildRefusal::kCancelled:
+      return L"it was stopped before it started";
+    case RebuildRefusal::kNone:
+      break;
+  }
+  if (rebuild.failure == HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK)) {
+    return L"its folder is reached through a link or junction, which this program does not follow";
+  }
+  if (FAILED(rebuild.failure)) return HResultText(rebuild.failure);
+  return {};
+}
+
+}  // namespace
+
 std::vector<std::wstring> UninstallReport(const UninstallResult& result) {
   std::vector<std::wstring> lines;
   const std::wstring product = kProductName;
-  if (result.rebuildNotAvailable) {
-    lines.push_back(
-        L"--rebuild-thumbnails: this build does not rebuild the thumbnail cache during an "
-        L"uninstall yet; to clear the thumbnails File Explorer already made, run --refresh --full "
-        L"(restarts File Explorer).");
+  if (result.rebuild) {
+    if (const std::wstring reason = RebuildNotDoneReason(*result.rebuild); !reason.empty()) {
+      lines.push_back(L"The thumbnail cache was not rebuilt: " + reason + L".");
+    } else {
+      for (std::wstring& line : RebuildReport(*result.rebuild)) lines.push_back(std::move(line));
+    }
   }
   if (result.run) {
     switch (result.run->outcome) {

@@ -5,9 +5,11 @@
 // context, the tasks, the processes holding files) through the fake probes. The administrator
 // steps run in this process through fake launchers, unelevated, against the same private places;
 // machine-install's report, with the parts it did not complete, comes back through the real pipe
-// from this test program's child "report-step" (main.cpp). No test starts a real elevation,
-// deletes a task or queues a deletion at the restart. The build's folder holds copies of the
-// built binaries, which are never started.
+// from this test program's child "report-step" (main.cpp). The thumbnail-cache rebuild of
+// --uninstall --rebuild-thumbnails always runs against the fake rebuild system (fake_rebuild.h).
+// No test starts a real elevation, deletes a task, queues a deletion at the restart, ends a
+// process or touches the real thumbnail cache. The build's folder holds copies of the built
+// binaries, which are never started.
 
 #include <windows.h>
 
@@ -18,21 +20,25 @@
 #include <sddl.h>
 #include <wil/resource.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <optional>
 #include <sstream>
+#include <stop_token>
 #include <string>
 #include <vector>
 
 #include "build_folder.h"
 #include "check.h"
 #include "child_process.h"
+#include "commands.h"
 #include "elevation.h"
 #include "failure_trace.h"
 #include "fake_probes.h"
+#include "fake_rebuild.h"
 #include "file_ops.h"
 #include "instance.h"
 #include "legacy.h"
@@ -40,6 +46,7 @@
 #include "medium_il.h"
 #include "paths.h"
 #include "project_config.h"
+#include "rebuild.h"
 #include "registration.h"
 #include "registry_sandbox.h"
 #include "settings.h"
@@ -104,6 +111,20 @@ bool SetFolderDacl(const path& folder, const std::wstring& extra) {
   std::wstring sid;
   if (FAILED(GetCurrentUserSid(&sid))) return false;
   return SetDacl(folder, L"D:P(A;OICI;FA;;;" + sid + L")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" + extra);
+}
+
+// The fake rebuild system's processes.
+const DWORD kFakeShellPid = test::FakePid(50);
+const DWORD kFakeSurrogatePid = test::FakePid(100);
+
+// Two cache files on the fake rebuild system, one held by the shell and one by a thumbnail
+// process; Windows brings the shell back by itself.
+void ShellAndSurrogateHoldTheCache(test::FakeRebuildSystem* fake) {
+  fake->cacheFiles = {L"C:\\fake-cache\\thumbcache_256.db", L"C:\\fake-cache\\thumbcache_idx.db"};
+  fake->SetShell(kFakeShellPid);
+  fake->AddHolder(kFakeShellPid, fake->kExplorerImage(), {fake->cacheFiles[0]});
+  fake->AddHolder(kFakeSurrogatePid, fake->kSurrogateImage(), {fake->cacheFiles[1]});
+  fake->shellBackAfterMs = 800;
 }
 
 class Install : public ::testing::Test {
@@ -336,6 +357,8 @@ class Install : public ::testing::Test {
       *exitCode = 0;
       return S_OK;
     };
+    // Never the real rebuild: a test that asks for one gets the fake.
+    options.rebuildSystem = &rebuild_;
     return options;
   }
 
@@ -359,6 +382,7 @@ class Install : public ::testing::Test {
   wil::unique_hkey users_;
   std::vector<wil::unique_hkey> hives_;
   FakeProbes probes_;
+  test::FakeRebuildSystem rebuild_;
   std::vector<ElevationRequest> requests_;
   std::vector<std::wstring> runs_;
 };
@@ -1396,13 +1420,17 @@ TEST_F(Install, UninstallRefusalsAndTheInstallersUninstaller) {
   EXPECT_EQ(result.code, ExitCode::kWrongContext);
   options.context->elevated = false;
 
-  // The installer's install: its uninstaller runs instead, silently with --yes.
+  // The installer's install: its uninstaller runs instead, silently with --yes, and does not
+  // rebuild the thumbnail cache.
   const std::wstring uninstaller = (path(temp_.path()) / L"unins000.exe").native();
   ASSERT_HRESULT_SUCCEEDED(WriteRegistryString(sandbox_.machine(), InnoUninstallKey(),
                                                L"UninstallString", L"\"" + uninstaller + L"\""));
   ASSERT_HRESULT_SUCCEEDED(WriteSlots(roots_, SlotWrite::kTakeBack));
+  options.rebuildThumbnails = true;
   ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
   EXPECT_EQ(result.code, ExitCode::kOk);
+  EXPECT_FALSE(result.rebuild);
+  EXPECT_EQ(rebuild_.Calls(), 0);
   ASSERT_EQ(runs_, std::vector<std::wstring>{uninstaller + L" /SILENT"});
   SlotValues slots;
   ASSERT_HRESULT_SUCCEEDED(ReadSlots(roots_, &slots));
@@ -1414,6 +1442,252 @@ TEST_F(Install, UninstallRefusalsAndTheInstallersUninstaller) {
   };
   ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
   EXPECT_EQ(result.code, ExitCode::kCancelled);
+}
+
+// --rebuild-thumbnails: the rebuild runs once this user's registration is gone and before the part
+// for all users, and its report leads the uninstall's. Its progress is passed on, and a Ctrl+C past
+// its point of no return changes nothing.
+TEST_F(Install, UninstallRebuildsTheThumbnailCacheBetweenTheTwoParts) {
+  const path build = MakeBuild(paths_.machineRoot, L"2.0.0.0-1a2b3c4d");
+  RegisterMachineClass(build / kHandlerDll);
+  ASSERT_TRUE(WriteFileText(paths_.machineRoot / kSettingsExe, ""));
+  ASSERT_HRESULT_SUCCEEDED(WriteSlots(roots_, SlotWrite::kTakeBack));
+  ShellAndSurrogateHoldTheCache(&rebuild_);
+  // What was done when the rebuild started, and whether it had run when the part for all users
+  // started.
+  bool slotsGone = false;
+  size_t machineSteps = 99;
+  rebuild_.onFirstCall = [this, &slotsGone, &machineSteps] {
+    SlotValues slots;
+    slotsGone = SUCCEEDED(ReadSlots(roots_, &slots)) && !slots[0] && !slots[1];
+    machineSteps = requests_.size();
+  };
+  std::stop_source stop;
+  rebuild_.stop = &stop;
+  rebuild_.stopIn = test::FakeRebuildSystem::StopIn::kEnding;
+  rebuild_.Prime();
+  UninstallOptions options = MakeUninstallOptions();
+  options.rebuildThumbnails = true;
+  options.stop = stop.get_token();
+  std::vector<RebuildPhase> phases;
+  options.rebuildProgress = [&phases](RebuildPhase phase) { phases.push_back(phase); };
+  int rebuildCalls = -1;
+  options.launcher = [this, &rebuildCalls, machineStep = options.launcher](
+                         const ElevationRequest& request, DWORD* processId, DWORD* exitCode) {
+    rebuildCalls = rebuild_.Calls();
+    return machineStep(request, processId, exitCode);
+  };
+
+  UninstallResult result;
+  ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
+  for (const std::wstring& failure : result.failures) ADD_FAILURE() << WideToUtf8Lossy(failure);
+  EXPECT_EQ(result.code, ExitCode::kOk);
+  EXPECT_TRUE(slotsGone);
+  EXPECT_EQ(machineSteps, 0u);
+  ASSERT_EQ(requests_.size(), 1u);
+  EXPECT_GT(rebuildCalls, 0);
+  EXPECT_EQ(rebuild_.Calls(), rebuildCalls);  // nothing asked after the part for all users began
+  EXPECT_FALSE(result.machineLeft);
+
+  ASSERT_TRUE(result.rebuild);
+  EXPECT_EQ(RebuildExitCode(*result.rebuild), ExitCode::kOk);
+  EXPECT_TRUE(stop.stop_requested());
+  EXPECT_EQ(rebuild_.Ended(), (std::vector<DWORD>{kFakeSurrogatePid, kFakeShellPid}));
+  EXPECT_EQ(result.rebuild->deleted, 2u);
+  EXPECT_EQ(result.rebuild->shell, ShellOutcome::kBack);
+  EXPECT_EQ(phases,
+            (std::vector<RebuildPhase>{RebuildPhase::kEnding, RebuildPhase::kWaitingForExplorer}));
+  const std::vector<std::wstring> rebuilt = RebuildReport(*result.rebuild);
+  const std::vector<std::wstring> lines = UninstallReport(result);
+  ASSERT_GT(lines.size(), rebuilt.size());
+  EXPECT_TRUE(std::equal(rebuilt.begin(), rebuilt.end(), lines.begin()));
+  EXPECT_EQ(lines.front(), L"Thumbnail cache cleared: 2 of 2 cache files deleted.");
+  EXPECT_EQ(lines.back(),
+            std::wstring(kProductName) + L" removed. PDF files show their app icon again.");
+}
+
+// A rebuild that is refused, stopped or cannot start changes nothing and is one line of the report;
+// the uninstall goes on and succeeds. Without --rebuild-thumbnails nothing is asked at all.
+TEST_F(Install, UninstallGoesOnWhenTheRebuildIsNotDone) {
+  // The uninstall of this user's slots, with |fake| as the rebuild system: it succeeds whatever
+  // the rebuild did, and its report's first line (or nothing) is returned.
+  const auto uninstall = [this](const test::FakeRebuildSystem& fake, UninstallOptions options,
+                                UninstallResult* result) -> std::wstring {
+    EXPECT_HRESULT_SUCCEEDED(WriteSlots(roots_, SlotWrite::kTakeBack));
+    options.rebuildSystem = &fake;
+    EXPECT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, result));
+    for (const std::wstring& failure : result->failures) ADD_FAILURE() << WideToUtf8Lossy(failure);
+    EXPECT_EQ(result->code, ExitCode::kOk);
+    SlotValues slots;
+    EXPECT_HRESULT_SUCCEEDED(ReadSlots(roots_, &slots));
+    EXPECT_FALSE(slots[0]);
+    const std::vector<std::wstring> lines = UninstallReport(*result);
+    EXPECT_EQ(lines.size(), result->rebuild ? 2u : 1u);
+    return lines.empty() ? std::wstring() : lines[0];
+  };
+
+  {
+    test::FakeRebuildSystem fake;
+    ShellAndSurrogateHoldTheCache(&fake);
+    fake.Prime();
+    UninstallResult result;
+    uninstall(fake, MakeUninstallOptions(), &result);
+    EXPECT_FALSE(result.rebuild);
+    EXPECT_EQ(fake.Calls(), 0);
+  }
+
+  // File Explorer here is another account's: refused from the context alone, nothing asked.
+  {
+    test::FakeRebuildSystem fake;
+    ShellAndSurrogateHoldTheCache(&fake);
+    fake.Prime();
+    UninstallOptions options = MakeUninstallOptions();
+    options.rebuildThumbnails = true;
+    options.context->differentFromShellUser = true;
+    UninstallResult result;
+    const std::wstring line = uninstall(fake, options, &result);
+    ASSERT_TRUE(result.rebuild);
+    EXPECT_EQ(result.rebuild->refusal, RebuildRefusal::kOtherShellUser);
+    EXPECT_EQ(fake.Calls(), 0);
+    EXPECT_EQ(line.rfind(L"The thumbnail cache was not rebuilt: File Explorer on this desktop "
+                         L"belongs to another account",
+                         0),
+              0u)
+        << WideToUtf8Lossy(line);
+  }
+
+  // A copy in progress: nothing ended, nothing deleted.
+  {
+    test::FakeRebuildSystem fake;
+    ShellAndSurrogateHoldTheCache(&fake);
+    fake.fileOperation = true;
+    fake.Prime();
+    UninstallOptions options = MakeUninstallOptions();
+    options.rebuildThumbnails = true;
+    UninstallResult result;
+    const std::wstring line = uninstall(fake, options, &result);
+    ASSERT_TRUE(result.rebuild);
+    EXPECT_EQ(result.rebuild->refusal, RebuildRefusal::kFileOperation);
+    EXPECT_TRUE(fake.Ended().empty());
+    EXPECT_TRUE(fake.Deleted().empty());
+    EXPECT_EQ(line,
+              L"The thumbnail cache was not rebuilt: File Explorer is copying, moving or deleting "
+              L"files.");
+  }
+
+  // Ctrl+C after this user's registration is removed, before the rebuild's point of no return.
+  {
+    test::FakeRebuildSystem fake;
+    ShellAndSurrogateHoldTheCache(&fake);
+    std::stop_source stop;
+    fake.stop = &stop;
+    fake.stopIn = test::FakeRebuildSystem::StopIn::kFileOperationCheck;
+    fake.Prime();
+    UninstallOptions options = MakeUninstallOptions();
+    options.rebuildThumbnails = true;
+    options.stop = stop.get_token();
+    UninstallResult result;
+    const std::wstring line = uninstall(fake, options, &result);
+    ASSERT_TRUE(result.rebuild);
+    EXPECT_EQ(result.rebuild->refusal, RebuildRefusal::kCancelled);
+    EXPECT_TRUE(fake.Ended().empty());
+    EXPECT_TRUE(fake.Deleted().empty());
+    EXPECT_EQ(line, L"The thumbnail cache was not rebuilt: it was stopped before it started.");
+  }
+
+  // Restart Manager fails before anything changed.
+  {
+    test::FakeRebuildSystem fake;
+    ShellAndSurrogateHoldTheCache(&fake);
+    fake.findHoldersHr = E_FAIL;
+    fake.Prime();
+    UninstallOptions options = MakeUninstallOptions();
+    options.rebuildThumbnails = true;
+    UninstallResult result;
+    const std::wstring line = uninstall(fake, options, &result);
+    ASSERT_TRUE(result.rebuild);
+    EXPECT_EQ(result.rebuild->failure, E_FAIL);
+    EXPECT_FALSE(result.rebuild->committed);
+    EXPECT_TRUE(fake.Ended().empty());
+    EXPECT_EQ(line, L"The thumbnail cache was not rebuilt: 0x80004005.");
+  }
+}
+
+// Stopped (Ctrl+C) before anything is removed: nothing changed, and the rebuild was not started.
+TEST_F(Install, UninstallStoppedBeforeItRemovesAnythingChangesNothing) {
+  ASSERT_HRESULT_SUCCEEDED(WriteSlots(roots_, SlotWrite::kTakeBack));
+  ShellAndSurrogateHoldTheCache(&rebuild_);
+  rebuild_.Prime();
+  std::stop_source stop;
+  stop.request_stop();
+  UninstallOptions options = MakeUninstallOptions();
+  options.rebuildThumbnails = true;
+  options.stop = stop.get_token();
+  UninstallResult result;
+  ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
+  EXPECT_EQ(result.refusal, UninstallRefusal::kCancelled);
+  EXPECT_EQ(result.code, ExitCode::kCancelled);
+  EXPECT_FALSE(result.rebuild);
+  EXPECT_EQ(rebuild_.Calls(), 0);
+  EXPECT_TRUE(requests_.empty());
+  SlotValues slots;
+  ASSERT_HRESULT_SUCCEEDED(ReadSlots(roots_, &slots));
+  EXPECT_TRUE(slots[0]);
+}
+
+// A rebuild after which File Explorer did not come back, or a cache file could not be deleted, is
+// a step that failed (exit 5); the rest of the uninstall is done all the same.
+TEST_F(Install, UninstallFailsWhenTheRebuildLeavesNoFileExplorerOrACacheFile) {
+  // Below an app package, where this program does not start File Explorer, and Windows does not
+  // bring it back.
+  {
+    test::FakeRebuildSystem fake;
+    ShellAndSurrogateHoldTheCache(&fake);
+    fake.shellBackByItself = false;
+    fake.Prime();
+    ASSERT_HRESULT_SUCCEEDED(WriteSlots(roots_, SlotWrite::kTakeBack));
+    UninstallOptions options = MakeUninstallOptions();
+    options.rebuildThumbnails = true;
+    options.rebuildSystem = &fake;
+    options.context->packagedAncestor = L"Some.Terminal_8wekyb3d8bbwe";
+    UninstallResult result;
+    ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
+    ASSERT_TRUE(result.rebuild);
+    EXPECT_EQ(result.rebuild->shell, ShellOutcome::kNotBack);
+    EXPECT_EQ(result.rebuild->start, ShellStart::kBelowPackage);
+    EXPECT_EQ(fake.startCalls, 0);
+    // Not started, so the wait's own failure.
+    const std::wstring notBack = L"rebuild: " + HResultText(HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+    EXPECT_EQ(result.failures, std::vector<std::wstring>{notBack});
+    EXPECT_EQ(result.code, ExitCode::kFailed);
+    SlotValues slots;
+    ASSERT_HRESULT_SUCCEEDED(ReadSlots(roots_, &slots));
+    EXPECT_FALSE(slots[0]);
+    const std::vector<std::wstring> lines = UninstallReport(result);
+    EXPECT_TRUE(std::any_of(lines.begin(), lines.end(), [](const std::wstring& line) {
+      return line.starts_with(L"File Explorer did not start again. Start it from Task Manager");
+    }));
+    EXPECT_EQ(lines, RebuildReport(*result.rebuild));  // and not "removed"
+  }
+
+  // A cache file that could not be deleted.
+  {
+    test::FakeRebuildSystem fake;
+    ShellAndSurrogateHoldTheCache(&fake);
+    fake.deleteFailure[fake.cacheFiles[1].native()] = E_ACCESSDENIED;
+    fake.Prime();
+    ASSERT_HRESULT_SUCCEEDED(WriteSlots(roots_, SlotWrite::kTakeBack));
+    UninstallOptions options = MakeUninstallOptions();
+    options.rebuildThumbnails = true;
+    options.rebuildSystem = &fake;
+    UninstallResult result;
+    ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
+    ASSERT_TRUE(result.rebuild);
+    EXPECT_EQ(result.rebuild->shell, ShellOutcome::kBack);
+    EXPECT_EQ(result.rebuild->failed, 1u);
+    EXPECT_EQ(result.failures, std::vector<std::wstring>{L"rebuild: 0x80070005"});
+    EXPECT_EQ(result.code, ExitCode::kFailed);
+  }
 }
 
 TEST_F(Install, UserFilesKeep1xsLicensesWhileItsManagerIsThere) {

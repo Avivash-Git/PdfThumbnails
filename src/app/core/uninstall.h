@@ -4,24 +4,29 @@
 // --uninstall [--yes] [--rebuild-thumbnails], unelevated:
 //   refused where the registry may be virtualized (8) and in an elevated process (8: the
 //   per-user part must run as the signed-in user); while the installer (Inno Setup) has an
-//   install here, its own uninstaller runs instead (silently with --yes), so its records stay
-//   right; the operation lock (4; 5 when Windows does not let this process make it); nothing of
-//   the product here: 6. Then
+//   install here, its own uninstaller runs instead (silently with --yes; it does not rebuild the
+//   thumbnail cache), so its records stay right; the operation lock (4; 5 when Windows does not
+//   let this process make it); nothing of the product here: 6; stopped (Ctrl+C) before anything
+//   is removed: 3, nothing changed. Then
 //   1. the per-user part: the .pdf slots that name the handler (and the keys above them left
 //      empty), the per-user class, the check task and 1.x's, HKCU\<product key>; Explorer is told;
-//   2. the part for all users, when the class for all users or the install folder for all users
+//   2. with --rebuild-thumbnails, the thumbnail cache, now that File Explorer no longer finds the
+//      handler for this user: rebuilt as --refresh --full rebuilds it (rebuild.h), which restarts
+//      File Explorer. This process holds the lock and never ran the Explorer test, so it does not
+//      hold the cache itself. A rebuild that is refused, stopped before its point of no return or
+//      cannot start changed nothing: the report says why and the uninstall goes on. One after
+//      which File Explorer did not come back, or a cache file could not be deleted, is a step that
+//      failed ("rebuild: <HRESULT>");
+//   3. the part for all users, when the class for all users or the install folder for all users
 //      is there: the administrator step machine-uninstall of the settings executable installed
 //      there (a prompt; declined: the part stays, exit 1);
-//   3. the user's files: this version's files in the per-user folder, its app folder, and the
+//   4. the user's files: this version's files in the per-user folder, its app folder, and the
 //      app's data folder (the log). What is in use stays and is removed at the next sign-in
 //      (a RunOnce value per folder, file_ops.h).
 //   Exit 0; 1 when the part for all users is left; 5 when a step failed; 7 when nothing else
 //   failed but the administrator step did not get administrator rights (the part stays); 8 when
 //   nothing else failed but the administrator step refused to run below an app package (the part
 //   stays).
-//   --rebuild-thumbnails: this build does not rebuild the thumbnail cache during an uninstall
-//   yet (--refresh --full does it on its own): it is accepted and said so, and the uninstall goes
-//   on.
 //
 // machine-uninstall (elevated): the class for all users; every user's check task (the shared task
 // folder) and 1.x's task; the install folder for all users, files in use (its own executable
@@ -54,6 +59,7 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -65,6 +71,7 @@
 #include "file_ops.h"
 #include "inno.h"
 #include "migrate_v1.h"
+#include "rebuild.h"
 #include "registration.h"
 #include "registry_roots.h"
 #include "snapshot.h"
@@ -182,11 +189,19 @@ enum class UninstallRefusal {
   kWrongContext,  // 8
   kElevated,      // 8
   kNotInstalled,  // 6
+  kCancelled,     // 3: stopped before anything was removed
 };
 
 struct UninstallOptions {
   bool yes = false;  // --yes: the installer's uninstaller runs silently
   bool rebuildThumbnails = false;
+  // What the rebuild asks Windows; null: RealRebuildSystem. Tests pass a fake.
+  const RebuildSystem* rebuildSystem = nullptr;
+  // The rebuild's progress (optional; RebuildThumbnailCache).
+  RebuildProgressFn rebuildProgress;
+  // Ctrl+C: before step 1 the uninstall stops (kCancelled); later it only keeps the rebuild from
+  // starting, until the rebuild's point of no return, and the uninstall goes on.
+  std::stop_token stop;
   std::optional<ProcessContext> context;  // the canary's; when absent, probes' kWrite context
   std::optional<EnginePaths> paths;
   std::filesystem::path dataDir;  // empty: GetDataDir
@@ -211,7 +226,8 @@ struct UninstallResult {
   std::optional<ElevatedRun> run;
   bool machineLeft = false;
   UserFilesRemoval files;
-  bool rebuildNotAvailable = false;
+  // --rebuild-thumbnails: what the rebuild did, a refusal or a failure before it started included
+  std::optional<RebuildResult> rebuild;
   // "<step>: <HRESULT>", and "machine <part>: <HRESULT>" for each part of the step for all users
   // that failed
   std::vector<std::wstring> failures;

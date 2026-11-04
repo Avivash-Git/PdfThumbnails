@@ -44,7 +44,8 @@ constexpr VerbInfo kVerbs[] = {
     {Verb::kInstall, L"--install", kNone, L"", Writes::kYes, false, false, true, false,
      L"Install {product} from this folder (developer builds)."},
     {Verb::kUninstall, L"--uninstall", kNone, L"", Writes::kYes, false, false, false, false,
-     L"Remove {product} for all users of this PC."},
+     L"Remove {product} for all users of this PC (asks first, or --yes). --rebuild-thumbnails "
+     L"also rebuilds the thumbnail cache, which restarts File Explorer."},
     {Verb::kDiagnostics, L"--diagnostics", kNone, L"", Writes::kNo, true, false, false, false,
      L"Print a report for bug reports, with personal details masked."},
     {Verb::kMigrateV1, L"--migrate-v1", kNone, L"", Writes::kYes, false, false, false, false,

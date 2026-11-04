@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -104,6 +105,10 @@ class FakeRebuildSystem final : public RebuildSystem {
   StopIn stopIn = StopIn::kNowhere;
   std::stop_source* stop = nullptr;
 
+  // Called on the engine's first question (AutoRestartShell, past the refusals the context
+  // decides), for a test that looks at what the engine's caller had done by then.
+  std::function<void()> onFirstCall;
+
   // ---- the shell and the holders ----
 
   void SetShell(DWORD pid) {
@@ -152,7 +157,7 @@ class FakeRebuildSystem final : public RebuildSystem {
   // ---- RebuildSystem ----
 
   HRESULT AutoRestartShell(bool* on) const noexcept override {
-    ++calls_;
+    if (calls_++ == 0 && onFirstCall) onFirstCall();
     *on = autoRestart;
     return autoRestartHr;
   }

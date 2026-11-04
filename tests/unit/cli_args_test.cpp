@@ -405,11 +405,14 @@ TEST(CliArgs, HelpListsEveryVisibleCommandAndExitCode) {
   EXPECT_EQ(UsageText(kCliRelease).find(L"--install"), std::wstring::npos);
 }
 
-// The rebuild restarts File Explorer: the help says that it asks first, and exit code 3 covers a
-// Ctrl+C before anything changed.
+// The rebuild restarts File Explorer: the help says that it asks first, also for the uninstall's
+// rebuild, and exit code 3 covers a Ctrl+C before anything changed.
 TEST(CliArgs, HelpSaysTheRebuildAsksFirst) {
   const std::wstring text = UsageText(kCli);
   EXPECT_NE(text.find(L"which restarts File Explorer (asks first, or --yes)."), std::wstring::npos);
+  EXPECT_NE(text.find(L"for all users of this PC (asks first, or --yes). --rebuild-thumbnails also "
+                      L"rebuilds the thumbnail cache, which restarts File Explorer.\n"),
+            std::wstring::npos);
   EXPECT_NE(text.find(L"  3  cancelled (the administrator prompt was declined, the answer was no, "
                       L"or Ctrl+C stopped it before anything changed)\n"),
             std::wstring::npos);

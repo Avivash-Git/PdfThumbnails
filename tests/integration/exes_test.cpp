@@ -527,6 +527,40 @@ TEST_P(Exes, FixTakeBackWithoutYesAndWithoutAConsoleIsAUsageError) {
   EXPECT_EQ(run.out, "");
 }
 
+// The value of the environment variable |name|; empty when it is not set or longer than 31.
+std::wstring EnvironmentValue(const wchar_t* name) {
+  wchar_t value[32] = {};
+  const DWORD length = GetEnvironmentVariableW(name, value, ARRAYSIZE(value));
+  return length > 0 && length < ARRAYSIZE(value) ? std::wstring(value, length) : std::wstring();
+}
+
+// A runner GitHub hosts, thrown away after the job. GITHUB_ACTIONS=true alone is not enough: it is
+// also set on a self-hosted runner, which may be a PC someone uses, and by tools that run a
+// workflow locally.
+bool OnGitHubHostedRunner() {
+  return EnvironmentValue(L"GITHUB_ACTIONS") == L"true" &&
+         EnvironmentValue(L"RUNNER_ENVIRONMENT") == L"github-hosted";
+}
+
+// Why the elevated tests of a rebuild (--refresh --full, --uninstall --rebuild-thumbnails) must
+// not start the executable here, or nothing when they may. Elevated, only the elevation refusals
+// under test would keep a run from ending File Explorer and deleting the thumbnail cache, so they
+// run only where both are thrown away after the job: elevated with the real registry on a runner
+// GitHub hosts.
+std::optional<std::string> WhyAnElevatedRefreshMayNotRunHere(const ProcessContext& context) {
+  if (!context.elevated) return "not elevated here (CI runs elevated)";
+  if (context.virtualization != Virtualization::kNo) {
+    return "elevated, but the registry may be virtualized here, so it is not certain which "
+           "refusal answers first";
+  }
+  if (!OnGitHubHostedRunner()) {
+    return "elevated, but not on a runner GitHub hosts (GITHUB_ACTIONS=true with "
+           "RUNNER_ENVIRONMENT=github-hosted): only the refusal under test would keep this PC's "
+           "File Explorer and thumbnail cache from a real rebuild";
+  }
+  return std::nullopt;
+}
+
 // The commands that install, uninstall or set the zoom, in the forms a test may start.
 std::vector<std::wstring> InstallUninstallZoomCommands() {
   std::vector<std::wstring> commands = {L"--uninstall --yes",
@@ -560,7 +594,8 @@ TEST_P(Exes, InstallUninstallAndZoomAreRefusedWhereWritesAreSwallowed) {
 
 // Elevated where the registry is the real one (CI), they stop at their elevation guard (exit 8)
 // before anything else is read: each has a part that belongs to the signed-in user, and the
-// install and the uninstall ask for administrator rights themselves.
+// install and the uninstall ask for administrator rights themselves. The uninstall's rebuild is
+// started only where the elevated --refresh tests start one (WhyAnElevatedRefreshMayNotRunHere).
 TEST_P(Exes, InstallUninstallAndZoomAreRefusedElevated) {
   ProcessContext context;
   ASSERT_HRESULT_SUCCEEDED(GetProcessContext(ContextProbe::kWrite, &context));
@@ -569,7 +604,13 @@ TEST_P(Exes, InstallUninstallAndZoomAreRefusedElevated) {
     GTEST_SKIP() << "the registry may be virtualized here, so the virtualization guard answers "
                     "first";
   }
+  const std::optional<std::string> whyNoRebuild = WhyAnElevatedRefreshMayNotRunHere(context);
   for (const std::wstring& arguments : InstallUninstallZoomCommands()) {
+    if (whyNoRebuild && arguments.find(L"--rebuild-thumbnails") != std::wstring::npos) {
+      std::printf("%ls %ls (elevated) not started: %s\n", GetParam(), arguments.c_str(),
+                  whyNoRebuild->c_str());
+      continue;
+    }
     test::CapturedRun run;
     RUN_OR_SKIP(arguments, run);
     std::printf("%ls %ls (elevated) -> exit %lu: %s", GetParam(), arguments.c_str(), run.exitCode,
@@ -593,39 +634,6 @@ TEST_P(Exes, UninstallWithoutYesAndWithoutAConsoleIsAUsageError) {
   EXPECT_NE(run.err.find("--yes"), std::string::npos) << run.err;
   EXPECT_EQ(run.err.find("Cannot run here"), std::string::npos) << run.err;
   EXPECT_EQ(run.out, "");
-}
-
-// The value of the environment variable |name|; empty when it is not set or longer than 31.
-std::wstring EnvironmentValue(const wchar_t* name) {
-  wchar_t value[32] = {};
-  const DWORD length = GetEnvironmentVariableW(name, value, ARRAYSIZE(value));
-  return length > 0 && length < ARRAYSIZE(value) ? std::wstring(value, length) : std::wstring();
-}
-
-// A runner GitHub hosts, thrown away after the job. GITHUB_ACTIONS=true alone is not enough: it is
-// also set on a self-hosted runner, which may be a PC someone uses, and by tools that run a
-// workflow locally.
-bool OnGitHubHostedRunner() {
-  return EnvironmentValue(L"GITHUB_ACTIONS") == L"true" &&
-         EnvironmentValue(L"RUNNER_ENVIRONMENT") == L"github-hosted";
-}
-
-// Why the elevated --refresh tests must not start the executable here, or nothing when they may.
-// Elevated, only the rebuild's own elevation refusal, the code under test, would keep a run from
-// ending File Explorer and deleting the thumbnail cache, so they run only where both are thrown
-// away after the job: elevated with the real registry on a runner GitHub hosts.
-std::optional<std::string> WhyAnElevatedRefreshMayNotRunHere(const ProcessContext& context) {
-  if (!context.elevated) return "not elevated here (CI runs elevated)";
-  if (context.virtualization != Virtualization::kNo) {
-    return "elevated, but the registry may be virtualized here, so it is not certain which "
-           "refusal answers first";
-  }
-  if (!OnGitHubHostedRunner()) {
-    return "elevated, but not on a runner GitHub hosts (GITHUB_ACTIONS=true with "
-           "RUNNER_ENVIRONMENT=github-hosted): only the refusal under test would keep this PC's "
-           "File Explorer and thumbnail cache from a real rebuild";
-  }
-  return std::nullopt;
 }
 
 // Why --refresh must not be started here, or nothing when it may be. A real rebuild would end
