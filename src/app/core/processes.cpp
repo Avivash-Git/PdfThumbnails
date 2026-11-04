@@ -1,6 +1,8 @@
 #include "processes.h"
 
+// userenv.h before (another inclusion of) wil/resource.h enables WIL's environment block wrapper.
 #include <tlhelp32.h>
+#include <userenv.h>
 #include <wil/resource.h>
 #include <wil/result_macros.h>
 
@@ -53,6 +55,18 @@ HRESULT ProcessImage(HANDLE process, std::wstring* image) noexcept try {
     }
     buffer.resize(buffer.size() * 2);
   }
+}
+CATCH_RETURN();
+
+// A Windows folder from |get| (GetSystemDirectoryW and its kind).
+HRESULT WindowsFolder(UINT(WINAPI* get)(LPWSTR, UINT), std::filesystem::path* folder) noexcept try {
+  folder->clear();
+  wchar_t buffer[MAX_PATH] = {};
+  const UINT length = get(buffer, ARRAYSIZE(buffer));
+  RETURN_LAST_ERROR_IF(length == 0);
+  RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE), length >= ARRAYSIZE(buffer));
+  *folder = buffer;
+  return S_OK;
 }
 CATCH_RETURN();
 
@@ -136,11 +150,95 @@ CATCH_RETURN();
 
 HRESULT SurrogateImagePath(std::wstring* image) noexcept try {
   image->clear();
-  wchar_t system[MAX_PATH] = {};
-  const UINT length = GetSystemDirectoryW(system, ARRAYSIZE(system));
-  RETURN_LAST_ERROR_IF(length == 0);
-  RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE), length >= ARRAYSIZE(system));
-  *image = (std::filesystem::path(system) / L"dllhost.exe").native();
+  std::filesystem::path system;
+  RETURN_IF_FAILED(WindowsFolder(GetSystemDirectoryW, &system));
+  *image = (system / L"dllhost.exe").native();
+  return S_OK;
+}
+CATCH_RETURN();
+
+HRESULT GetRebuildImages(RebuildImages* images) noexcept try {
+  *images = {};
+  RebuildImages found;
+  std::filesystem::path folder;
+  // The system's own Windows folder, also for a user whose GetWindowsDirectoryW is private
+  // (Terminal Services).
+  RETURN_IF_FAILED(WindowsFolder(GetSystemWindowsDirectoryW, &folder));
+  found.explorer = (folder / L"explorer.exe").native();
+  RETURN_IF_FAILED(SurrogateImagePath(&found.surrogate));
+  wchar_t wow64[MAX_PATH] = {};
+  const UINT length = GetSystemWow64DirectoryW(wow64, ARRAYSIZE(wow64));
+  if (length == 0) {
+    // No WOW64 on this Windows: no 32-bit thumbnail process either.
+    RETURN_LAST_ERROR_IF(GetLastError() != ERROR_CALL_NOT_IMPLEMENTED);
+  } else {
+    RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE), length >= ARRAYSIZE(wow64));
+    found.surrogateWow64 = (std::filesystem::path(wow64) / L"dllhost.exe").native();
+  }
+  *images = std::move(found);
+  return S_OK;
+}
+CATCH_RETURN();
+
+bool OwnProcessStartedSince(std::wstring_view image, const FILETIME& since) noexcept {
+  HANDLE rawSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (rawSnapshot == INVALID_HANDLE_VALUE) return false;
+  wil::unique_handle snapshot(rawSnapshot);
+  const DWORD self = GetCurrentProcessId();
+  DWORD ownSession = 0;
+  if (!ProcessIdToSessionId(self, &ownSession)) return false;
+  const std::wstring_view leaf = image.substr(image.find_last_of(L"\\/") + 1);
+  PROCESSENTRY32W entry = {sizeof(entry)};
+  for (BOOL more = Process32FirstW(snapshot.get(), &entry); more;
+       more = Process32NextW(snapshot.get(), &entry)) {
+    DWORD session = 0;
+    if (entry.th32ProcessID == self || !IEquals(entry.szExeFile, leaf) ||
+        !ProcessIdToSessionId(entry.th32ProcessID, &session) || session != ownSession) {
+      continue;
+    }
+    wil::unique_handle process(
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID));
+    FILETIME start = {};
+    std::wstring found;
+    if (!process || FAILED(ProcessStart(process.get(), &start)) ||
+        CompareFileTime(&start, &since) <= 0 || FAILED(ProcessImage(process.get(), &found)) ||
+        !SameImagePath(found, image) || !SameUser(process.get())) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+HRESULT StartExplorerFreshEnvironment(bool* jobForbids) noexcept try {
+  *jobForbids = false;
+  RebuildImages images;
+  RETURN_IF_FAILED(GetRebuildImages(&images));
+  std::filesystem::path system;
+  RETURN_IF_FAILED(WindowsFolder(GetSystemDirectoryW, &system));
+  RETURN_IF_FAILED(EnsureDelayLoaded("userenv.dll"));
+
+  wil::unique_handle token;
+  RETURN_IF_WIN32_BOOL_FALSE(OpenProcessToken(
+      GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE, token.put()));
+  // The user's variables from the profile only: nothing of this process's environment.
+  wil::unique_environment_block environment;
+  RETURN_IF_WIN32_BOOL_FALSE(CreateEnvironmentBlock(environment.put(), token.get(), FALSE));
+  BOOL inJob = FALSE;
+  RETURN_IF_WIN32_BOOL_FALSE(IsProcessInJob(GetCurrentProcess(), nullptr, &inJob));
+
+  std::wstring commandLine = L"\"" + images.explorer + L"\"";
+  STARTUPINFOW startup = {sizeof(startup)};
+  wil::unique_process_information started;
+  const DWORD flags = CREATE_UNICODE_ENVIRONMENT | CREATE_DEFAULT_ERROR_MODE |
+                      (inJob ? CREATE_BREAKAWAY_FROM_JOB : 0);
+  if (!CreateProcessW(images.explorer.c_str(), commandLine.data(), nullptr, nullptr, FALSE, flags,
+                      environment.get(), system.c_str(), &startup, &started)) {
+    const DWORD error = GetLastError();
+    // A job that does not allow breaking away: it would end File Explorer with this process.
+    if (inJob && error == ERROR_ACCESS_DENIED) *jobForbids = true;
+    return HRESULT_FROM_WIN32(error);
+  }
   return S_OK;
 }
 CATCH_RETURN();

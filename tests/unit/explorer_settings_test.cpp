@@ -52,6 +52,19 @@ TEST(ExplorerSettings, PolicySwitch) {
   EXPECT_FALSE(IsPolicyOnValue(shortDword));
 }
 
+TEST(AutoRestartShell, OnUnlessAZero) {
+  // On by default: missing, another type, or any value but a REG_DWORD 0.
+  EXPECT_TRUE(IsAutoRestartShellOn(std::nullopt));
+  EXPECT_TRUE(IsAutoRestartShellOn(Dword(1)));
+  EXPECT_TRUE(IsAutoRestartShellOn(Dword(2)));
+  EXPECT_TRUE(IsAutoRestartShellOn(Text(L"0")));
+  RegistryValue shortDword = Dword(0);
+  shortDword.data.resize(1);
+  EXPECT_TRUE(IsAutoRestartShellOn(shortDword));
+  // Off only for a REG_DWORD 0.
+  EXPECT_FALSE(IsAutoRestartShellOn(Dword(0)));
+}
+
 TEST(OsBuild, Format) {
   EXPECT_EQ(FormatOsBuild(L"26300", L"26300", 9818), L"26300.9818");
   EXPECT_EQ(FormatOsBuild(L"26300", std::nullopt, std::nullopt), L"26300");

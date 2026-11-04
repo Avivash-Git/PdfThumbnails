@@ -12,16 +12,19 @@
 #                             (synthetic files), build ids, slot and zoom decisions, the 1.x
 #                             leftover classifier, the Smart App Control verdict, task
 #                             triggers, the Explorer test's probe PDF and --test-file checks,
-#                             Explorer settings and the Windows build string; the check's
-#                             findings, repair plans and exit codes; the reports: the status
-#                             text line by line, the JSON status (escaping, schema 1, checked by
-#                             a strict JSON reader) and the diagnostics' masking; the --fix
-#                             confirmation rules; the install side's pure parts (RunOnce
-#                             clean-up names and command lines, the broad-group permission
-#                             check on SDDL descriptors, the elevated steps and their one
-#                             command line, the elevated side's entry checks, exit codes, the
-#                             report lines, the token facts and the trace of where a step
-#                             failed, the installer's records, which DLL holders may be
+#                             Explorer settings, whether Windows restarts File Explorer and the
+#                             Windows build string; the thumbnail-cache rebuild's decisions (the
+#                             cache-file name, the refusal order, how a holder is classified and
+#                             ended, the wait for File Explorer, the reopen plan, the exit code
+#                             and the report); the check's findings, repair plans and exit codes;
+#                             the reports: the status text line by line, the JSON status
+#                             (escaping, schema 1, checked by a strict JSON reader) and the
+#                             diagnostics' masking; the --fix confirmation rules; the install
+#                             side's pure parts (RunOnce clean-up names and command lines, the
+#                             broad-group permission check on SDDL descriptors, the elevated steps
+#                             and their one command line, the elevated side's entry checks, exit
+#                             codes, the report lines, the token facts and the trace of where a
+#                             step failed, the installer's records, which DLL holders may be
 #                             ended); the 1.x clean-up's pure parts (the table of 1.x files, the
 #                             plan for 1.x's per-user folder on fake trees of both layouts, the
 #                             plans for build folders for all users) and the installer step's
@@ -44,18 +47,21 @@
 #                             keys), the check task and 1.x's task, Explorer settings, the
 #                             Windows build, File Explorer's folder windows (counts only; one
 #                             window on a folder of its own is opened through the shell, and
-#                             closed, only on runners GitHub hosts); the whole check (gathering,
-#                             repairs, the record, the lock, also against a process below Medium
-#                             integrity) through private keys, folders under %TEMP% and fakes for
-#                             everything Windows-wide, --checks the same way; probe PDFs in %TEMP%
-#                             (deleted); the diagnostics' log reader on files under %TEMP%; the
-#                             check task written (each checkbox combination, the folder or the
-#                             root-folder name, one copy per user, the check's repair of a stale
-#                             task, a run through Task Scheduler) in a task folder and under
-#                             root-folder names of its own, deleted afterwards (elevated also the
-#                             protected task folder and the uninstall's removal of every user's
-#                             task); --status (text and JSON) and --diagnostics of both
-#                             executables against the real state, read-only, without the
+#                             closed, only on runners GitHub hosts), whether Windows restarts File
+#                             Explorer; the thumbnail-cache rebuild against a fake system (ending
+#                             order, deleting, waiting for File Explorer, reopening windows, the
+#                             log's counts) and the cache-file listing on a temp folder; the whole
+#                             check (gathering, repairs, the record, the lock, also against a
+#                             process below Medium integrity) through private keys, folders under
+#                             %TEMP% and fakes for everything Windows-wide, --checks the same way;
+#                             probe PDFs in %TEMP% (deleted); the diagnostics' log reader on files
+#                             under %TEMP%; the check task written (each checkbox combination, the
+#                             folder or the root-folder name, one copy per user, the check's
+#                             repair of a stale task, a run through Task Scheduler) in a task
+#                             folder and under root-folder names of its own, deleted afterwards
+#                             (elevated also the protected task folder and the uninstall's removal
+#                             of every user's task); --status (text and JSON) and --diagnostics of
+#                             both executables against the real state, read-only, without the
 #                             Explorer test; --checks of both only where a guard refuses it (8,
 #                             or 6 where nothing is installed); the install side's file
 #                             operations under %TEMP% (reparse point checks, the verified copy,
@@ -197,6 +203,7 @@ if(TARGET pdft_appcore)
     unit/output_test.cpp
     unit/paths_test.cpp
     unit/pe_info_test.cpp
+    unit/rebuild_test.cpp
     unit/registration_test.cpp
     unit/registry_roots_test.cpp
     unit/repair_test.cpp
@@ -305,8 +312,10 @@ if(TARGET pdft_appcore)
     integration/install_test.cpp
     integration/instance_test.cpp
     integration/live_test_files_test.cpp
+    integration/fake_rebuild.h
     integration/probes_test.cpp
     integration/processes_test.cpp
+    integration/rebuild_test.cpp
     integration/registration_test.cpp
     integration/settings_test.cpp
     integration/setup_test.cpp

@@ -282,6 +282,18 @@ TEST_F(Sandboxed, ExplorerSettings) {
   EXPECT_FALSE(settings.thumbnailsOffByMachinePolicy);
 }
 
+TEST_F(Sandboxed, AutoRestartShell) {
+  bool on = false;
+  ASSERT_HRESULT_SUCCEEDED(ReadAutoRestartShell(roots_, &on));
+  EXPECT_TRUE(on);  // missing: on
+  SetDword(sandbox_.machine(), kWinlogonKey, kAutoRestartShellValue, 0);
+  ASSERT_HRESULT_SUCCEEDED(ReadAutoRestartShell(roots_, &on));
+  EXPECT_FALSE(on);
+  SetDword(sandbox_.machine(), kWinlogonKey, kAutoRestartShellValue, 1);
+  ASSERT_HRESULT_SUCCEEDED(ReadAutoRestartShell(roots_, &on));
+  EXPECT_TRUE(on);
+}
+
 TEST(OsBuildReal, NamesThisWindows) {
   std::wstring build;
   ASSERT_HRESULT_SUCCEEDED(ReadOsBuild(RegistryRoots{}, &build));

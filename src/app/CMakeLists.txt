@@ -18,7 +18,9 @@
 #                                   per-user and machine-wide steps; installing from a build's
 #                                   folder and uninstalling, with their administrator steps;
 #                                   File Explorer's folder windows (listed, and opened through
-#                                   the running shell)
+#                                   the running shell); rebuilding the thumbnail cache (ending
+#                                   File Explorer and the thumbnail processes, deleting the cache
+#                                   files, and letting Windows start File Explorer again)
 #   PdfThumbnailsSettings  WIN32    ${PDFT_SETTINGS_EXE}: the window, scheduled checks, elevated
 #                                   steps; shows no console window
 #   PdfThumbnailsCli       console  ${PDFT_CLI_EXE}: terminals and scripts (a shell waits for it
@@ -58,6 +60,7 @@ add_library(pdft_appcore STATIC
   core/pdfcraft.cpp core/pdfcraft.h
   core/pe_info.cpp core/pe_info.h
   core/processes.cpp core/processes.h
+  core/rebuild.cpp core/rebuild.h
   core/registration.cpp core/registration.h
   core/registry_roots.cpp core/registry_roots.h
   core/repair.cpp core/repair.h
@@ -82,10 +85,11 @@ pdft_harden(pdft_appcore LIB)
 target_link_libraries(pdft_appcore PUBLIC pdft_config pdft_common pdft_wil
                                    PRIVATE ole32 oleaut32 advapi32 shell32 shlwapi user32 uuid)
 # Not KnownDLLs: CNG (build ids and copies hash files), the event log (Code Integrity blocks),
-# Windows Installer (finding PdfCraft) and Restart Manager (which processes hold a build's DLLs).
-# The event-log, Windows Installer and Restart Manager code checks that its DLL loads before the
-# first call (delay_load.h), so a missing one is an answer, not a crash.
-pdft_delay_load(pdft_appcore bcrypt.dll wevtapi.dll msi.dll rstrtmgr.dll)
+# Windows Installer (finding PdfCraft), Restart Manager (which processes hold a build's DLLs) and
+# userenv (the user's environment for the File Explorer the thumbnail-cache rebuild restarts).
+# The event-log, Windows Installer, Restart Manager and userenv code checks that its DLL loads
+# before the first call (delay_load.h), so a missing one is an answer, not a crash.
+pdft_delay_load(pdft_appcore bcrypt.dll wevtapi.dll msi.dll rstrtmgr.dll userenv.dll)
 
 # pdft_add_app_exe(<target> <WIN32|CONSOLE> <file name> <manifest template> <description>
 #                  <source>...)

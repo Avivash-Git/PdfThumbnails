@@ -53,6 +53,20 @@ HRESULT ReadExplorerSettings(const RegistryRoots& roots, ExplorerSettings* setti
   return S_OK;
 }
 
+bool IsAutoRestartShellOn(const std::optional<RegistryValue>& value) noexcept {
+  if (!value) return true;
+  const std::optional<DWORD> number = RegistryDword(*value);
+  return !number || *number != 0;
+}
+
+HRESULT ReadAutoRestartShell(const RegistryRoots& roots, bool* on) noexcept {
+  *on = true;
+  std::optional<RegistryValue> value;
+  RETURN_IF_FAILED(ReadRegistryValue(roots.machine, kWinlogonKey, kAutoRestartShellValue, &value));
+  *on = IsAutoRestartShellOn(value);
+  return S_OK;
+}
+
 std::wstring FormatOsBuild(const std::optional<std::wstring>& currentBuild,
                            const std::optional<std::wstring>& currentBuildNumber,
                            std::optional<DWORD> ubr) {

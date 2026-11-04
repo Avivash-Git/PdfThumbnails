@@ -7,6 +7,8 @@
 // next time Explorer asks for a thumbnail. Only processes that pass every check are ended: the
 // image on an allow list (normally just %SystemRoot%\System32\dllhost.exe), the same session,
 // the same user, and still the very process that was found (same process id and start time).
+// Rebuilding the thumbnail cache allows File Explorer too (GetRebuildImages), and starts it
+// again where Windows does not.
 
 #pragma once
 
@@ -78,6 +80,32 @@ HolderRefusal JudgeHolder(const Holder& found, const HolderFacts& now,
 // by another process with its id); E_ACCESSDENIED when a check refuses it, and it is left alone.
 [[nodiscard]] HRESULT TerminateOwnSessionHolder(
     const Holder& holder, std::span<const std::wstring_view> allowedImages) noexcept;
+
+// ---- Rebuilding the thumbnail cache (rebuild.h) -------------------------------------------
+
+// The images the thumbnail-cache rebuild may end: File Explorer and the COM surrogate (the
+// thumbnail process). |surrogateWow64| is empty where Windows has no WOW64.
+struct RebuildImages {
+  std::wstring explorer;        // <System Windows folder>\explorer.exe
+  std::wstring surrogate;       // <System folder>\dllhost.exe
+  std::wstring surrogateWow64;  // <SysWOW64>\dllhost.exe
+};
+[[nodiscard]] HRESULT GetRebuildImages(RebuildImages* images) noexcept;
+
+// Whether a process of |image| (a whole path, compared as SameImagePath does) runs in this
+// process's session as this process's user and started after |since| (UTC), from a process
+// snapshot. Processes that cannot be read do not count.
+bool OwnProcessStartedSince(std::wstring_view image, const FILETIME& since) noexcept;
+
+// Starts <Windows>\explorer.exe as this process's user with a fresh environment from the user's
+// profile (not this process's: a terminal's variables must not reach what the user starts from
+// File Explorer), nothing inherited, in System32, outside this process's job when it is in one.
+// *jobForbids is true when the job does not let it leave (nothing started; the call fails with
+// HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED)). Does not wait for it. Never call it below an app
+// package or when elevated.
+[[nodiscard]] HRESULT StartExplorerFreshEnvironment(bool* jobForbids) noexcept;
+
+// ---- This process's parent ----------------------------------------------------------------
 
 // This process's parent: the process id its creator had, provided that process still exists
 // and was created before this one (so the id was not reused). Fails with

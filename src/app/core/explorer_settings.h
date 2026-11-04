@@ -11,6 +11,10 @@
 // DisableThumbnailsOnNetworkFolders covers network folders only, NoThumbnailCache only stops
 // caching them, and there is no "NoThumbnails" policy.
 //
+// Also whether Windows restarts File Explorer by itself after it ends (AutoRestartShell under
+// HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon), which rebuilding the thumbnail
+// cache relies on.
+//
 // Everything is read through RegistryRoots, so tests plant their own values.
 
 #pragma once
@@ -46,6 +50,19 @@ bool IsPolicyOnValue(const std::optional<RegistryValue>& value) noexcept;
 // Reads the three values. Read-only.
 [[nodiscard]] HRESULT ReadExplorerSettings(const RegistryRoots& roots,
                                            ExplorerSettings* settings) noexcept;
+
+// ---- Restarting File Explorer -------------------------------------------------------------
+
+inline constexpr wchar_t kWinlogonKey[] =
+    L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon";
+inline constexpr wchar_t kAutoRestartShellValue[] = L"AutoRestartShell";
+
+// Windows restarts File Explorer after it ends abnormally unless AutoRestartShell is a REG_DWORD
+// 0 (pure): missing, or any other type or value, means on.
+bool IsAutoRestartShellOn(const std::optional<RegistryValue>& value) noexcept;
+
+// Reads AutoRestartShell under roots.machine (IsAutoRestartShellOn). Read-only.
+[[nodiscard]] HRESULT ReadAutoRestartShell(const RegistryRoots& roots, bool* on) noexcept;
 
 // ---- Windows build ------------------------------------------------------------------------
 
