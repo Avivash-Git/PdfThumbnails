@@ -28,9 +28,11 @@ bool MakePipe(HANDLE* read, HANDLE* write, bool childReads) {
 }
 
 // Starts |exe| with |in|, |out| and |err| as its standard handles, which are the only handles
-// it inherits (null: none); with |token|, as that token.
+// it inherits (null: none); with |token|, as that token; with |flags| (CREATE_NO_WINDOW unless
+// given).
 HRESULT Spawn(const std::wstring& exe, const std::wstring& arguments, HANDLE in, HANDLE out,
-              HANDLE err, PROCESS_INFORMATION* process, HANDLE token = nullptr) {
+              HANDLE err, PROCESS_INFORMATION* process, HANDLE token = nullptr,
+              DWORD creationFlags = CREATE_NO_WINDOW) {
   std::vector<HANDLE> handles;
   for (HANDLE handle : {in, out, err}) {
     if (handle && std::find(handles.begin(), handles.end(), handle) == handles.end()) {
@@ -55,7 +57,7 @@ HRESULT Spawn(const std::wstring& exe, const std::wstring& arguments, HANDLE in,
   startup.StartupInfo.hStdOutput = out;
   startup.StartupInfo.hStdError = err;
   std::wstring commandLine = QuoteArgument(exe) + L" " + arguments;
-  const DWORD flags = CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
+  const DWORD flags = creationFlags | EXTENDED_STARTUPINFO_PRESENT;
   const BOOL started =
       SUCCEEDED(hr) &&
       (token ? CreateProcessAsUserW(token, exe.c_str(), commandLine.data(), nullptr, nullptr, TRUE,
@@ -95,8 +97,11 @@ std::wstring& NamedObjectSuffix() {
   return suffix;
 }
 
-CapturedRun RunCaptured(const std::wstring& exe, const std::wstring& arguments, DWORD timeoutMs,
-                        HANDLE token) {
+namespace {
+
+// RunCaptured, and RunCapturedInJobs when |jobs| is not empty.
+CapturedRun Capture(const std::wstring& exe, const std::wstring& arguments, DWORD timeoutMs,
+                    HANDLE token, std::span<const HANDLE> jobs) {
   CapturedRun run;
   HANDLE outRead = nullptr;
   HANDLE outWrite = nullptr;
@@ -108,7 +113,8 @@ CapturedRun RunCaptured(const std::wstring& exe, const std::wstring& arguments, 
     return run;
   }
   PROCESS_INFORMATION process = {};
-  run.hr = Spawn(exe, arguments, nullptr, outWrite, errWrite, &process, token);
+  const DWORD flags = jobs.empty() ? CREATE_NO_WINDOW : (DETACHED_PROCESS | CREATE_SUSPENDED);
+  run.hr = Spawn(exe, arguments, nullptr, outWrite, errWrite, &process, token, flags);
   // Only the child holds the write ends now: reading ends when it ends.
   Close(&outWrite);
   Close(&errWrite);
@@ -116,6 +122,27 @@ CapturedRun RunCaptured(const std::wstring& exe, const std::wstring& arguments, 
     Close(&outRead);
     Close(&errRead);
     return run;
+  }
+  if (!jobs.empty()) {
+    for (const HANDLE job : jobs) {
+      if (!AssignProcessToJobObject(job, process.hProcess)) {
+        run.hr = LastError();
+        run.assigned = false;
+        break;
+      }
+    }
+    if (run.assigned && ResumeThread(process.hThread) == static_cast<DWORD>(-1)) {
+      run.hr = LastError();
+    }
+    if (FAILED(run.hr)) {
+      TerminateProcess(process.hProcess, 1);
+      WaitForSingleObject(process.hProcess, 10000);
+      CloseHandle(process.hThread);
+      CloseHandle(process.hProcess);
+      Close(&outRead);
+      Close(&errRead);
+      return run;
+    }
   }
   CloseHandle(process.hThread);
   std::thread outReader(ReadAll, outRead, &run.out);
@@ -133,6 +160,18 @@ CapturedRun RunCaptured(const std::wstring& exe, const std::wstring& arguments, 
   Close(&errRead);
   CloseHandle(process.hProcess);
   return run;
+}
+
+}  // namespace
+
+CapturedRun RunCaptured(const std::wstring& exe, const std::wstring& arguments, DWORD timeoutMs,
+                        HANDLE token) {
+  return Capture(exe, arguments, timeoutMs, token, {});
+}
+
+CapturedRun RunCapturedInJobs(const std::wstring& exe, const std::wstring& arguments,
+                              DWORD timeoutMs, std::span<const HANDLE> jobs) {
+  return Capture(exe, arguments, timeoutMs, nullptr, jobs);
 }
 
 HRESULT RunSelfChild(const std::wstring& arguments, DWORD* processId, DWORD* exitCode) {

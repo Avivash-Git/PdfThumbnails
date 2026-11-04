@@ -539,17 +539,24 @@ HRESULT Uninstall(const UninstallOptions& options, const RegistryRoots& roots,
   // 2. The thumbnail cache, now that File Explorer no longer finds the handler for this user. The
   // lock is held, and the snapshot above ran no Explorer test, so this process holds no cache file.
   if (options.rebuildThumbnails) {
-    RebuildOptions rebuildOptions;
-    rebuildOptions.context = context;
-    const RebuildSystem& system =
-        options.rebuildSystem ? *options.rebuildSystem : RealRebuildSystem();
     RebuildResult rebuild;
-    if (const HRESULT hr = RebuildThumbnailCache(rebuildOptions, system, options.rebuildProgress,
-                                                 options.stop, &rebuild);
-        FAILED(hr)) {
-      // Out of memory before anything changed: not rebuilt, and the uninstall goes on.
-      rebuild = RebuildResult{};
-      rebuild.failure = hr;
+    const std::optional<RebuildPrecheck>& precheck = options.rebuildPrecheck;
+    if (precheck && (FAILED(precheck->failure) || precheck->refusal != RebuildRefusal::kNone)) {
+      // The command's check refused it, or failed, before its question: nothing is asked again.
+      rebuild = RebuildNotStarted(*precheck);
+      Log(LogLevel::kWarning, L"refresh", RebuildPrecheckLogText(*precheck));
+    } else {
+      RebuildOptions rebuildOptions;
+      rebuildOptions.context = context;
+      const RebuildSystem& system =
+          options.rebuildSystem ? *options.rebuildSystem : RealRebuildSystem();
+      if (const HRESULT hr = RebuildThumbnailCache(rebuildOptions, system, options.rebuildProgress,
+                                                   options.stop, &rebuild);
+          FAILED(hr)) {
+        // Out of memory before anything changed: not rebuilt, and the uninstall goes on.
+        rebuild = RebuildResult{};
+        rebuild.failure = hr;
+      }
     }
     if (const std::optional<HRESULT> failure = RebuildStepFailure(rebuild)) {
       Failed(&failures, L"rebuild", *failure);

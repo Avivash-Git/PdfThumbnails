@@ -55,6 +55,16 @@
 //   pipe-squat <process id>      creates the elevation report pipe named after <process id>, as
 //                                someone else would, prints "ready", waits up to 10 s for a
 //                                client and prints "got=<bytes it sent>" or "got=none"
+//   sleep-exit <ms> <code>       waits <ms> milliseconds and exits with <code>
+//   own-job                      prints "in-job=<0|1>": whether this copy is in a job
+//   job-escape <image>          makes a start of "<image> --pdft-child sleep-exit 0 0" ready
+//                                (ProgramStart) and tries it; prints "escape=<leaves|forbidden|
+//                                stays|none> hr=0x<HRESULT>" (none: it failed)
+//   start-outside <image>        starts "<image> --pdft-child sleep-exit 0 0" the same way (only
+//                                outside every job); prints "forbids=<0|1> hr=0x<HRESULT>"
+//   breakaway-flag <image>       creates "<image> --pdft-child sleep-exit 0 0" suspended with
+//                                CREATE_BREAKAWAY_FROM_JOB, ends it at once, and prints
+//                                "error=<CreateProcessW's error, 0 when it was created>"
 
 #include <windows.h>
 
@@ -67,6 +77,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -325,6 +336,72 @@ int PipeSquat(const wchar_t* processId) {
   return 0;
 }
 
+// What a start made from this process (ProgramStart) of the test program does: the program
+// started exits at once if it ever runs.
+constexpr wchar_t kExitAtOnce[] = L"--pdft-child sleep-exit 0 0";
+
+std::string HrText(HRESULT hr) {
+  char text[16];
+  sprintf_s(text, "0x%08lX", static_cast<unsigned long>(hr));
+  return text;
+}
+
+int OwnJob() {
+  BOOL inJob = FALSE;
+  if (!IsProcessInJob(GetCurrentProcess(), nullptr, &inJob)) return 1;
+  Print(std::string("in-job=") + (inJob ? "1" : "0") + "\n");
+  return 0;
+}
+
+int JobEscapeOf(const wchar_t* image) {
+  std::unique_ptr<pdft::ProgramStart> start;
+  HRESULT hr = pdft::ProgramStart::Prepare(image, kExitAtOnce, &start);
+  pdft::JobEscape escape = pdft::JobEscape::kForbidden;
+  if (SUCCEEDED(hr)) hr = start->Trial(&escape);
+  const char* name = "none";
+  if (SUCCEEDED(hr)) {
+    switch (escape) {
+      case pdft::JobEscape::kLeaves:
+        name = "leaves";
+        break;
+      case pdft::JobEscape::kForbidden:
+        name = "forbidden";
+        break;
+      case pdft::JobEscape::kStays:
+        name = "stays";
+        break;
+    }
+  }
+  Print(std::string("escape=") + name + " hr=" + HrText(hr) + "\n");
+  return 0;
+}
+
+int StartOutside(const wchar_t* image) {
+  std::unique_ptr<pdft::ProgramStart> start;
+  HRESULT hr = pdft::ProgramStart::Prepare(image, kExitAtOnce, &start);
+  bool forbids = false;
+  if (SUCCEEDED(hr)) hr = start->Start(&forbids);
+  Print(std::string("forbids=") + (forbids ? "1" : "0") + " hr=" + HrText(hr) + "\n");
+  return 0;
+}
+
+int BreakawayFlag(const wchar_t* image) {
+  std::wstring commandLine = pdft::test::QuoteArgument(image) + L" " + kExitAtOnce;
+  STARTUPINFOW startup = {sizeof(startup)};
+  wil::unique_process_information process;
+  DWORD error = ERROR_SUCCESS;
+  if (CreateProcessW(image, commandLine.data(), nullptr, nullptr, FALSE,
+                     CREATE_SUSPENDED | CREATE_BREAKAWAY_FROM_JOB, nullptr, nullptr, &startup,
+                     &process)) {
+    TerminateProcess(process.hProcess, ERROR_CANCELLED);
+    WaitForSingleObject(process.hProcess, 5000);
+  } else {
+    error = GetLastError();
+  }
+  Print("error=" + std::to_string(error) + "\n");
+  return 0;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -348,6 +425,14 @@ int wmain(int argc, wchar_t** argv) {
     if (mode == L"report" && argc >= 4) return Report(argc, argv);
     if (mode == L"report-step" && argc >= 6) return ReportStep(argc, argv);
     if (mode == L"pipe-squat" && argc == 4) return PipeSquat(argv[3]);
+    if (mode == L"sleep-exit" && argc == 5) {
+      Sleep(wcstoul(argv[3], nullptr, 10));
+      return static_cast<int>(wcstoul(argv[4], nullptr, 10));
+    }
+    if (mode == L"own-job" && argc == 3) return OwnJob();
+    if (mode == L"job-escape" && argc == 4) return JobEscapeOf(argv[3]);
+    if (mode == L"start-outside" && argc == 4) return StartOutside(argv[3]);
+    if (mode == L"breakaway-flag" && argc == 4) return BreakawayFlag(argv[3]);
     return 2;
   }
 

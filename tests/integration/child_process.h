@@ -4,6 +4,7 @@
 
 #include <windows.h>
 
+#include <span>
 #include <string>
 
 namespace pdft::test {
@@ -22,6 +23,9 @@ struct CapturedRun {
   DWORD exitCode = 0;
   std::string out;  // what it wrote to standard output, as bytes
   std::string err;  // standard error
+  // RunCapturedInJobs: false when it could not be put in a job (hr says why; it was ended
+  // before it ran).
+  bool assigned = true;
 };
 
 // Runs |exe| with |arguments| (already quoted), standard output and error each into a pipe, no
@@ -30,6 +34,12 @@ struct CapturedRun {
 // handle. With |token| (a primary token), the child runs as that token instead of this process's.
 CapturedRun RunCaptured(const std::wstring& exe, const std::wstring& arguments, DWORD timeoutMs,
                         HANDLE token = nullptr);
+
+// RunCaptured, with the child put in each of |jobs| (outermost first, so each later one is nested
+// in the one before) before it runs. It is created suspended and without a console
+// (DETACHED_PROCESS: no console host joins the jobs with it), and resumed once it is in every job.
+CapturedRun RunCapturedInJobs(const std::wstring& exe, const std::wstring& arguments,
+                              DWORD timeoutMs, std::span<const HANDLE> jobs);
 
 // Runs this test program as "--pdft-child <arguments>" (already quoted), the way the elevated
 // process would be started but without elevation: no window, no handles inherited. Waits up to

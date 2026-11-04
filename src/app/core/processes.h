@@ -8,16 +8,20 @@
 // image on an allow list (normally just %SystemRoot%\System32\dllhost.exe), the same session,
 // the same user, and still the very process that was found (same process id and start time).
 // Rebuilding the thumbnail cache allows File Explorer too (GetRebuildImages), and starts it
-// again where Windows does not.
+// again where Windows does not (ProgramStart), never leaving it inside a job.
 
 #pragma once
 
 #include <windows.h>
 
+// userenv.h before wil/resource.h enables WIL's environment block wrapper (ProgramStart).
 #include <RestartManager.h>
+#include <userenv.h>
 #include <wil/resource.h>
 
 #include <filesystem>
+#include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -97,13 +101,98 @@ struct RebuildImages {
 // snapshot. Processes that cannot be read do not count.
 bool OwnProcessStartedSince(std::wstring_view image, const FILETIME& since) noexcept;
 
-// Starts <Windows>\explorer.exe as this process's user with a fresh environment from the user's
-// profile (not this process's: a terminal's variables must not reach what the user starts from
-// File Explorer), nothing inherited, in System32, outside this process's job when it is in one.
-// *jobForbids is true when the job does not let it leave (nothing started; the call fails with
-// HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED)). Does not wait for it. Never call it below an app
-// package or when elevated.
-[[nodiscard]] HRESULT StartExplorerFreshEnvironment(bool* jobForbids) noexcept;
+// ---- Jobs, and starting a program outside them --------------------------------------------
+
+// How a program started from this process leaves this process's job.
+enum class BreakawayMode {
+  kNotInJob,   // this process is in no job
+  kAsk,        // CREATE_BREAKAWAY_FROM_JOB: the job sets JOB_OBJECT_LIMIT_BREAKAWAY_OK, or its
+               // limits could not be read
+  kSilent,     // only JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK: leaving needs no flag
+  kForbidden,  // neither: nothing started from here leaves this job
+};
+
+// This process's immediate job, as far as it can be read; the jobs above it cannot be.
+struct JobFacts {
+  bool inJob = false;
+  std::optional<DWORD> limitFlags;  // its LimitFlags; std::nullopt when they could not be read
+};
+
+// Reads this process's immediate job. Limits that cannot be read are no failure (std::nullopt).
+[[nodiscard]] HRESULT ReadOwnJob(JobFacts* facts) noexcept;
+
+// The mode for |facts| (pure).
+BreakawayMode ChooseBreakaway(const JobFacts& facts) noexcept;
+
+// Whether a start from this process that failed with |error| was refused by this process's job
+// (pure): ERROR_ACCESS_DENIED where the start asked to leave a job whose limits could not be
+// read. A job whose limits let programs leave it cannot refuse: access denied there comes from
+// the image (its permissions, or a security product that blocks the start).
+bool JobRefusedStart(const JobFacts& facts, DWORD error) noexcept;
+
+// Whether a program started from this process without a breakaway flag (as ShellExecuteExW
+// starts one) is ended when this process's job closes (pure): the job sets
+// JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE and not JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, or its limits
+// could not be read. Jobs above it are not seen.
+bool ChildEndsWithJob(const JobFacts& facts) noexcept;
+
+// For the log (pure): "none", "unread", or the limits BREAKAWAY_OK, SILENT_BREAKAWAY_OK and
+// KILL_ON_JOB_CLOSE of |facts| as 0x........ (the others masked out). May throw std::bad_alloc.
+std::wstring JobFactsToken(const JobFacts& facts);
+
+// Where a program started from this process would run, as far as jobs go.
+enum class JobEscape {
+  kLeaves,     // the trial process was in no job
+  kForbidden,  // this process's job lets nothing leave it (nothing started, or the start refused)
+  kStays,      // the trial process was in a job: one above this process's own job kept it
+};
+
+// A start of a program made ready before it is needed, so that starting it reads and allocates
+// nothing more: as this process's user, with a fresh environment from the user's profile (not
+// this process's: a terminal's variables must not reach what the user starts from File
+// Explorer), nothing inherited, in System32, and outside every job (also one above this
+// process's own job) or not at all. The rebuild never uses it elevated or below an app package;
+// nothing in it depends on that.
+class ProgramStart {
+ public:
+  ProgramStart(const ProgramStart&) = delete;
+  ProgramStart& operator=(const ProgramStart&) = delete;
+  ~ProgramStart();
+
+  // Gathers what the start needs: System32, userenv.dll, this process's token and the
+  // environment block made from it, one command line for Trial and one for Start
+  // ("<image>" <arguments>), and this process's job (ReadOwnJob).
+  [[nodiscard]] static HRESULT Prepare(std::wstring image, std::wstring arguments,
+                                       std::unique_ptr<ProgramStart>* start) noexcept;
+
+  const JobFacts& Job() const noexcept { return job_; }
+
+  // Whether the start would run outside every job. Unless this process's job lets nothing leave
+  // it, the image is started suspended (so it runs no code and opens no window) without the busy
+  // cursor; its jobs are read, and it is ended and waited for at once. Fails when that start
+  // failed for another reason than the job (JobRefusedStart; a real start would fail too), and
+  // when the trial process could not be ended or did not end within 5 s. At most once.
+  [[nodiscard]] HRESULT Trial(JobEscape* escape) noexcept;
+
+  // Starts it: created suspended, and resumed only when it is in no job. Otherwise it is ended
+  // before it runs, *jobForbids is true, and this fails with
+  // HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED); *jobForbids is also true when the job refused the
+  // start (JobRefusedStart). Does not wait for it. At most once.
+  [[nodiscard]] HRESULT Start(bool* jobForbids) noexcept;
+
+ private:
+  ProgramStart() = default;
+
+  std::wstring image_;
+  std::filesystem::path system32_;
+  wil::unique_environment_block environment_;
+  std::wstring trialCommandLine_;
+  std::wstring startCommandLine_;
+  JobFacts job_;
+  BreakawayMode mode_ = BreakawayMode::kNotInJob;
+  bool tried_ = false;
+  bool started_ = false;
+};
 
 // ---- This process's parent ----------------------------------------------------------------
 

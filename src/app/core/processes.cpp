@@ -16,11 +16,15 @@
 namespace pdft {
 namespace {
 
-// How long TerminateOwnSessionHolder waits for an ended process to go.
+// How long TerminateOwnSessionHolder, and a ProgramStart that ends what it started, wait for an
+// ended process to go.
 constexpr DWORD kTerminateWaitMs = 5000;
 
 // The exit code an ended holder gets.
 constexpr UINT kTerminatedExitCode = 1;
+
+// The exit code a process ProgramStart started suspended and ended gets.
+constexpr UINT kTrialExitCode = ERROR_CANCELLED;
 
 // Restart Manager may report more processes on a second call than it counted on the first.
 constexpr int kListAttempts = 5;
@@ -87,6 +91,40 @@ bool SameUser(HANDLE process) noexcept {
   }
   return EqualSid(reinterpret_cast<TOKEN_USER*>(theirUser)->User.Sid,
                   reinterpret_cast<TOKEN_USER*>(ourUser)->User.Sid) != FALSE;
+}
+
+// Creates |image| suspended with |commandLine|, |environment| and |folder|, nothing inherited,
+// asking to leave this process's job (|job|) as ChooseBreakaway says. *refused when that job did
+// not let it leave (JobRefusedStart).
+HRESULT CreateSuspended(const std::wstring& image, std::wstring* commandLine, void* environment,
+                        const std::filesystem::path& folder, const JobFacts& job,
+                        DWORD startupFlags, wil::unique_process_information* process,
+                        bool* refused) noexcept {
+  *refused = false;
+  STARTUPINFOW startup = {sizeof(startup)};
+  startup.dwFlags = startupFlags;
+  const DWORD flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_DEFAULT_ERROR_MODE |
+                      (ChooseBreakaway(job) == BreakawayMode::kAsk ? CREATE_BREAKAWAY_FROM_JOB : 0);
+  if (!CreateProcessW(image.c_str(), commandLine->data(), nullptr, nullptr, FALSE, flags,
+                      environment, folder.c_str(), &startup, process)) {
+    const DWORD error = GetLastError();
+    *refused = JobRefusedStart(job, error);
+    return HRESULT_FROM_WIN32(error);
+  }
+  return S_OK;
+}
+
+// Ends |process|, which ProgramStart created suspended, and waits for it to go.
+HRESULT EndAndWait(HANDLE process) noexcept {
+  if (!TerminateProcess(process, kTrialExitCode)) return LastErrorOr(E_FAIL);
+  switch (WaitForSingleObject(process, kTerminateWaitMs)) {
+    case WAIT_OBJECT_0:
+      return S_OK;
+    case WAIT_FAILED:
+      return LastErrorOr(E_FAIL);
+    default:
+      return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+  }
 }
 
 }  // namespace
@@ -210,38 +248,131 @@ bool OwnProcessStartedSince(std::wstring_view image, const FILETIME& since) noex
   return false;
 }
 
-HRESULT StartExplorerFreshEnvironment(bool* jobForbids) noexcept try {
-  *jobForbids = false;
-  RebuildImages images;
-  RETURN_IF_FAILED(GetRebuildImages(&images));
-  std::filesystem::path system;
-  RETURN_IF_FAILED(WindowsFolder(GetSystemDirectoryW, &system));
-  RETURN_IF_FAILED(EnsureDelayLoaded("userenv.dll"));
+HRESULT ReadOwnJob(JobFacts* facts) noexcept {
+  *facts = {};
+  BOOL inJob = FALSE;
+  RETURN_IF_WIN32_BOOL_FALSE(IsProcessInJob(GetCurrentProcess(), nullptr, &inJob));
+  facts->inJob = inJob != FALSE;
+  if (!facts->inJob) return S_OK;
+  // Without a handle: this process's immediate job.
+  JOBOBJECT_BASIC_LIMIT_INFORMATION limits = {};
+  if (QueryInformationJobObject(nullptr, JobObjectBasicLimitInformation, &limits, sizeof(limits),
+                                nullptr)) {
+    facts->limitFlags = limits.LimitFlags;
+  }
+  return S_OK;
+}
 
+BreakawayMode ChooseBreakaway(const JobFacts& facts) noexcept {
+  if (!facts.inJob) return BreakawayMode::kNotInJob;
+  // Limits that cannot be read: ask, as a start always did; a job that refuses says so.
+  if (!facts.limitFlags) return BreakawayMode::kAsk;
+  if (*facts.limitFlags & JOB_OBJECT_LIMIT_BREAKAWAY_OK) return BreakawayMode::kAsk;
+  if (*facts.limitFlags & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK) return BreakawayMode::kSilent;
+  return BreakawayMode::kForbidden;
+}
+
+bool JobRefusedStart(const JobFacts& facts, DWORD error) noexcept {
+  // Only a start that asks to leave (kAsk) can be refused, and with known limits it is asked only
+  // where they allow it.
+  return ChooseBreakaway(facts) == BreakawayMode::kAsk && !facts.limitFlags &&
+         error == ERROR_ACCESS_DENIED;
+}
+
+bool ChildEndsWithJob(const JobFacts& facts) noexcept {
+  if (!facts.inJob) return false;
+  if (!facts.limitFlags) return true;
+  return (*facts.limitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) != 0 &&
+         (*facts.limitFlags & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK) == 0;
+}
+
+std::wstring JobFactsToken(const JobFacts& facts) {
+  if (!facts.inJob) return L"none";
+  if (!facts.limitFlags) return L"unread";
+  constexpr DWORD kShown = JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK |
+                           JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  return HResultText(static_cast<HRESULT>(*facts.limitFlags & kShown));
+}
+
+ProgramStart::~ProgramStart() = default;
+
+HRESULT ProgramStart::Prepare(std::wstring image, std::wstring arguments,
+                              std::unique_ptr<ProgramStart>* start) noexcept try {
+  start->reset();
+  std::unique_ptr<ProgramStart> made(new ProgramStart());
+  RETURN_IF_FAILED(WindowsFolder(GetSystemDirectoryW, &made->system32_));
+  RETURN_IF_FAILED(EnsureDelayLoaded("userenv.dll"));
   wil::unique_handle token;
   RETURN_IF_WIN32_BOOL_FALSE(OpenProcessToken(
       GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE, token.put()));
   // The user's variables from the profile only: nothing of this process's environment.
-  wil::unique_environment_block environment;
-  RETURN_IF_WIN32_BOOL_FALSE(CreateEnvironmentBlock(environment.put(), token.get(), FALSE));
-  BOOL inJob = FALSE;
-  RETURN_IF_WIN32_BOOL_FALSE(IsProcessInJob(GetCurrentProcess(), nullptr, &inJob));
-
-  std::wstring commandLine = L"\"" + images.explorer + L"\"";
-  STARTUPINFOW startup = {sizeof(startup)};
-  wil::unique_process_information started;
-  const DWORD flags = CREATE_UNICODE_ENVIRONMENT | CREATE_DEFAULT_ERROR_MODE |
-                      (inJob ? CREATE_BREAKAWAY_FROM_JOB : 0);
-  if (!CreateProcessW(images.explorer.c_str(), commandLine.data(), nullptr, nullptr, FALSE, flags,
-                      environment.get(), system.c_str(), &startup, &started)) {
-    const DWORD error = GetLastError();
-    // A job that does not allow breaking away: it would end File Explorer with this process.
-    if (inJob && error == ERROR_ACCESS_DENIED) *jobForbids = true;
-    return HRESULT_FROM_WIN32(error);
-  }
+  RETURN_IF_WIN32_BOOL_FALSE(CreateEnvironmentBlock(made->environment_.put(), token.get(), FALSE));
+  RETURN_IF_FAILED(ReadOwnJob(&made->job_));
+  made->mode_ = ChooseBreakaway(made->job_);
+  // One command line each: CreateProcessW may write to the one it is given.
+  std::wstring commandLine = L"\"" + image + L"\"";
+  if (!arguments.empty()) commandLine += L" " + arguments;
+  made->trialCommandLine_ = commandLine;
+  made->startCommandLine_ = std::move(commandLine);
+  made->image_ = std::move(image);
+  *start = std::move(made);
   return S_OK;
 }
 CATCH_RETURN();
+
+HRESULT ProgramStart::Trial(JobEscape* escape) noexcept {
+  *escape = JobEscape::kForbidden;
+  RETURN_HR_IF(E_ILLEGAL_METHOD_CALL, tried_);
+  tried_ = true;
+  if (mode_ == BreakawayMode::kForbidden) return S_OK;  // nothing is started
+  wil::unique_process_information trial;
+  bool refused = false;
+  const HRESULT created = CreateSuspended(image_, &trialCommandLine_, environment_.get(), system32_,
+                                          job_, STARTF_FORCEOFFFEEDBACK, &trial, &refused);
+  if (refused) return S_OK;  // the job let nothing leave it after all
+  RETURN_IF_FAILED(created);
+  BOOL inJob = FALSE;
+  const HRESULT jobHr =
+      IsProcessInJob(trial.hProcess, nullptr, &inJob) ? S_OK : LastErrorOr(E_FAIL);
+  // A trial process that may still exist is never a pass, whatever its jobs.
+  RETURN_IF_FAILED(EndAndWait(trial.hProcess));
+  RETURN_IF_FAILED(jobHr);
+  *escape = inJob ? JobEscape::kStays : JobEscape::kLeaves;
+  return S_OK;
+}
+
+HRESULT ProgramStart::Start(bool* jobForbids) noexcept {
+  *jobForbids = false;
+  RETURN_HR_IF(E_ILLEGAL_METHOD_CALL, started_);
+  started_ = true;
+  if (mode_ == BreakawayMode::kForbidden) {
+    *jobForbids = true;
+    return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+  }
+  wil::unique_process_information started;
+  bool refused = false;
+  const HRESULT created = CreateSuspended(image_, &startCommandLine_, environment_.get(), system32_,
+                                          job_, 0, &started, &refused);
+  if (FAILED(created)) {
+    *jobForbids = refused;
+    return created;
+  }
+  BOOL inJob = FALSE;
+  const HRESULT jobHr =
+      IsProcessInJob(started.hProcess, nullptr, &inJob) ? S_OK : LastErrorOr(E_FAIL);
+  if (FAILED(jobHr) || inJob) {
+    // Never left running inside a job: the job's end would take it along.
+    *jobForbids = SUCCEEDED(jobHr);
+    RETURN_IF_FAILED(EndAndWait(started.hProcess));
+    return FAILED(jobHr) ? jobHr : HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+  }
+  if (ResumeThread(started.hThread) == static_cast<DWORD>(-1)) {
+    const HRESULT resumeHr = LastErrorOr(E_FAIL);
+    (void)EndAndWait(started.hProcess);
+    return resumeHr;
+  }
+  return S_OK;
+}
 
 bool SameImagePath(std::wstring_view a, std::wstring_view b) noexcept {
   try {

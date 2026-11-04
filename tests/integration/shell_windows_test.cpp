@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include "github_runner.h"
 #include "paths.h"
 #include "strings.h"
 #include "temp_dir.h"
@@ -32,21 +33,6 @@ namespace {
 using std::filesystem::path;
 
 constexpr DWORD kTimeoutMs = 10000;
-
-// The value of the environment variable |name|; empty when it is not set or longer than 31.
-std::wstring EnvironmentValue(const wchar_t* name) {
-  wchar_t value[32] = {};
-  const DWORD length = GetEnvironmentVariableW(name, value, ARRAYSIZE(value));
-  return length > 0 && length < ARRAYSIZE(value) ? std::wstring(value, length) : std::wstring();
-}
-
-// A runner GitHub hosts, thrown away after the job. GITHUB_ACTIONS=true alone is not enough: it is
-// also set on a self-hosted runner, which may be a PC someone uses, and by tools that run a
-// workflow locally.
-bool OnGitHubHostedRunner() {
-  return EnvironmentValue(L"GITHUB_ACTIONS") == L"true" &&
-         EnvironmentValue(L"RUNNER_ENVIRONMENT") == L"github-hosted";
-}
 
 // The listed windows that show |folder|.
 std::vector<FolderWindow> Showing(const std::vector<FolderWindow>& windows, const path& folder) {
@@ -114,7 +100,7 @@ TEST(ShellWindows, NoViewShowsANewFolder) {
 }
 
 TEST(ShellWindows, OpensAFolderWindowThroughTheShell) {
-  if (!OnGitHubHostedRunner()) {
+  if (!test::OnGitHubHostedRunner()) {
     GTEST_SKIP() << "opens File Explorer windows: only on a runner GitHub hosts (GITHUB_ACTIONS="
                     "true with RUNNER_ENVIRONMENT=github-hosted)";
   }

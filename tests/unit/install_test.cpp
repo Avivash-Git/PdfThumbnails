@@ -413,7 +413,8 @@ TEST(UninstallTexts, TheThumbnailRebuild) {
   };
   for (const RebuildRefusal refusal :
        {RebuildRefusal::kElevated, RebuildRefusal::kVirtualized, RebuildRefusal::kOtherShellUser,
-        RebuildRefusal::kNoRestartBelowPackage, RebuildRefusal::kOwnProcessHoldsCache,
+        RebuildRefusal::kNoRestartBelowPackage, RebuildRefusal::kNoRestartInJob,
+        RebuildRefusal::kNoRestartStartFails, RebuildRefusal::kOwnProcessHoldsCache,
         RebuildRefusal::kFileOperation, RebuildRefusal::kCancelled}) {
     RebuildResult rebuild;
     rebuild.refusal = refusal;
@@ -429,6 +430,16 @@ TEST(UninstallTexts, TheThumbnailRebuild) {
   EXPECT_EQ(notRebuilt(refused),
             L"The thumbnail cache was not rebuilt: File Explorer on this desktop belongs to "
             L"another account, and the thumbnail cache is each account's own.");
+  refused.refusal = RebuildRefusal::kNoRestartInJob;
+  EXPECT_EQ(notRebuilt(refused),
+            L"The thumbnail cache was not rebuilt: Windows is set not to restart File Explorer by "
+            L"itself, and a File Explorer started from here would stay inside a job of the program "
+            L"this runs in.");
+  refused.refusal = RebuildRefusal::kNoRestartStartFails;
+  refused.startError = E_FAIL;
+  EXPECT_EQ(notRebuilt(refused),
+            L"The thumbnail cache was not rebuilt: Windows is set not to restart File Explorer by "
+            L"itself, and this program cannot start File Explorer from here either (0x80004005).");
 
   RebuildResult failed;
   failed.failure = HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK);
@@ -623,12 +634,22 @@ TEST(RefreshTexts, Refusals) {
             std::wstring::npos);
   for (const RebuildRefusal refusal :
        {RebuildRefusal::kElevated, RebuildRefusal::kOtherShellUser,
-        RebuildRefusal::kNoRestartBelowPackage, RebuildRefusal::kOwnProcessHoldsCache,
+        RebuildRefusal::kNoRestartBelowPackage, RebuildRefusal::kNoRestartInJob,
+        RebuildRefusal::kNoRestartStartFails, RebuildRefusal::kOwnProcessHoldsCache,
         RebuildRefusal::kFileOperation}) {
     const std::wstring message = RefreshFullRefusalMessage(refusal, context);
     EXPECT_FALSE(message.empty()) << static_cast<int>(refusal);
     EXPECT_EQ(message, RebuildRefusalText(refusal, context));
   }
+  // Where File Explorer could not be started again: nothing changed, and the start's own error.
+  const std::wstring inJob = RefreshFullRefusalMessage(RebuildRefusal::kNoRestartInJob, context);
+  EXPECT_NE(inJob.find(L"Nothing changed"), std::wstring::npos) << WideToUtf8Lossy(inJob);
+  EXPECT_NE(inJob.find(L"Win+R"), std::wstring::npos) << WideToUtf8Lossy(inJob);
+  const std::wstring startFails =
+      RefreshFullRefusalMessage(RebuildRefusal::kNoRestartStartFails, context, E_ACCESSDENIED);
+  EXPECT_NE(startFails.find(L"(" + HResultText(E_ACCESSDENIED) + L")"), std::wstring::npos)
+      << WideToUtf8Lossy(startFails);
+  EXPECT_TRUE(startFails.ends_with(L"Nothing changed.")) << WideToUtf8Lossy(startFails);
   EXPECT_EQ(RefreshFullRefusalMessage(RebuildRefusal::kElevated, context)
                 .rfind(L"Cannot run here: running as administrator.", 0),
             0u);

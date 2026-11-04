@@ -7,8 +7,11 @@
 // Refused (exit 8) elevated, where the registry may be virtualized, where File Explorer on this
 // desktop belongs to another account (the cache, the windows and the File Explorer that Windows
 // restarts are that account's), and below an app package where Windows does not restart File
-// Explorer by itself (this program never starts it from inside a package). A process that has
-// the cache open itself cannot free it (exit 5).
+// Explorer by itself (this program never starts it from inside a package); and, where Windows
+// does not restart File Explorer by itself, where a File Explorer started from here would stay
+// inside a job (8) or cannot be started from here at all (5): checked by starting explorer.exe
+// suspended and ending it before it runs. A process that has the cache open itself cannot free it
+// (exit 5).
 //
 // What may be ended: a process that holds a cache file, of this session and this user, whose
 // image is <Windows>\explorer.exe or the thumbnail process (<System32>\dllhost.exe,
@@ -28,6 +31,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stop_token>
@@ -60,9 +64,21 @@ enum class RebuildRefusal {
   kVirtualized,            // 8: or the registry check did not run
   kOtherShellUser,         // 8: File Explorer on this desktop is another account's
   kNoRestartBelowPackage,  // 8: below an app package, and Windows does not restart Explorer
+  kNoRestartInJob,         // 8: a File Explorer started from here would stay in a job, and
+                           //    Windows does not restart it
+  kNoRestartStartFails,    // 5: ... and this program cannot start it either
   kOwnProcessHoldsCache,   // 5
   kFileOperation,          // 1: File Explorer shows a copy, move or delete in progress
   kCancelled,              // 3: stopped before anything changed
+};
+
+// Whether a File Explorer started from this process would run outside every job: checked only
+// where Windows does not restart File Explorer by itself and no app package is above.
+enum class ExplorerStartCheck {
+  kNotChecked,
+  kOutsideJobs,  // the trial process was in no job
+  kInsideJob,    // it stayed in a job, or this process's job lets nothing leave it
+  kFails,        // the start could not be made ready, or the trial failed
 };
 
 struct RebuildConditions {
@@ -72,14 +88,18 @@ struct RebuildConditions {
   bool otherShellUser = false;  // context.differentFromShellUser
   bool belowPackage = false;    // context.packagedAncestor
   bool autoRestartShell = true;
+  ExplorerStartCheck explorerStart = ExplorerStartCheck::kNotChecked;
 };
 
 // The conditions of |context| (pure).
-RebuildConditions RebuildConditionsOf(const ProcessContext& context,
-                                      bool autoRestartShell) noexcept;
+RebuildConditions RebuildConditionsOf(
+    const ProcessContext& context, bool autoRestartShell,
+    ExplorerStartCheck explorerStart = ExplorerStartCheck::kNotChecked) noexcept;
 
-// The first refusal in this order (pure): elevated, virtualized or not checked, other shell user,
-// below a package where Windows will not restart File Explorer.
+// The first refusal in this order (pure): elevated, virtualized or not checked, other shell user;
+// then, where Windows will not restart File Explorer: below a package, then the start could not
+// be made ready or tried, then File Explorer would stay in a job (kNotChecked counts as that: the
+// trial must come first).
 RebuildRefusal DecideRebuildRefusal(const RebuildConditions& c) noexcept;
 
 // The log's word for |refusal| (pure): "elevated", "other-shell-user" and so on; "none" for kNone.
@@ -123,8 +143,8 @@ enum class ShellStart {
   kNotTried,
   kStarted,
   kBelowPackage,  // not from inside an app package
-  kJobForbids,    // this process's job does not let programs leave it
-  kFailed,
+  kJobForbids,    // it would have stayed inside a job (this process's, or one above it): ended
+  kFailed,        // also: the start could not be made ready before anything changed
 };
 
 // Where the wait for the shell stands.
@@ -182,6 +202,10 @@ struct RebuildResult {
   // What it found before it changed anything.
   bool autoRestartShell = true;
   bool belowPackage = false;
+  ExplorerStartCheck explorerStart = ExplorerStartCheck::kNotChecked;
+  std::optional<JobEscape> jobEscape;  // the trial's answer, when it ran
+  std::optional<JobFacts> job;         // this process's job, read when a start was made ready
+  bool startReady = false;             // a start of File Explorer was made ready
   size_t cacheFiles = 0;
   size_t holders = 0;  // processes that had a cache file open
   size_t toEnd = 0;    // ... of them, the ones it ends
@@ -212,6 +236,8 @@ struct RebuildResult {
   // File Explorer.
   ShellOutcome shell = ShellOutcome::kNotEnded;
   ShellStart start = ShellStart::kNotTried;
+  // Why the start failed; before anything changed, why it could not be made ready or tried
+  // (kNoRestartStartFails, or no refusal where Windows restarts File Explorer by itself).
   HRESULT startError = S_OK;
   ULONGLONG shellMs = 0;
 
@@ -224,10 +250,11 @@ struct RebuildResult {
   bool tabs = false;
 };
 
-// The exit code (pure): 8 for the context refusals; 5 for a failure or this process holding the
-// cache; 3 when stopped; 1 for a copy in progress, a shell that is not back, files or processes
-// that failed, or no file deleted of those there were; 0 otherwise (files kept by programs left
-// alone, windows not reopened and an empty cache included).
+// The exit code (pure): 8 for the context refusals and a File Explorer that would stay in a job;
+// 5 for a failure, a File Explorer this program cannot start where Windows does not, or this
+// process holding the cache; 3 when stopped; 1 for a copy in progress, a shell that is not back,
+// files or processes that failed, or no file deleted of those there were; 0 otherwise (files kept
+// by programs left alone, windows not reopened and an empty cache included).
 ExitCode RebuildExitCode(const RebuildResult& r) noexcept;
 
 // What the rebuild did, line by line (pure), for a result that is neither a refusal nor a
@@ -235,9 +262,11 @@ ExitCode RebuildExitCode(const RebuildResult& r) noexcept;
 // only. May throw std::bad_alloc.
 std::vector<std::wstring> RebuildReport(const RebuildResult& r);
 
-// Why it was refused (pure), for standard error; |context| names the account and the package.
-// Empty for kNone. May throw std::bad_alloc.
-std::wstring RebuildRefusalText(RebuildRefusal refusal, const ProcessContext& context);
+// Why it was refused (pure), for standard error; |context| names the account and the package,
+// |detail| why File Explorer cannot be started from here (kNoRestartStartFails). Empty for kNone.
+// May throw std::bad_alloc.
+std::wstring RebuildRefusalText(RebuildRefusal refusal, const ProcessContext& context,
+                                HRESULT detail = S_OK);
 
 // Why it could not start (pure): a link on the way to the cache folder, or another failure. May
 // throw std::bad_alloc.
@@ -257,6 +286,18 @@ enum class RebuildPhase {
 // The progress line for |phase| (pure); empty for a phase that has none. May throw
 // std::bad_alloc.
 std::wstring RebuildProgressText(RebuildPhase phase);
+
+// A start of File Explorer made ready before anything changes (ProgramStart; the tests' fake).
+class PreparedExplorerStart {
+ public:
+  virtual ~PreparedExplorerStart() = default;
+  // ProgramStart::Job.
+  virtual const JobFacts& Job() const noexcept = 0;
+  // ProgramStart::Trial.
+  [[nodiscard]] virtual HRESULT Trial(JobEscape* escape) noexcept = 0;
+  // ProgramStart::Start.
+  [[nodiscard]] virtual HRESULT Start(bool* jobForbids) noexcept = 0;
+};
 
 // What the rebuild asks Windows: the real one (RealRebuildSystem) and the tests' fake.
 class RebuildSystem {
@@ -290,8 +331,9 @@ class RebuildSystem {
   // DeleteRegularFile.
   [[nodiscard]] virtual HRESULT DeleteCacheFile(const std::filesystem::path& file,
                                                 ContentDelete* result) const noexcept = 0;
-  // StartExplorerFreshEnvironment.
-  [[nodiscard]] virtual HRESULT StartExplorer(bool* jobForbids) const noexcept = 0;
+  // ProgramStart::Prepare of <Windows>\explorer.exe (GetRebuildImages), without arguments.
+  [[nodiscard]] virtual HRESULT PrepareExplorerStart(
+      std::unique_ptr<PreparedExplorerStart>* start) const noexcept = 0;
   // OpenFolderWindows.
   [[nodiscard]] virtual HRESULT OpenFolderWindows(std::span<const FolderWindow> windows,
                                                   DWORD timeoutMs, size_t* opened,
@@ -303,6 +345,34 @@ class RebuildSystem {
 
 // The real answers: the functions of the same names.
 const RebuildSystem& RealRebuildSystem() noexcept;
+
+// What the rebuild decides before its question and before anything changes.
+struct RebuildPrecheck {
+  RebuildConditions conditions;
+  RebuildRefusal refusal = RebuildRefusal::kNone;
+  HRESULT failure = S_OK;           // AutoRestartShell could not be read: exit 5
+  std::optional<JobFacts> job;      // this process's job, read when a start was made ready
+  std::optional<JobEscape> escape;  // the trial's answer, when it ran
+  // Why the start could not be made ready or tried: with AutoRestartShell 0
+  // kNoRestartStartFails, otherwise no refusal (the fallback reports it).
+  HRESULT startError = S_OK;
+};
+
+// The context's refusals (nothing is read for them); then AutoRestartShell; then, with no app
+// package above, the start is made ready where AutoRestartShell is 0 or |keep| is given, and
+// tried where it is 0. S_OK with *check whenever it got that far; fails only when out of memory.
+// With |keep| and no refusal, the start made ready goes there.
+[[nodiscard]] HRESULT PrecheckRebuild(
+    const ProcessContext& context, const RebuildSystem& system, RebuildPrecheck* check,
+    std::unique_ptr<PreparedExplorerStart>* keep = nullptr) noexcept;
+
+// The result of a rebuild that |check| refused or could not finish, with nothing asked again
+// (pure): refusal, failure, the conditions, job, escape and startError copied; nothing committed.
+RebuildResult RebuildNotStarted(const RebuildPrecheck& check);
+
+// The log line for a refusal or failure |check| found (pure; tokens and HRESULTs only). May throw
+// std::bad_alloc.
+std::wstring RebuildPrecheckLogText(const RebuildPrecheck& check);
 
 // The thumbcache files in |folder| (IsThumbnailCacheFileName on the long name; no folder, no
 // link), after CheckNoReparsePoints(|folder|, |stopAt|). S_FALSE with none when |folder| does not

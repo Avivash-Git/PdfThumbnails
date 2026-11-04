@@ -1613,6 +1613,82 @@ TEST_F(Install, UninstallGoesOnWhenTheRebuildIsNotDone) {
   }
 }
 
+// Where Windows does not restart File Explorer and a File Explorer started from here would stay in
+// a job, the rebuild is one line of the report, and the uninstall goes on, the part for all users
+// included. The check the command made before its question decides: a refusal it found is that
+// line, and the rebuild is not asked again, even where it would now go ahead.
+TEST_F(Install, UninstallFollowsTheRebuildsCheck) {
+  const path build = MakeBuild(paths_.machineRoot, L"2.0.0.0-1a2b3c4d");
+  RegisterMachineClass(build / kHandlerDll);
+  ASSERT_TRUE(WriteFileText(paths_.machineRoot / kSettingsExe, ""));
+
+  // No check from the command: the rebuild's own check refuses.
+  {
+    ASSERT_HRESULT_SUCCEEDED(WriteSlots(roots_, SlotWrite::kTakeBack));
+    ShellAndSurrogateHoldTheCache(&rebuild_);
+    rebuild_.autoRestart = false;
+    rebuild_.trialEscape = JobEscape::kStays;
+    rebuild_.Prime();
+    UninstallOptions options = MakeUninstallOptions();
+    options.rebuildThumbnails = true;
+    UninstallResult result;
+    ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
+    for (const std::wstring& failure : result.failures) ADD_FAILURE() << WideToUtf8Lossy(failure);
+    EXPECT_EQ(result.code, ExitCode::kOk);
+    ASSERT_TRUE(result.rebuild);
+    EXPECT_EQ(result.rebuild->refusal, RebuildRefusal::kNoRestartInJob);
+    EXPECT_EQ(rebuild_.trialCalls, 1);
+    EXPECT_TRUE(rebuild_.Ended().empty());
+    EXPECT_TRUE(rebuild_.Deleted().empty());
+    EXPECT_EQ(requests_.size(), 1u);  // the part for all users
+    EXPECT_FALSE(result.machineLeft);
+    SlotValues slots;
+    ASSERT_HRESULT_SUCCEEDED(ReadSlots(roots_, &slots));
+    EXPECT_FALSE(slots[0]);
+    const std::vector<std::wstring> lines = UninstallReport(result);
+    ASSERT_GE(lines.size(), 2u);
+    EXPECT_EQ(lines[0],
+              L"The thumbnail cache was not rebuilt: Windows is set not to restart File Explorer "
+              L"by itself, and a File Explorer started from here would stay inside a job of the "
+              L"program this runs in.");
+    EXPECT_EQ(lines.back(),
+              std::wstring(kProductName) + L" removed. PDF files show their app icon again.");
+  }
+
+  // The command's check refused (it could not start File Explorer), while a check now would pass:
+  // nothing is asked again, and its error is the line's.
+  {
+    ASSERT_HRESULT_SUCCEEDED(WriteSlots(roots_, SlotWrite::kTakeBack));
+    test::FakeRebuildSystem fake;
+    ShellAndSurrogateHoldTheCache(&fake);
+    fake.autoRestart = false;
+    fake.trialEscape = JobEscape::kLeaves;
+    fake.Prime();
+    UninstallOptions options = MakeUninstallOptions();
+    options.rebuildThumbnails = true;
+    options.rebuildSystem = &fake;
+    RebuildPrecheck check;
+    check.conditions = RebuildConditionsOf(*options.context, false, ExplorerStartCheck::kFails);
+    check.refusal = RebuildRefusal::kNoRestartStartFails;
+    check.startError = E_FAIL;
+    options.rebuildPrecheck = check;
+    UninstallResult result;
+    ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
+    for (const std::wstring& failure : result.failures) ADD_FAILURE() << WideToUtf8Lossy(failure);
+    EXPECT_EQ(result.code, ExitCode::kOk);
+    EXPECT_EQ(fake.Calls(), 0);
+    ASSERT_TRUE(result.rebuild);
+    EXPECT_EQ(result.rebuild->refusal, RebuildRefusal::kNoRestartStartFails);
+    EXPECT_FALSE(result.rebuild->committed);
+    const std::vector<std::wstring> lines = UninstallReport(result);
+    ASSERT_FALSE(lines.empty());
+    EXPECT_EQ(lines[0],
+              L"The thumbnail cache was not rebuilt: Windows is set not to restart File Explorer "
+              L"by itself, and this program cannot start File Explorer from here either (" +
+                  HResultText(E_FAIL) + L").");
+  }
+}
+
 // Stopped (Ctrl+C) before anything is removed: nothing changed, and the rebuild was not started.
 TEST_F(Install, UninstallStoppedBeforeItRemovesAnythingChangesNothing) {
   ASSERT_HRESULT_SUCCEEDED(WriteSlots(roots_, SlotWrite::kTakeBack));

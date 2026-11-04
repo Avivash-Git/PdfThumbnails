@@ -1,10 +1,11 @@
 // The thumbnail-cache rebuild (rebuild.h). Most of it runs against the fake RebuildSystem
 // (fake_rebuild.h), which touches no real process, file, window or clock, so the whole flow is
-// exercised safely and the waits are exact: ending processes in order, deleting, waiting for File
-// Explorer (and starting it where Windows will not), and opening the folder windows again. Two
-// pieces touch the real system but only read or use a temp folder: listing the cache files of a
-// folder this test makes, and the images the rebuild may end. Nothing here ends a real process,
-// deletes a real cache file or restarts File Explorer.
+// exercised safely and the waits are exact: the checks before anything changes (where Windows
+// does not restart File Explorer, the start made ready and tried first), ending processes in
+// order, deleting, waiting for File Explorer (and starting it where Windows will not), and opening
+// the folder windows again. Two pieces touch the real system but only read or use a temp folder:
+// listing the cache files of a folder this test makes, and the images the rebuild may end.
+// Nothing here ends a real process, deletes a real cache file or restarts File Explorer.
 //
 // The RefreshProbe tests are disabled: they only read the real system (who holds the real cache
 // files, the folder windows, whether the Explorer test leaves this process holding the cache) and
@@ -22,6 +23,7 @@
 #include <cstdio>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -29,6 +31,7 @@
 #include <string>
 #include <vector>
 
+#include "commands.h"
 #include "fake_rebuild.h"
 #include "live_test.h"
 #include "log.h"
@@ -391,6 +394,270 @@ TEST(RebuildFake, AJobThatForbidsBreakaway) {
   EXPECT_EQ(fake.startCalls, 1);
   EXPECT_EQ(result.shell, ShellOutcome::kNotBack);
   EXPECT_EQ(result.start, ShellStart::kJobForbids);
+}
+
+// ---- where Windows does not restart File Explorer: the start is made ready and tried first ----
+
+// AutoRestartShell 0 without a package: before anything changes, the start of File Explorer is
+// made ready and tried. One that would stay in a job, or cannot be made, is refused with nothing
+// ended or deleted; one that leaves every job is what starts File Explorer right after the shell
+// ends.
+TEST(RebuildFake, NoRestartChecksTheStartFirst) {
+  for (const JobEscape escape : {JobEscape::kStays, JobEscape::kForbidden}) {
+    FakeRebuildSystem fake;
+    ShellHoldsTheCache(&fake);
+    fake.autoRestart = false;
+    fake.trialEscape = escape;
+    fake.Prime();
+    RebuildResult result;
+    ASSERT_HRESULT_SUCCEEDED(RunRebuild(fake, Options(), &result));
+    EXPECT_EQ(result.refusal, RebuildRefusal::kNoRestartInJob);
+    EXPECT_EQ(RebuildExitCode(result), ExitCode::kWrongContext);
+    EXPECT_EQ(result.explorerStart, ExplorerStartCheck::kInsideJob);
+    ASSERT_TRUE(result.jobEscape);
+    EXPECT_EQ(*result.jobEscape, escape);
+    EXPECT_EQ(fake.Calls(), 3);  // AutoRestartShell, made ready, tried
+    EXPECT_FALSE(result.committed);
+    EXPECT_TRUE(fake.Ended().empty());
+    EXPECT_TRUE(fake.Deleted().empty());
+    EXPECT_EQ(fake.startCalls, 0);
+  }
+
+  // The trial fails: this program could not start File Explorer either.
+  {
+    FakeRebuildSystem fake;
+    ShellHoldsTheCache(&fake);
+    fake.autoRestart = false;
+    fake.trialHr = E_FAIL;
+    fake.Prime();
+    RebuildResult result;
+    ASSERT_HRESULT_SUCCEEDED(RunRebuild(fake, Options(), &result));
+    EXPECT_EQ(result.refusal, RebuildRefusal::kNoRestartStartFails);
+    EXPECT_EQ(RebuildExitCode(result), ExitCode::kFailed);
+    EXPECT_EQ(result.startError, E_FAIL);
+    EXPECT_EQ(fake.trialCalls, 1);
+    EXPECT_FALSE(result.committed);
+    EXPECT_TRUE(fake.Ended().empty());
+    EXPECT_TRUE(fake.Deleted().empty());
+  }
+
+  // It cannot even be made ready: the same, without a trial.
+  {
+    FakeRebuildSystem fake;
+    ShellHoldsTheCache(&fake);
+    fake.autoRestart = false;
+    fake.prepareHr = E_FAIL;
+    fake.Prime();
+    RebuildResult result;
+    ASSERT_HRESULT_SUCCEEDED(RunRebuild(fake, Options(), &result));
+    EXPECT_EQ(result.refusal, RebuildRefusal::kNoRestartStartFails);
+    EXPECT_EQ(RebuildExitCode(result), ExitCode::kFailed);
+    EXPECT_EQ(result.startError, E_FAIL);
+    EXPECT_EQ(fake.prepareCalls, 1);
+    EXPECT_EQ(fake.trialCalls, 0);
+    EXPECT_TRUE(fake.Ended().empty());
+    EXPECT_TRUE(fake.Deleted().empty());
+  }
+
+  // It leaves every job: the rebuild goes on, and File Explorer is started at once.
+  {
+    FakeRebuildSystem fake;
+    ShellHoldsTheCache(&fake);
+    fake.autoRestart = false;
+    fake.trialEscape = JobEscape::kLeaves;
+    fake.shellBackByItself = false;
+    fake.shellBackAfterStartMs = 100;
+    fake.Prime();
+    RebuildResult result;
+    ASSERT_HRESULT_SUCCEEDED(RunRebuild(fake, Options(), &result));
+    EXPECT_EQ(result.refusal, RebuildRefusal::kNone);
+    EXPECT_EQ(result.explorerStart, ExplorerStartCheck::kOutsideJobs);
+    EXPECT_TRUE(result.startReady);
+    EXPECT_EQ(fake.prepareCalls, 1);
+    EXPECT_EQ(fake.trialCalls, 1);
+    EXPECT_EQ(fake.startCalls, 1);
+    EXPECT_EQ(result.shell, ShellOutcome::kStarted);
+    EXPECT_EQ(result.start, ShellStart::kStarted);
+    EXPECT_EQ(result.shellMs, 100u);  // no wait for Windows first
+    EXPECT_EQ(result.deleted, 2u);
+    EXPECT_EQ(RebuildExitCode(result), ExitCode::kOk);
+  }
+}
+
+// Where Windows restarts File Explorer by itself, the start is made ready as the fallback, never
+// tried.
+TEST(RebuildFake, AutoRestartOnNeverTries) {
+  FakeRebuildSystem fake;
+  ShellHoldsTheCache(&fake);
+  fake.shellBackAfterMs = 300;
+  fake.Prime();
+  RebuildResult result;
+  ASSERT_HRESULT_SUCCEEDED(RunRebuild(fake, Options(), &result));
+  EXPECT_EQ(RebuildExitCode(result), ExitCode::kOk);
+  EXPECT_EQ(fake.prepareCalls, 1);
+  EXPECT_EQ(fake.trialCalls, 0);
+  EXPECT_EQ(fake.startCalls, 0);
+  EXPECT_TRUE(result.startReady);
+  EXPECT_EQ(result.explorerStart, ExplorerStartCheck::kNotChecked);
+  EXPECT_FALSE(result.jobEscape);
+  EXPECT_EQ(result.shell, ShellOutcome::kBack);
+}
+
+// A start that could not be made ready is no refusal where Windows restarts File Explorer; if
+// Windows does not bring it back, nothing is tried and the report says so.
+TEST(RebuildFake, ReadyFailsWithAutoRestartOn) {
+  FakeRebuildSystem fake;
+  ShellHoldsTheCache(&fake);
+  fake.prepareHr = E_FAIL;
+  fake.shellBackByItself = false;
+  fake.Prime();
+  RebuildOptions options = Options();
+  options.shellWaitMs = 300;
+  RebuildResult result;
+  ASSERT_HRESULT_SUCCEEDED(RunRebuild(fake, options, &result));
+  EXPECT_EQ(result.refusal, RebuildRefusal::kNone);
+  EXPECT_TRUE(result.committed);
+  EXPECT_FALSE(result.startReady);
+  EXPECT_EQ(result.deleted, 2u);
+  EXPECT_EQ(result.shell, ShellOutcome::kNotBack);
+  EXPECT_EQ(result.start, ShellStart::kFailed);
+  EXPECT_EQ(result.startError, E_FAIL);
+  EXPECT_EQ(fake.startCalls, 0);
+  EXPECT_EQ(RebuildExitCode(result), ExitCode::kProblems);
+}
+
+// Below a package this program never starts File Explorer, so nothing is made ready.
+TEST(RebuildFake, BelowPackageNeverPrepares) {
+  for (const bool autoRestart : {true, false}) {
+    FakeRebuildSystem fake;
+    ShellHoldsTheCache(&fake);
+    fake.autoRestart = autoRestart;
+    fake.Prime();
+    ProcessContext context = CleanContext();
+    context.packagedAncestor = L"Some.Terminal_8wekyb3d8bbwe";
+    RebuildResult result;
+    ASSERT_HRESULT_SUCCEEDED(RunRebuild(fake, Options(context), &result));
+    EXPECT_EQ(result.refusal,
+              autoRestart ? RebuildRefusal::kNone : RebuildRefusal::kNoRestartBelowPackage);
+    EXPECT_EQ(fake.prepareCalls, 0);
+    EXPECT_EQ(fake.trialCalls, 0);
+    EXPECT_FALSE(result.startReady);
+  }
+}
+
+// The check before the question passed, but the engine's own check, later, fails: the engine
+// refuses, and its result names the error of its own trial.
+TEST(RebuildFake, TheEngineMayOnlyRefuse) {
+  FakeRebuildSystem fake;
+  ShellHoldsTheCache(&fake);
+  fake.autoRestart = false;
+  fake.trialFailsFrom = 2;
+  fake.trialHr = E_FAIL;
+  fake.Prime();
+  const ProcessContext context = CleanContext();
+
+  RebuildPrecheck check;
+  std::unique_ptr<PreparedExplorerStart> kept;
+  ASSERT_HRESULT_SUCCEEDED(PrecheckRebuild(context, fake, &check, &kept));
+  EXPECT_EQ(check.refusal, RebuildRefusal::kNone);
+  ASSERT_TRUE(check.escape);
+  EXPECT_EQ(*check.escape, JobEscape::kLeaves);
+  EXPECT_TRUE(kept);  // the start made ready and tried, kept for the run
+  EXPECT_EQ(fake.trialCalls, 1);
+
+  RebuildResult result;
+  ASSERT_HRESULT_SUCCEEDED(RunRebuild(fake, Options(context), &result));
+  EXPECT_EQ(fake.trialCalls, 2);
+  EXPECT_EQ(result.refusal, RebuildRefusal::kNoRestartStartFails);
+  EXPECT_EQ(result.startError, E_FAIL);
+  EXPECT_FALSE(result.committed);
+  EXPECT_TRUE(fake.Ended().empty());
+  const std::wstring message =
+      RefreshFullRefusalMessage(result.refusal, context, result.startError);
+  EXPECT_NE(message.find(L"(0x80004005)"), std::wstring::npos) << WideToUtf8Lossy(message);
+}
+
+// The check alone: the context's refusals read nothing, and nothing is kept after a refusal.
+TEST(RebuildFake, ThePrecheckKeepsOnlyAStartItAllows) {
+  FakeRebuildSystem fake;
+  ShellHoldsTheCache(&fake);
+  ProcessContext otherUser = CleanContext();
+  otherUser.differentFromShellUser = true;
+  RebuildPrecheck check;
+  std::unique_ptr<PreparedExplorerStart> kept;
+  ASSERT_HRESULT_SUCCEEDED(PrecheckRebuild(otherUser, fake, &check, &kept));
+  EXPECT_EQ(check.refusal, RebuildRefusal::kOtherShellUser);
+  EXPECT_EQ(fake.Calls(), 0);
+  EXPECT_FALSE(kept);
+
+  fake.autoRestart = false;
+  fake.trialEscape = JobEscape::kStays;
+  ASSERT_HRESULT_SUCCEEDED(PrecheckRebuild(CleanContext(), fake, &check, &kept));
+  EXPECT_EQ(check.refusal, RebuildRefusal::kNoRestartInJob);
+  EXPECT_FALSE(kept);
+
+  // Without |keep|, AutoRestartShell on makes nothing ready.
+  fake.autoRestart = true;
+  const int prepared = fake.prepareCalls;
+  ASSERT_HRESULT_SUCCEEDED(PrecheckRebuild(CleanContext(), fake, &check));
+  EXPECT_EQ(check.refusal, RebuildRefusal::kNone);
+  EXPECT_EQ(fake.prepareCalls, prepared);
+
+  fake.autoRestartHr = E_ACCESSDENIED;
+  ASSERT_HRESULT_SUCCEEDED(PrecheckRebuild(CleanContext(), fake, &check, &kept));
+  EXPECT_EQ(check.failure, E_ACCESSDENIED);
+  EXPECT_EQ(RebuildExitCode(RebuildNotStarted(check)), ExitCode::kFailed);
+  EXPECT_FALSE(kept);
+}
+
+// The log names what the trial found and this process's job, never a path.
+TEST(RebuildFake, TheLogNamesWhatTheTrialFound) {
+  const path dir = L"C:\\very-private-folder\\sub";
+  test::TempDir temp(L"rebuild-log");
+  ASSERT_TRUE(temp.ok());
+  const path log = path(temp.path()) / L"rebuild.log";
+  SetLogFileForTesting(log, kLogRotateBytes);
+  for (const JobEscape escape : {JobEscape::kLeaves, JobEscape::kStays}) {
+    FakeRebuildSystem fake;
+    fake.cacheFiles = Files(dir, 2);
+    fake.SetShell(kShellPid);
+    fake.AddHolder(kShellPid, fake.kExplorerImage(), {fake.cacheFiles[0]});
+    fake.autoRestart = false;
+    fake.trialEscape = escape;
+    fake.shellBackByItself = false;
+    fake.Prime();
+    RebuildResult result;
+    EXPECT_HRESULT_SUCCEEDED(RunRebuild(fake, Options(), &result));
+  }
+  // A start that could not be made ready: the job was never read.
+  {
+    FakeRebuildSystem fake;
+    fake.cacheFiles = Files(dir, 2);
+    fake.SetShell(kShellPid);
+    fake.AddHolder(kShellPid, fake.kExplorerImage(), {fake.cacheFiles[0]});
+    fake.autoRestart = false;
+    fake.prepareHr = E_FAIL;
+    fake.Prime();
+    RebuildResult result;
+    EXPECT_HRESULT_SUCCEEDED(RunRebuild(fake, Options(), &result));
+  }
+  SetLogFileForTesting({}, 0);
+
+  std::ifstream stream(log, std::ios::binary);
+  std::stringstream text;
+  text << stream.rdbuf();
+  const std::string lines = text.str();
+  EXPECT_NE(lines.find("explorer-start=leaves job=none start-ready=yes"), std::string::npos)
+      << lines;
+  EXPECT_NE(lines.find("refresh full refused=no-restart-in-job explorer-start=stays job=none"),
+            std::string::npos)
+      << lines;
+  EXPECT_NE(lines.find("refresh full refused=no-restart-start-fails start-hr=0x80004005 "
+                       "job=not-read"),
+            std::string::npos)
+      << lines;
+  EXPECT_EQ(lines.find("very-private-folder"), std::string::npos) << lines;
+  EXPECT_EQ(lines.find("thumbcache_"), std::string::npos) << lines;
 }
 
 TEST(RebuildFake, ANewFileExplorerComingUpExtendsTheWait) {

@@ -199,10 +199,11 @@ bool UninstallNeedsYes(const CliArgs& args, bool canAskOnConsole) noexcept;
 bool RefreshNeedsYes(const CliArgs& args, bool canAskOnConsole) noexcept;
 
 // Why --refresh --full was refused (pure), for standard error: CannotRunHereMessage where the
-// registry may be virtualized, RebuildRefusalText otherwise. Empty for kNone and kCancelled (a
-// stop before anything changed says "Nothing changed." on standard output). May throw
-// std::bad_alloc.
-std::wstring RefreshFullRefusalMessage(RebuildRefusal refusal, const ProcessContext& context);
+// registry may be virtualized, RebuildRefusalText (with |detail|) otherwise. Empty for kNone and
+// kCancelled (a stop before anything changed says "Nothing changed." on standard output). May
+// throw std::bad_alloc.
+std::wstring RefreshFullRefusalMessage(RebuildRefusal refusal, const ProcessContext& context,
+                                       HRESULT detail = S_OK);
 
 // The answer to a [y/N] question means yes (pure): "y" or "yes", ignoring case and surrounding
 // white space. Anything else, nothing included, is no.

@@ -19,7 +19,6 @@
 #include "diagnostics.h"
 #include "elevation.h"
 #include "evaluate.h"
-#include "explorer_settings.h"
 #include "install.h"
 #include "instance.h"
 #include "json.h"
@@ -714,19 +713,31 @@ int RunUninstallCommand(const CliArgs& args, const ProcessContext& context, Outp
     out.Error(UninstallElevatedRefusalMessage());
     return Code(ExitCode::kWrongContext);
   }
-  // The question names the restart of File Explorer only when the context leaves the rebuild
-  // possible; the report says why it was not done otherwise.
-  const RebuildRefusal contextRefusal = DecideRebuildRefusal(RebuildConditionsOf(context, true));
-  const bool rebuild = args.rebuildThumbnails && contextRefusal == RebuildRefusal::kNone;
-  // With the rebuild, Ctrl+C stops the uninstall before it removes anything. Later it only keeps
-  // the rebuild from starting, and the uninstall goes on: once the rebuild has ended File
-  // Explorer, it finishes and brings File Explorer back.
+  // With --rebuild-thumbnails, from here and for the whole command, Ctrl+C only asks to stop, so a
+  // start of File Explorer the check below tries is always ended. It stops the uninstall before
+  // it removes anything. Later it only keeps the rebuild from starting, and the uninstall goes
+  // on: once the rebuild has ended File Explorer, it finishes and brings File Explorer back.
   std::stop_source stop;
   wil::unique_event_nothrow done;
   std::optional<ConsoleStop> consoleStop;
-  if (rebuild) {
+  // The rebuild's check, once for the whole command: the question names the restart of File
+  // Explorer only where the rebuild may run, and a refusal it finds is what the report says
+  // about the rebuild.
+  std::optional<RebuildPrecheck> check;
+  if (args.rebuildThumbnails) {
     (void)done.create(wil::EventOptions::ManualReset);
     consoleStop.emplace(&stop, done.get());
+    check.emplace();
+    if (const HRESULT hr = PrecheckRebuild(context, RealRebuildSystem(), &*check); FAILED(hr)) {
+      check->failure = hr;
+    }
+  }
+  const bool rebuild =
+      check && SUCCEEDED(check->failure) && check->refusal == RebuildRefusal::kNone;
+  // Before the question, whose read would otherwise wait for an answer.
+  if (stop.stop_requested()) {
+    out.Line(L"Nothing changed.");
+    return Code(ExitCode::kCancelled);
   }
   if (!args.yes && !AskYesNo(out, UninstallQuestion(rebuild))) {
     out.Line(L"Nothing changed.");
@@ -739,6 +750,7 @@ int RunUninstallCommand(const CliArgs& args, const ProcessContext& context, Outp
   UninstallOptions options;
   options.yes = args.yes;
   options.rebuildThumbnails = args.rebuildThumbnails;
+  options.rebuildPrecheck = check;
   options.rebuildProgress = [&out](RebuildPhase phase) {
     const std::wstring line = RebuildProgressText(phase);
     if (!line.empty()) out.Line(line);
@@ -856,42 +868,22 @@ int RunZoomCommand(const CliArgs& args, const ProcessContext& context, Output& o
 
 // ---- --refresh ------------------------------------------------------------------------------
 
-// --refresh --full: the refusals first (they read nothing but the context and AutoRestartShell),
-// then the question, the operation lock and the rebuild (rebuild.h).
+// --refresh --full: the refusals first (PrecheckRebuild: they read the context, AutoRestartShell
+// and, where Windows does not restart File Explorer, whether this program could), then the
+// question, the operation lock and the rebuild (rebuild.h).
 int RunRefreshCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
   if (!args.full) {
     out.Error(
         L"--refresh without --full is not available in this build yet; use --refresh --full.");
     return Code(ExitCode::kFailed);
   }
-  // Refused before the question: what the context decides, then whether Windows restarts File
-  // Explorer by itself, which a package above this process needs.
-  RebuildRefusal refusal = DecideRebuildRefusal(RebuildConditionsOf(context, true));
-  if (refusal == RebuildRefusal::kNone) {
-    bool autoRestart = true;
-    if (const HRESULT hr = ReadAutoRestartShell(RegistryRoots{}, &autoRestart); FAILED(hr)) {
-      Log(LogLevel::kWarning, L"refresh", L"refresh full failed hr=" + HResultText(hr));
-      out.Error(RebuildFailureText(hr));
-      return Code(ExitCode::kFailed);
-    }
-    refusal = DecideRebuildRefusal(RebuildConditionsOf(context, autoRestart));
-  }
-  if (refusal != RebuildRefusal::kNone) {
-    Log(LogLevel::kWarning, L"refresh",
-        std::wstring(L"refresh full refused=") + RebuildRefusalToken(refusal));
-    out.Error(RefreshFullRefusalMessage(refusal, context));
-    return Code(ExitCode::kWrongContext);
-  }
-
-  // From here Ctrl+C stops it, until it ends the first process or deletes the first file.
+  // From here Ctrl+C only asks to stop, so a start of File Explorer the check below tries is
+  // always ended; it stops the command until the rebuild ends the first process or deletes the
+  // first file.
   std::stop_source stop;
   wil::unique_event_nothrow done;
   (void)done.create(wil::EventOptions::ManualReset);
   ConsoleStop consoleStop(&stop, done.get());
-  if (!args.yes && !AskYesNo(out, RebuildQuestion())) {
-    out.Line(L"Nothing changed.");
-    return Code(ExitCode::kCancelled);
-  }
   // Stopped by Ctrl+C before the rebuild started, so nothing changed.
   const auto stopped = [&out] {
     Log(LogLevel::kWarning, L"refresh",
@@ -899,6 +891,32 @@ int RunRefreshCommand(const CliArgs& args, const ProcessContext& context, Output
     out.Line(L"Nothing changed.");
     return Code(ExitCode::kCancelled);
   };
+
+  // Refused before the question: what the context decides, then whether Windows restarts File
+  // Explorer by itself, which a package above this process needs, and where it does not, whether
+  // this program could start File Explorer outside every job.
+  RebuildPrecheck check;
+  if (const HRESULT hr = PrecheckRebuild(context, RealRebuildSystem(), &check); FAILED(hr)) {
+    out.Error(RebuildFailureText(hr));
+    return Code(ExitCode::kFailed);
+  }
+  if (FAILED(check.failure)) {
+    Log(LogLevel::kWarning, L"refresh", RebuildPrecheckLogText(check));
+    out.Error(RebuildFailureText(check.failure));
+    return Code(ExitCode::kFailed);
+  }
+  if (check.refusal != RebuildRefusal::kNone) {
+    Log(LogLevel::kWarning, L"refresh", RebuildPrecheckLogText(check));
+    out.Error(RefreshFullRefusalMessage(check.refusal, context, check.startError));
+    return Code(RebuildExitCode(RebuildNotStarted(check)));
+  }
+  // Before the question, whose read would otherwise wait for an answer.
+  if (stop.stop_requested()) return stopped();
+
+  if (!args.yes && !AskYesNo(out, RebuildQuestion())) {
+    out.Line(L"Nothing changed.");
+    return Code(ExitCode::kCancelled);
+  }
   if (stop.stop_requested()) return stopped();
 
   std::optional<OperationLock> lock;
@@ -939,7 +957,7 @@ int RunRefreshCommand(const CliArgs& args, const ProcessContext& context, Output
   if (result.refusal == RebuildRefusal::kCancelled) {
     out.Line(L"Nothing changed.");
   } else if (result.refusal != RebuildRefusal::kNone) {
-    out.Error(RefreshFullRefusalMessage(result.refusal, context));
+    out.Error(RefreshFullRefusalMessage(result.refusal, context, result.startError));
   } else if (FAILED(result.failure)) {
     out.Error(RebuildFailureText(result.failure));
   } else {
@@ -1256,6 +1274,13 @@ std::wstring RebuildNotDoneReason(const RebuildResult& rebuild) {
     case RebuildRefusal::kNoRestartBelowPackage:
       return L"Windows is set not to restart File Explorer by itself, and this program does not "
              L"start it from inside an app package (the terminal it runs in)";
+    case RebuildRefusal::kNoRestartInJob:
+      return L"Windows is set not to restart File Explorer by itself, and a File Explorer started "
+             L"from here would stay inside a job of the program this runs in";
+    case RebuildRefusal::kNoRestartStartFails:
+      return L"Windows is set not to restart File Explorer by itself, and this program cannot "
+             L"start File Explorer from here either (" +
+             HResultText(rebuild.startError) + L")";
     case RebuildRefusal::kOwnProcessHoldsCache:
       return L"this process has the thumbnail cache open itself";
     case RebuildRefusal::kFileOperation:
@@ -1411,9 +1436,10 @@ bool RefreshNeedsYes(const CliArgs& args, bool canAskOnConsole) noexcept {
   return args.verb == Verb::kRefresh && args.full && !args.yes && !canAskOnConsole;
 }
 
-std::wstring RefreshFullRefusalMessage(RebuildRefusal refusal, const ProcessContext& context) {
+std::wstring RefreshFullRefusalMessage(RebuildRefusal refusal, const ProcessContext& context,
+                                       HRESULT detail) {
   if (refusal == RebuildRefusal::kVirtualized) return CannotRunHereMessage(context);
-  return RebuildRefusalText(refusal, context);
+  return RebuildRefusalText(refusal, context, detail);
 }
 
 bool ShouldStartSettingsWindow(DWORD consoleProcessCount, bool hasConsoleWindow) noexcept {

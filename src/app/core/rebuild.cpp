@@ -65,6 +65,39 @@ const wchar_t* StartToken(ShellStart start) noexcept {
   return L"not-tried";
 }
 
+// What the trial found: "leaves", "forbidden", "stays"; "not-checked" when it did not run.
+const wchar_t* EscapeToken(const std::optional<JobEscape>& escape) noexcept {
+  if (!escape) return L"not-checked";
+  switch (*escape) {
+    case JobEscape::kLeaves:
+      return L"leaves";
+    case JobEscape::kForbidden:
+      return L"forbidden";
+    case JobEscape::kStays:
+      return L"stays";
+  }
+  return L"not-checked";
+}
+
+// This process's job (JobFactsToken); "not-read" when no start was made ready, since the job is
+// read only then.
+std::wstring JobToken(const std::optional<JobFacts>& job) {
+  return job ? JobFactsToken(*job) : std::wstring(L"not-read");
+}
+
+// The refusal line of the log; for the two refusals about starting File Explorer, with what the
+// trial found and this process's job.
+std::wstring RefusalLogText(RebuildRefusal refusal, const std::optional<JobEscape>& escape,
+                            HRESULT startError, const std::optional<JobFacts>& job) {
+  std::wstring line = std::wstring(L"refresh full refused=") + RebuildRefusalToken(refusal);
+  if (refusal == RebuildRefusal::kNoRestartInJob) {
+    line += std::wstring(L" explorer-start=") + EscapeToken(escape) + L" job=" + JobToken(job);
+  } else if (refusal == RebuildRefusal::kNoRestartStartFails) {
+    line += L" start-hr=" + HResultText(startError) + L" job=" + JobToken(job);
+  }
+  return line;
+}
+
 std::wstring Count(size_t n) { return std::to_wstring(n); }
 
 // "<n> <one>" or "<n> <many>".
@@ -82,20 +115,23 @@ size_t ReopenWanted(const RebuildResult& r) noexcept {
 void LogResult(const RebuildResult& r, ExitCode code) noexcept try {
   const LogLevel level = code == ExitCode::kOk ? LogLevel::kInfo : LogLevel::kWarning;
   if (r.refusal != RebuildRefusal::kNone) {
-    Log(level, kLogComponent,
-        std::wstring(L"refresh full refused=") + RebuildRefusalToken(r.refusal));
+    Log(level, kLogComponent, RefusalLogText(r.refusal, r.jobEscape, r.startError, r.job));
     return;
   }
   if (FAILED(r.failure)) {
     Log(level, kLogComponent, L"refresh full failed hr=" + HResultText(r.failure));
     return;
   }
+  // Below a package this program never starts File Explorer, so no start is made ready there.
+  const wchar_t* startReady = r.belowPackage ? L"not-needed" : r.startReady ? L"yes" : L"no";
   Log(level, kLogComponent,
       L"refresh full plan files=" + Count(r.cacheFiles) + L" holders=" + Count(r.holders) +
           L" to-end=" + Count(r.toEnd) + L" shell=" + (r.shellFound ? L"1" : L"0") + L" windows=" +
           Count(r.windows) + L" frames=" + Count(r.frames) + L" autorestart=" +
           (r.autoRestartShell ? L"1" : L"0") + L" packaged=" + (r.belowPackage ? L"yes" : L"no") +
-          L" listed=" + (r.listing == WindowListing::kListed ? L"yes" : L"no"));
+          L" explorer-start=" + EscapeToken(r.jobEscape) + L" job=" + JobToken(r.job) +
+          L" start-ready=" + startReady + L" listed=" +
+          (r.listing == WindowListing::kListed ? L"yes" : L"no"));
   if (r.cacheFiles == 0) return;
   Log(level, kLogComponent,
       L"refresh full ended=" + Count(r.ended) + L" gone=" + Count(r.gone) + L" refused=" +
@@ -138,8 +174,8 @@ bool IsThumbnailCacheFileName(std::wstring_view name) noexcept {
   return true;
 }
 
-RebuildConditions RebuildConditionsOf(const ProcessContext& context,
-                                      bool autoRestartShell) noexcept {
+RebuildConditions RebuildConditionsOf(const ProcessContext& context, bool autoRestartShell,
+                                      ExplorerStartCheck explorerStart) noexcept {
   RebuildConditions c;
   c.elevated = context.elevated;
   c.writesChecked = context.probe == ContextProbe::kWrite;
@@ -147,6 +183,7 @@ RebuildConditions RebuildConditionsOf(const ProcessContext& context,
   c.otherShellUser = context.differentFromShellUser;
   c.belowPackage = context.packagedAncestor.has_value();
   c.autoRestartShell = autoRestartShell;
+  c.explorerStart = explorerStart;
   return c;
 }
 
@@ -154,7 +191,12 @@ RebuildRefusal DecideRebuildRefusal(const RebuildConditions& c) noexcept {
   if (c.elevated) return RebuildRefusal::kElevated;
   if (!c.writesChecked || c.virtualized) return RebuildRefusal::kVirtualized;
   if (c.otherShellUser) return RebuildRefusal::kOtherShellUser;
-  if (c.belowPackage && !c.autoRestartShell) return RebuildRefusal::kNoRestartBelowPackage;
+  if (!c.autoRestartShell) {
+    // Only this program would bring File Explorer back, so it must be able to, outside any job.
+    if (c.belowPackage) return RebuildRefusal::kNoRestartBelowPackage;
+    if (c.explorerStart == ExplorerStartCheck::kFails) return RebuildRefusal::kNoRestartStartFails;
+    if (c.explorerStart != ExplorerStartCheck::kOutsideJobs) return RebuildRefusal::kNoRestartInJob;
+  }
   return RebuildRefusal::kNone;
 }
 
@@ -168,6 +210,10 @@ const wchar_t* RebuildRefusalToken(RebuildRefusal refusal) noexcept {
       return L"other-shell-user";
     case RebuildRefusal::kNoRestartBelowPackage:
       return L"no-restart-below-package";
+    case RebuildRefusal::kNoRestartInJob:
+      return L"no-restart-in-job";
+    case RebuildRefusal::kNoRestartStartFails:
+      return L"no-restart-start-fails";
     case RebuildRefusal::kOwnProcessHoldsCache:
       return L"own-process-holds-cache";
     case RebuildRefusal::kFileOperation:
@@ -274,7 +320,9 @@ ExitCode RebuildExitCode(const RebuildResult& r) noexcept {
     case RebuildRefusal::kVirtualized:
     case RebuildRefusal::kOtherShellUser:
     case RebuildRefusal::kNoRestartBelowPackage:
+    case RebuildRefusal::kNoRestartInJob:
       return ExitCode::kWrongContext;
+    case RebuildRefusal::kNoRestartStartFails:
     case RebuildRefusal::kOwnProcessHoldsCache:
       return ExitCode::kFailed;
     case RebuildRefusal::kFileOperation:
@@ -340,8 +388,8 @@ std::vector<std::wstring> RebuildReport(const RebuildResult& r) {
             L"runs in).";
       } else if (r.start == ShellStart::kJobForbids) {
         line +=
-            L" This program does not start it from inside a job that does not let programs "
-            L"leave it.";
+            L" This program did not start it: from here it would have stayed inside a job of "
+            L"the program this runs in.";
       }
       lines.push_back(std::move(line));
       break;
@@ -368,7 +416,8 @@ std::vector<std::wstring> RebuildReport(const RebuildResult& r) {
   return lines;
 }
 
-std::wstring RebuildRefusalText(RebuildRefusal refusal, const ProcessContext& context) {
+std::wstring RebuildRefusalText(RebuildRefusal refusal, const ProcessContext& context,
+                                HRESULT detail) {
   switch (refusal) {
     case RebuildRefusal::kElevated:
       return L"Cannot run here: running as administrator. Rebuilding the thumbnail cache restarts "
@@ -382,6 +431,15 @@ std::wstring RebuildRefusalText(RebuildRefusal refusal, const ProcessContext& co
       return L"Cannot run here: Windows is set not to restart File Explorer by itself, and this "
              L"program does not start it from inside an app package (the terminal it runs in). "
              L"Run --refresh --full from a Win+R prompt.";
+    case RebuildRefusal::kNoRestartInJob:
+      return L"Cannot run here: Windows is set not to restart File Explorer by itself, and a File "
+             L"Explorer started from here would stay inside a job of the program this runs in (a "
+             L"terminal or another tool), so ending that program could end File Explorer and the "
+             L"taskbar too. Nothing changed; run --refresh --full from a Win+R prompt.";
+    case RebuildRefusal::kNoRestartStartFails:
+      return L"Cannot rebuild the thumbnail cache: Windows is set not to restart File Explorer by "
+             L"itself, and this program cannot start File Explorer from here either (" +
+             HResultText(detail) + L"), so the taskbar would not come back. Nothing changed.";
     case RebuildRefusal::kOwnProcessHoldsCache:
       return L"Cannot rebuild from this process: it has the thumbnail cache open itself. Nothing "
              L"changed.";
@@ -593,10 +651,11 @@ void NameHolders(const RebuildSystem& system, std::span<const std::filesystem::p
 }
 
 // Waits for File Explorer to come back after |oldShell| went, starting it where Windows will not
-// (NextShellStep). The wait counts from when the shell had gone.
+// (NextShellStep) with |prepared|, the start made ready before anything changed (null when that
+// failed). The wait counts from when the shell had gone.
 void WaitForShell(const RebuildOptions& options, const RebuildSystem& system,
-                  const ShellProcess& oldShell, const Ending& ending,
-                  RebuildResult* result) noexcept {
+                  PreparedExplorerStart* prepared, const ShellProcess& oldShell,
+                  const Ending& ending, RebuildResult* result) noexcept {
   ShellWaitState state;
   state.autoRestart = result->autoRestartShell;
   state.belowPackage = result->belowPackage;
@@ -632,8 +691,16 @@ void WaitForShell(const RebuildOptions& options, const RebuildSystem& system,
       case ShellStep::kStart: {
         // One last look before starting a second File Explorer.
         if (NewShell(system.Shell(), oldShell)) break;
+        if (!prepared) {
+          // It could not be made ready before anything changed (result->startError says why), so
+          // nothing is tried now: the same end as a start that failed.
+          result->shell = ShellOutcome::kNotBack;
+          result->start = ShellStart::kFailed;
+          result->shellMs = system.NowMs() - ending.t0;
+          return;
+        }
         bool jobForbids = false;
-        const HRESULT hr = system.StartExplorer(&jobForbids);
+        const HRESULT hr = prepared->Start(&jobForbids);
         state.startTried = true;
         phaseStart = system.NowMs();
         if (FAILED(hr)) {
@@ -714,6 +781,19 @@ BOOL CALLBACK FileOperationWindow(HWND window, LPARAM parameter) {
   return TRUE;
 }
 
+// A ProgramStart of File Explorer.
+class RealPreparedExplorerStart final : public PreparedExplorerStart {
+ public:
+  explicit RealPreparedExplorerStart(std::unique_ptr<ProgramStart> start) noexcept
+      : start_(std::move(start)) {}
+  const JobFacts& Job() const noexcept override { return start_->Job(); }
+  HRESULT Trial(JobEscape* escape) noexcept override { return start_->Trial(escape); }
+  HRESULT Start(bool* jobForbids) noexcept override { return start_->Start(jobForbids); }
+
+ private:
+  std::unique_ptr<ProgramStart> start_;
+};
+
 // The real answers from Windows.
 class RealRebuildSystemImpl final : public RebuildSystem {
  public:
@@ -781,9 +861,17 @@ class RealRebuildSystemImpl final : public RebuildSystem {
                           ContentDelete* result) const noexcept override {
     return DeleteRegularFile(file, result);
   }
-  HRESULT StartExplorer(bool* jobForbids) const noexcept override {
-    return StartExplorerFreshEnvironment(jobForbids);
+  HRESULT PrepareExplorerStart(
+      std::unique_ptr<PreparedExplorerStart>* start) const noexcept override try {
+    start->reset();
+    RebuildImages images;
+    RETURN_IF_FAILED(GetRebuildImages(&images));
+    std::unique_ptr<ProgramStart> program;
+    RETURN_IF_FAILED(ProgramStart::Prepare(std::move(images.explorer), {}, &program));
+    *start = std::make_unique<RealPreparedExplorerStart>(std::move(program));
+    return S_OK;
   }
+  CATCH_RETURN();
   HRESULT OpenFolderWindows(std::span<const FolderWindow> windows, DWORD timeoutMs, size_t* opened,
                             size_t* failed) const noexcept override {
     return pdft::OpenFolderWindows(windows, timeoutMs, opened, failed);
@@ -797,6 +885,81 @@ class RealRebuildSystemImpl final : public RebuildSystem {
 const RebuildSystem& RealRebuildSystem() noexcept {
   static const RealRebuildSystemImpl system;
   return system;
+}
+
+HRESULT PrecheckRebuild(const ProcessContext& context, const RebuildSystem& system,
+                        RebuildPrecheck* check,
+                        std::unique_ptr<PreparedExplorerStart>* keep) noexcept try {
+  *check = {};
+  if (keep) keep->reset();
+
+  // The refusals that the context alone decides.
+  check->conditions = RebuildConditionsOf(context, true);
+  check->refusal = DecideRebuildRefusal(check->conditions);
+  if (check->refusal != RebuildRefusal::kNone) return S_OK;
+
+  // Whether Windows restarts File Explorer by itself.
+  bool autoRestart = true;
+  if (const HRESULT hr = system.AutoRestartShell(&autoRestart); FAILED(hr)) {
+    check->failure = hr;
+    return S_OK;
+  }
+  check->conditions.autoRestartShell = autoRestart;
+  // This program never starts File Explorer below a package, so nothing is made ready there.
+  if (check->conditions.belowPackage) {
+    check->refusal = DecideRebuildRefusal(check->conditions);
+    return S_OK;
+  }
+
+  // The start, made ready where it may be needed: only this program brings File Explorer back
+  // where Windows does not, and it is the fallback where Windows does.
+  std::unique_ptr<PreparedExplorerStart> start;
+  if (!autoRestart || keep) {
+    HRESULT hr = system.PrepareExplorerStart(&start);
+    if (SUCCEEDED(hr) && !start) hr = E_UNEXPECTED;
+    if (FAILED(hr)) {
+      start.reset();
+      check->startError = hr;
+      if (!autoRestart) check->conditions.explorerStart = ExplorerStartCheck::kFails;
+    } else {
+      check->job = start->Job();
+    }
+  }
+  // Tried where Windows does not restart File Explorer: would it run outside every job?
+  if (!autoRestart && start) {
+    JobEscape escape = JobEscape::kForbidden;
+    if (const HRESULT hr = start->Trial(&escape); FAILED(hr)) {
+      check->startError = hr;
+      check->conditions.explorerStart = ExplorerStartCheck::kFails;
+    } else {
+      check->escape = escape;
+      check->conditions.explorerStart = escape == JobEscape::kLeaves
+                                            ? ExplorerStartCheck::kOutsideJobs
+                                            : ExplorerStartCheck::kInsideJob;
+    }
+  }
+  check->refusal = DecideRebuildRefusal(check->conditions);
+  if (keep && check->refusal == RebuildRefusal::kNone && start) *keep = std::move(start);
+  return S_OK;
+}
+CATCH_RETURN();
+
+RebuildResult RebuildNotStarted(const RebuildPrecheck& check) {
+  RebuildResult result;
+  result.refusal = check.refusal;
+  result.failure = check.failure;
+  result.autoRestartShell = check.conditions.autoRestartShell;
+  result.belowPackage = check.conditions.belowPackage;
+  result.explorerStart = check.conditions.explorerStart;
+  result.jobEscape = check.escape;
+  result.job = check.job;
+  result.startError = check.startError;
+  return result;
+}
+
+std::wstring RebuildPrecheckLogText(const RebuildPrecheck& check) {
+  if (FAILED(check.failure)) return L"refresh full failed hr=" + HResultText(check.failure);
+  return RefusalLogText(check.refusal, check.escape, check.startError, check.job);
 }
 
 HRESULT RebuildThumbnailCache(const RebuildOptions& options, const RebuildSystem& system,
@@ -820,18 +983,15 @@ HRESULT RebuildThumbnailCache(const RebuildOptions& options, const RebuildSystem
     return finish();
   };
 
-  // The refusals that the context alone decides.
-  result->belowPackage = options.context.packagedAncestor.has_value();
-  result->refusal = DecideRebuildRefusal(RebuildConditionsOf(options.context, true));
-  if (result->refusal != RebuildRefusal::kNone) return finish();
-
-  // Whether Windows restarts File Explorer by itself, which a package above this process needs.
-  bool autoRestart = true;
-  const HRESULT restartHr = system.AutoRestartShell(&autoRestart);
-  if (FAILED(restartHr)) return failWith(restartHr);
-  result->autoRestartShell = autoRestart;
-  result->refusal = DecideRebuildRefusal(RebuildConditionsOf(options.context, autoRestart));
-  if (result->refusal != RebuildRefusal::kNone) return finish();
+  // The refusals before anything else (PrecheckRebuild), checked again here: the caller may have
+  // waited at its question meanwhile. The start made ready here is the one File Explorer is
+  // started with after the point of no return, if it must be.
+  RebuildPrecheck check;
+  std::unique_ptr<PreparedExplorerStart> prepared;
+  RETURN_IF_FAILED(PrecheckRebuild(options.context, system, &check, &prepared));
+  *result = RebuildNotStarted(check);
+  result->startReady = prepared != nullptr;
+  if (FAILED(result->failure) || result->refusal != RebuildRefusal::kNone) return finish();
 
   // The cache files.
   std::vector<std::filesystem::path> files;
@@ -917,7 +1077,7 @@ HRESULT RebuildThumbnailCache(const RebuildOptions& options, const RebuildSystem
 
   if (ending.shellGone) {
     report(RebuildPhase::kWaitingForExplorer);
-    WaitForShell(options, system, *shell, ending, result);
+    WaitForShell(options, system, prepared.get(), *shell, ending, result);
   }
 
   // Open the windows again when File Explorer closed them, and a shell is there to open them.

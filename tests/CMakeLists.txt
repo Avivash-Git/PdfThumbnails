@@ -293,9 +293,11 @@ pdft_add_program_test(handler.refuses_elevated pdft_refuses_elevated
 # elevated, and test tasks in a Task Scheduler folder and under root-folder names of its own,
 # which it deletes; starts itself (child modes in integration/main.cpp), the two executables, a
 # writing command of theirs only where its writes are swallowed anyway, and pdft-run-medium.exe
-# once through Task Scheduler; never starts a thumbnail extraction, and opens a File Explorer
-# window (on a folder of its own, closed again) only on runners GitHub hosts. Its named objects
-# carry a suffix of the run's own, so it never takes or waits for a running app's.
+# once through Task Scheduler; never starts a thumbnail extraction or explorer.exe. Only on
+# runners GitHub hosts does it open a File Explorer window (on a folder of its own, closed again)
+# and run copies of itself inside jobs of its own, which start it suspended and end it at once.
+# Its named objects carry a suffix of the run's own, so it never takes or waits for a running
+# app's.
 if(TARGET pdft_appcore)
   add_executable(pdft_integration_tests
     integration/main.cpp
@@ -309,6 +311,7 @@ if(TARGET pdft_appcore)
     integration/exes_test.cpp
     integration/fake_probes.h
     integration/file_ops_test.cpp
+    integration/github_runner.h
     integration/install_test.cpp
     integration/instance_test.cpp
     integration/live_test_files_test.cpp

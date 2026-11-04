@@ -1,7 +1,8 @@
 // The pure parts of the thumbnail-cache rebuild (rebuild.h): the cache-file name test, the
-// refusal decision, how a holder is classified and in what order holders are ended, the wait for
-// File Explorer, the plan to open folder windows again, the exit code, and the report and
-// question text. No Windows state is read here.
+// refusal decision, how a start leaves this process's job (processes.h), how a holder is
+// classified and in what order holders are ended, the wait for File Explorer, the plan to open
+// folder windows again, the exit code, and the report and question text. No Windows state is read
+// here.
 
 #include <windows.h>
 
@@ -98,10 +99,51 @@ TEST(RebuildRefusal, OrderAndTruthTable) {
   package.autoRestartShell = false;
   EXPECT_EQ(DecideRebuildRefusal(package), RebuildRefusal::kNoRestartBelowPackage);
 
-  // AutoRestartShell off without a package is fine: this program starts File Explorer itself.
+  // AutoRestartShell off without a package is fine where this program can start File Explorer
+  // itself, outside every job.
   RebuildConditions noRestart = Clean();
   noRestart.autoRestartShell = false;
+  noRestart.explorerStart = ExplorerStartCheck::kOutsideJobs;
   EXPECT_EQ(DecideRebuildRefusal(noRestart), RebuildRefusal::kNone);
+}
+
+// Where Windows does not restart File Explorer, the start this program would make decides: no
+// trial yet counts as a File Explorer that would stay in a job.
+TEST(RebuildRefusal, TheStartOfFileExplorerWhereWindowsDoesNot) {
+  RebuildConditions off = Clean();
+  off.autoRestartShell = false;
+  off.explorerStart = ExplorerStartCheck::kNotChecked;
+  EXPECT_EQ(DecideRebuildRefusal(off), RebuildRefusal::kNoRestartInJob);
+  off.explorerStart = ExplorerStartCheck::kInsideJob;
+  EXPECT_EQ(DecideRebuildRefusal(off), RebuildRefusal::kNoRestartInJob);
+  off.explorerStart = ExplorerStartCheck::kFails;
+  EXPECT_EQ(DecideRebuildRefusal(off), RebuildRefusal::kNoRestartStartFails);
+  off.explorerStart = ExplorerStartCheck::kOutsideJobs;
+  EXPECT_EQ(DecideRebuildRefusal(off), RebuildRefusal::kNone);
+
+  // The package wins over the start.
+  RebuildConditions package = off;
+  package.belowPackage = true;
+  for (const ExplorerStartCheck start :
+       {ExplorerStartCheck::kNotChecked, ExplorerStartCheck::kOutsideJobs,
+        ExplorerStartCheck::kInsideJob, ExplorerStartCheck::kFails}) {
+    package.explorerStart = start;
+    EXPECT_EQ(DecideRebuildRefusal(package), RebuildRefusal::kNoRestartBelowPackage)
+        << static_cast<int>(start);
+  }
+
+  // With AutoRestartShell on, the start is no refusal at all; the context's refusals come first.
+  RebuildConditions on = Clean();
+  for (const ExplorerStartCheck start :
+       {ExplorerStartCheck::kNotChecked, ExplorerStartCheck::kInsideJob,
+        ExplorerStartCheck::kFails}) {
+    on.explorerStart = start;
+    EXPECT_EQ(DecideRebuildRefusal(on), RebuildRefusal::kNone) << static_cast<int>(start);
+  }
+  RebuildConditions otherUser = off;
+  otherUser.explorerStart = ExplorerStartCheck::kFails;
+  otherUser.otherShellUser = true;
+  EXPECT_EQ(DecideRebuildRefusal(otherUser), RebuildRefusal::kOtherShellUser);
 }
 
 TEST(RebuildRefusal, ConditionsFromTheContext) {
@@ -118,13 +160,66 @@ TEST(RebuildRefusal, ConditionsFromTheContext) {
   context.elevated = true;
   context.differentFromShellUser = true;
   context.packagedAncestor = L"Some.Package_8wekyb3d8bbwe";
-  const RebuildConditions dirty = RebuildConditionsOf(context, false);
+  const RebuildConditions dirty =
+      RebuildConditionsOf(context, false, ExplorerStartCheck::kInsideJob);
   EXPECT_TRUE(dirty.elevated);
   EXPECT_FALSE(dirty.writesChecked);
   EXPECT_TRUE(dirty.virtualized);
   EXPECT_TRUE(dirty.otherShellUser);
   EXPECT_TRUE(dirty.belowPackage);
   EXPECT_FALSE(dirty.autoRestartShell);
+  EXPECT_EQ(dirty.explorerStart, ExplorerStartCheck::kInsideJob);
+  EXPECT_EQ(clean.explorerStart, ExplorerStartCheck::kNotChecked);
+}
+
+// ---- jobs: ChooseBreakaway, ChildEndsWithJob, JobFactsToken ----
+
+JobFacts InJob(std::optional<DWORD> limitFlags) {
+  JobFacts facts;
+  facts.inJob = true;
+  facts.limitFlags = limitFlags;
+  return facts;
+}
+
+TEST(Breakaway, TheModeFollowsTheImmediateJobsLimits) {
+  EXPECT_EQ(ChooseBreakaway(JobFacts{}), BreakawayMode::kNotInJob);
+  EXPECT_EQ(ChooseBreakaway(InJob(0x800)), BreakawayMode::kAsk);
+  EXPECT_EQ(ChooseBreakaway(InJob(0x1800)), BreakawayMode::kAsk);
+  EXPECT_EQ(ChooseBreakaway(InJob(0x1000)), BreakawayMode::kSilent);
+  EXPECT_EQ(ChooseBreakaway(InJob(0x0)), BreakawayMode::kForbidden);
+  EXPECT_EQ(ChooseBreakaway(InJob(0x2000)), BreakawayMode::kForbidden);
+  // Limits that could not be read: ask, as before; a job that refuses says so.
+  EXPECT_EQ(ChooseBreakaway(InJob(std::nullopt)), BreakawayMode::kAsk);
+}
+
+TEST(Breakaway, OnlyAJobThatMayRefuseIsBlamed) {
+  // Limits not read: access denied is the job's refusal.
+  EXPECT_TRUE(JobRefusedStart(InJob(std::nullopt), ERROR_ACCESS_DENIED));
+  EXPECT_FALSE(JobRefusedStart(InJob(std::nullopt), ERROR_FILE_NOT_FOUND));
+  // Limits that let programs leave: access denied comes from the image, not the job.
+  EXPECT_FALSE(JobRefusedStart(InJob(0x800), ERROR_ACCESS_DENIED));
+  EXPECT_FALSE(JobRefusedStart(InJob(0x3800), ERROR_ACCESS_DENIED));
+  // No breakaway asked for: nothing for the job to refuse.
+  EXPECT_FALSE(JobRefusedStart(JobFacts{}, ERROR_ACCESS_DENIED));
+  EXPECT_FALSE(JobRefusedStart(InJob(0x1000), ERROR_ACCESS_DENIED));
+  EXPECT_FALSE(JobRefusedStart(InJob(0x2000), ERROR_ACCESS_DENIED));
+}
+
+TEST(Breakaway, AChildEndsWithAKillOnCloseJob) {
+  EXPECT_FALSE(ChildEndsWithJob(JobFacts{}));
+  EXPECT_TRUE(ChildEndsWithJob(InJob(0x2000)));
+  EXPECT_TRUE(ChildEndsWithJob(InJob(0x2800)));
+  EXPECT_FALSE(ChildEndsWithJob(InJob(0x3000)));  // silent breakaway: not in the job
+  EXPECT_FALSE(ChildEndsWithJob(InJob(0x800)));
+  EXPECT_TRUE(ChildEndsWithJob(InJob(std::nullopt)));
+}
+
+TEST(Breakaway, TheLogTokenShowsOnlyTheJobLimitsThatMatter) {
+  EXPECT_EQ(JobFactsToken(JobFacts{}), L"none");
+  EXPECT_EQ(JobFactsToken(InJob(std::nullopt)), L"unread");
+  EXPECT_EQ(JobFactsToken(InJob(0xFFFFFFFF)), L"0x00003800");
+  EXPECT_EQ(JobFactsToken(InJob(0x0)), L"0x00000000");
+  EXPECT_EQ(JobFactsToken(InJob(0x2008)), L"0x00002000");
 }
 
 // ---- ClassifyHolder ----
@@ -315,10 +410,12 @@ TEST(RebuildExitCode, EveryRow) {
   RebuildResult context;
   for (const RebuildRefusal refusal :
        {RebuildRefusal::kElevated, RebuildRefusal::kVirtualized, RebuildRefusal::kOtherShellUser,
-        RebuildRefusal::kNoRestartBelowPackage}) {
+        RebuildRefusal::kNoRestartBelowPackage, RebuildRefusal::kNoRestartInJob}) {
     context.refusal = refusal;
     EXPECT_EQ(RebuildExitCode(context), ExitCode::kWrongContext);
   }
+  context.refusal = RebuildRefusal::kNoRestartStartFails;
+  EXPECT_EQ(RebuildExitCode(context), ExitCode::kFailed);
   context.refusal = RebuildRefusal::kOwnProcessHoldsCache;
   EXPECT_EQ(RebuildExitCode(context), ExitCode::kFailed);
   context.refusal = RebuildRefusal::kFileOperation;
@@ -483,8 +580,16 @@ TEST(RebuildReport, ShellDidNotComeBackAndListingFailed) {
   const std::vector<std::wstring> jobLines = RebuildReport(jobForbids);
   EXPECT_TRUE(HasLine(jobLines,
                       L"File Explorer did not start again. Start it from Task Manager: Run new "
-                      L"task, explorer.exe. This program does not start it from inside a job that "
-                      L"does not let programs leave it."));
+                      L"task, explorer.exe. This program did not start it: from here it would "
+                      L"have stayed inside a job of the program this runs in."));
+
+  // A start that could not be made ready before anything changed: the plain line.
+  RebuildResult notReady = jobForbids;
+  notReady.start = ShellStart::kFailed;
+  notReady.startError = E_FAIL;
+  EXPECT_TRUE(HasLine(RebuildReport(notReady),
+                      L"File Explorer did not start again. Start it from Task Manager: Run new "
+                      L"task, explorer.exe."));
 }
 
 TEST(RebuildReport, CappedReopen) {
@@ -499,6 +604,74 @@ TEST(RebuildReport, CappedReopen) {
   const std::vector<std::wstring> lines = RebuildReport(r);
   EXPECT_TRUE(
       HasLine(lines, L"Reopened 25 of 29 folder windows. Only the first 25 were reopened."));
+}
+
+// ---- a rebuild the check before the question refused ----
+
+TEST(RebuildRefusal, Tokens) {
+  EXPECT_STREQ(RebuildRefusalToken(RebuildRefusal::kNoRestartInJob), L"no-restart-in-job");
+  EXPECT_STREQ(RebuildRefusalToken(RebuildRefusal::kNoRestartStartFails),
+               L"no-restart-start-fails");
+  EXPECT_STREQ(RebuildRefusalToken(RebuildRefusal::kNoRestartBelowPackage),
+               L"no-restart-below-package");
+}
+
+TEST(RebuildNotStarted, CopiesWhatTheCheckFoundAndCommitsNothing) {
+  RebuildPrecheck check;
+  check.conditions = Clean();
+  check.conditions.autoRestartShell = false;
+  check.conditions.explorerStart = ExplorerStartCheck::kFails;
+  check.refusal = RebuildRefusal::kNoRestartStartFails;
+  check.job = JobFacts{true, 0x2000};
+  check.startError = E_ACCESSDENIED;
+  const RebuildResult result = RebuildNotStarted(check);
+  EXPECT_EQ(result.refusal, RebuildRefusal::kNoRestartStartFails);
+  EXPECT_EQ(result.failure, S_OK);
+  EXPECT_EQ(result.startError, E_ACCESSDENIED);
+  EXPECT_FALSE(result.autoRestartShell);
+  EXPECT_EQ(result.explorerStart, ExplorerStartCheck::kFails);
+  ASSERT_TRUE(result.job);
+  EXPECT_TRUE(result.job->inJob);
+  EXPECT_FALSE(result.jobEscape);
+  EXPECT_FALSE(result.committed);
+  EXPECT_EQ(result.ended, 0u);
+  EXPECT_EQ(result.shell, ShellOutcome::kNotEnded);
+  EXPECT_EQ(RebuildExitCode(result), ExitCode::kFailed);
+  EXPECT_EQ(RebuildPrecheckLogText(check),
+            L"refresh full refused=no-restart-start-fails start-hr=0x80070005 job=0x00002000");
+
+  // The start could not be made ready, so the job was never read: not "none" (no job).
+  RebuildPrecheck notReady = check;
+  notReady.job.reset();
+  EXPECT_FALSE(RebuildNotStarted(notReady).job);
+  EXPECT_EQ(RebuildPrecheckLogText(notReady),
+            L"refresh full refused=no-restart-start-fails start-hr=0x80070005 job=not-read");
+
+  RebuildPrecheck stays = check;
+  stays.conditions.explorerStart = ExplorerStartCheck::kInsideJob;
+  stays.refusal = RebuildRefusal::kNoRestartInJob;
+  stays.escape = JobEscape::kStays;
+  stays.startError = S_OK;
+  stays.job = JobFacts{true, std::nullopt};
+  const RebuildResult inJob = RebuildNotStarted(stays);
+  ASSERT_TRUE(inJob.jobEscape);
+  EXPECT_EQ(*inJob.jobEscape, JobEscape::kStays);
+  EXPECT_EQ(RebuildExitCode(inJob), ExitCode::kWrongContext);
+  EXPECT_EQ(RebuildPrecheckLogText(stays),
+            L"refresh full refused=no-restart-in-job explorer-start=stays job=unread");
+
+  RebuildPrecheck failed;
+  failed.failure = E_FAIL;
+  const RebuildResult notRead = RebuildNotStarted(failed);
+  EXPECT_EQ(notRead.failure, E_FAIL);
+  EXPECT_FALSE(notRead.committed);
+  EXPECT_EQ(RebuildExitCode(notRead), ExitCode::kFailed);
+  EXPECT_EQ(RebuildPrecheckLogText(failed), L"refresh full failed hr=0x80004005");
+
+  // Every other refusal keeps the plain line.
+  RebuildPrecheck elevated;
+  elevated.refusal = RebuildRefusal::kElevated;
+  EXPECT_EQ(RebuildPrecheckLogText(elevated), L"refresh full refused=elevated");
 }
 
 // ---- text ----
@@ -517,6 +690,16 @@ TEST(RebuildText, RefusalsAndFailures) {
   EXPECT_NE(RebuildRefusalText(RebuildRefusal::kOtherShellUser, context).find(L"PC\\tester"),
             std::wstring::npos);
   EXPECT_FALSE(RebuildRefusalText(RebuildRefusal::kNoRestartBelowPackage, context).empty());
+  EXPECT_EQ(RebuildRefusalText(RebuildRefusal::kNoRestartInJob, context),
+            L"Cannot run here: Windows is set not to restart File Explorer by itself, and a File "
+            L"Explorer started from here would stay inside a job of the program this runs in (a "
+            L"terminal or another tool), so ending that program could end File Explorer and the "
+            L"taskbar too. Nothing changed; run --refresh --full from a Win+R prompt.");
+  EXPECT_EQ(RebuildRefusalText(RebuildRefusal::kNoRestartStartFails, context,
+                               HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED)),
+            L"Cannot rebuild the thumbnail cache: Windows is set not to restart File Explorer by "
+            L"itself, and this program cannot start File Explorer from here either (0x80070005), "
+            L"so the taskbar would not come back. Nothing changed.");
   EXPECT_FALSE(RebuildRefusalText(RebuildRefusal::kOwnProcessHoldsCache, context).empty());
   EXPECT_FALSE(RebuildRefusalText(RebuildRefusal::kFileOperation, context).empty());
   // The caller supplies the virtualized and cancelled text.

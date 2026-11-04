@@ -25,6 +25,7 @@
 #include "diagnostics.h"
 #include "elevation.h"
 #include "evaluate.h"
+#include "github_runner.h"
 #include "instance.h"
 #include "json_check.h"
 #include "medium_il.h"
@@ -527,21 +528,6 @@ TEST_P(Exes, FixTakeBackWithoutYesAndWithoutAConsoleIsAUsageError) {
   EXPECT_EQ(run.out, "");
 }
 
-// The value of the environment variable |name|; empty when it is not set or longer than 31.
-std::wstring EnvironmentValue(const wchar_t* name) {
-  wchar_t value[32] = {};
-  const DWORD length = GetEnvironmentVariableW(name, value, ARRAYSIZE(value));
-  return length > 0 && length < ARRAYSIZE(value) ? std::wstring(value, length) : std::wstring();
-}
-
-// A runner GitHub hosts, thrown away after the job. GITHUB_ACTIONS=true alone is not enough: it is
-// also set on a self-hosted runner, which may be a PC someone uses, and by tools that run a
-// workflow locally.
-bool OnGitHubHostedRunner() {
-  return EnvironmentValue(L"GITHUB_ACTIONS") == L"true" &&
-         EnvironmentValue(L"RUNNER_ENVIRONMENT") == L"github-hosted";
-}
-
 // Why the elevated tests of a rebuild (--refresh --full, --uninstall --rebuild-thumbnails) must
 // not start the executable here, or nothing when they may. Elevated, only the elevation refusals
 // under test would keep a run from ending File Explorer and deleting the thumbnail cache, so they
@@ -553,7 +539,7 @@ std::optional<std::string> WhyAnElevatedRefreshMayNotRunHere(const ProcessContex
     return "elevated, but the registry may be virtualized here, so it is not certain which "
            "refusal answers first";
   }
-  if (!OnGitHubHostedRunner()) {
+  if (!test::OnGitHubHostedRunner()) {
     return "elevated, but not on a runner GitHub hosts (GITHUB_ACTIONS=true with "
            "RUNNER_ENVIRONMENT=github-hosted): only the refusal under test would keep this PC's "
            "File Explorer and thumbnail cache from a real rebuild";

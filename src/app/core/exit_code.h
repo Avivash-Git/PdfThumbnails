@@ -16,7 +16,8 @@ enum class ExitCode : int {
   kNotInstalled = 6,  // the product is not installed
   kNeedsAdmin = 7,    // needs administrator rights, and nobody can be asked (or UAC gave none)
   // cannot run here (a virtualized container, a step for all users whose test writes did not
-  // reach Windows, or elevated where refused)
+  // reach Windows, elevated where refused, or a rebuild of the thumbnail cache that would not get
+  // File Explorer back from here or whose File Explorer is another account's)
   kWrongContext = 8,
 };
 
@@ -42,8 +43,9 @@ inline constexpr ExitCodeInfo kExitCodes[] = {
      L"get them)"},
     {ExitCode::kWrongContext,
      L"cannot run here (an app container that virtualizes the registry, a step for all users "
-     L"below an app package whose test writes did not reach Windows, or elevated where that is "
-     L"refused)"},
+     L"below an app package whose test writes did not reach Windows, elevated where that is "
+     L"refused, or a rebuild of the thumbnail cache where File Explorer belongs to another "
+     L"account or would not come back from here)"},
 };
 
 // The table is in value order without gaps.

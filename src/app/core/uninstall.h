@@ -13,10 +13,11 @@
 //   2. with --rebuild-thumbnails, the thumbnail cache, now that File Explorer no longer finds the
 //      handler for this user: rebuilt as --refresh --full rebuilds it (rebuild.h), which restarts
 //      File Explorer. This process holds the lock and never ran the Explorer test, so it does not
-//      hold the cache itself. A rebuild that is refused, stopped before its point of no return or
-//      cannot start changed nothing: the report says why and the uninstall goes on. One after
-//      which File Explorer did not come back, or a cache file could not be deleted, is a step that
-//      failed ("rebuild: <HRESULT>");
+//      hold the cache itself. A rebuild that is refused (also by the check the command made
+//      before its question), stopped before its point of no return or cannot start changed
+//      nothing: the report says why and the uninstall goes on. One after which File Explorer did
+//      not come back, or a cache file could not be deleted, is a step that failed ("rebuild:
+//      <HRESULT>");
 //   3. the part for all users, when the class for all users or the install folder for all users
 //      is there: the administrator step machine-uninstall of the settings executable installed
 //      there (a prompt; declined: the part stays, exit 1);
@@ -195,6 +196,10 @@ enum class UninstallRefusal {
 struct UninstallOptions {
   bool yes = false;  // --yes: the installer's uninstaller runs silently
   bool rebuildThumbnails = false;
+  // The check the command made before its question (PrecheckRebuild). When it refused or failed,
+  // no rebuild is tried and that is the reason the report gives; a later check may only refuse a
+  // rebuild it allowed. Not given: Uninstall leaves the decision to the rebuild.
+  std::optional<RebuildPrecheck> rebuildPrecheck;
   // What the rebuild asks Windows; null: RealRebuildSystem. Tests pass a fake.
   const RebuildSystem* rebuildSystem = nullptr;
   // The rebuild's progress (optional; RebuildThumbnailCache).

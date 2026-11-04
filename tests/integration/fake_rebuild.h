@@ -2,9 +2,10 @@
 // window or clock. The test lays out a world (the cache files, who holds them, the shell, the
 // folder windows, and what Windows does when the shell ends), runs RebuildThumbnailCache against
 // it, and reads back what the engine asked: the order processes were ended in, the files deleted,
-// whether File Explorer was started, and the windows opened again. The clock only moves when the
-// engine calls Wait, so the waits are exact and instant. Holders get process ids from FakePid,
-// never this process's own, which the engine (using the real one) would take for itself.
+// whether a start of File Explorer was made ready, tried and used, and the windows opened again.
+// The clock only moves when the engine calls Wait, so the waits are exact and instant. Holders get
+// process ids from FakePid, never this process's own, which the engine (using the real one)
+// would take for itself.
 
 #pragma once
 
@@ -14,6 +15,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <span>
@@ -80,7 +82,18 @@ class FakeRebuildSystem final : public RebuildSystem {
   std::map<std::wstring, ContentDelete> deleteOutcome;  // force kMissing / kNotAFile
   std::map<std::wstring, HRESULT> deleteFailure;
 
-  // Starting File Explorer.
+  // Making the start of File Explorer ready, and the trial start before anything changes: this
+  // process's job, and what the trial finds. With |trialFailsFrom| n > 0, only the n-th trial and
+  // later ones fail (with |trialHr|); with 0, every trial gives |trialHr|.
+  HRESULT prepareHr = S_OK;
+  JobFacts job;
+  JobEscape trialEscape = JobEscape::kLeaves;
+  HRESULT trialHr = S_OK;
+  int trialFailsFrom = 0;
+  mutable int prepareCalls = 0;
+  mutable int trialCalls = 0;
+
+  // Starting File Explorer (by the start made ready).
   HRESULT startHr = S_OK;
   bool startJobForbids = false;
   mutable int startCalls = 0;
@@ -266,12 +279,14 @@ class FakeRebuildSystem final : public RebuildSystem {
     deleted_.push_back(key);
     return S_OK;
   }
-  HRESULT StartExplorer(bool* jobForbids) const noexcept override {
+  HRESULT PrepareExplorerStart(
+      std::unique_ptr<PreparedExplorerStart>* start) const noexcept override {
     ++calls_;
-    ++startCalls;
-    startMs_ = ms_;
-    *jobForbids = startJobForbids;
-    return startHr;
+    ++prepareCalls;
+    start->reset();
+    if (FAILED(prepareHr)) return prepareHr;
+    *start = std::make_unique<FakeStart>(this);
+    return S_OK;
   }
   HRESULT OpenFolderWindows(std::span<const FolderWindow> windows, DWORD, size_t* opened,
                             size_t* failed) const noexcept override {
@@ -290,6 +305,33 @@ class FakeRebuildSystem final : public RebuildSystem {
   void Prime() { retriesLeft_ = freeAfterRetries; }
 
  private:
+  // The start made ready: it reads the fake's fields and counts in its calls.
+  class FakeStart final : public PreparedExplorerStart {
+   public:
+    explicit FakeStart(const FakeRebuildSystem* system) : system_(system) {}
+    const JobFacts& Job() const noexcept override { return system_->job; }
+    HRESULT Trial(JobEscape* escape) noexcept override {
+      ++system_->calls_;
+      const int trial = ++system_->trialCalls;
+      *escape = JobEscape::kForbidden;
+      if (system_->trialFailsFrom == 0 || trial >= system_->trialFailsFrom) {
+        if (FAILED(system_->trialHr)) return system_->trialHr;
+      }
+      *escape = system_->trialEscape;
+      return S_OK;
+    }
+    HRESULT Start(bool* jobForbids) noexcept override {
+      ++system_->calls_;
+      ++system_->startCalls;
+      system_->startMs_ = system_->ms_;
+      *jobForbids = system_->startJobForbids;
+      return system_->startHr;
+    }
+
+   private:
+    const FakeRebuildSystem* system_;
+  };
+
   struct Held {
     Holder holder;
     std::vector<std::filesystem::path> files;
