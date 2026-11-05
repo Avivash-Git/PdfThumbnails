@@ -1,8 +1,9 @@
 // The refresh experiment's verdict (refresh_judge.h): which zoom a bitmap's size shows, for A4
 // portrait and landscape at every size the experiment asks for, exactly and (from 32 px on)
 // within 1 px; the folder rules (a valid baseline, refreshed folders, control folders, entries
-// created and IDs changed, each entry taken once); the record files written and read back under
-// %TEMP% (TempDir). Nothing here asks the thumbnail cache.
+// created and IDs changed, each entry taken once); the rules for files the cache drops whole (a
+// refresh's own extraction answers, the pages each folder must show, the control); the record
+// files written and read back under %TEMP% (TempDir). Nothing here asks the thumbnail cache.
 
 #include <windows.h>
 
@@ -10,7 +11,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -319,6 +322,472 @@ TEST(RefreshJudge, LabelsCompareExactly) {
   ASSERT_EQ(verdicts.size(), 1u);
   EXPECT_FALSE(verdicts[0].control);
   EXPECT_FALSE(verdicts[0].passA);
+}
+
+TEST(RefreshJudge, TheOutcomeSaysWhatPassASays) {
+  std::vector<FolderVerdict> verdicts =
+      Judge(Folder(L"P-product", 100), Folder(L"P-product", 142), 100, 142, {});
+  EXPECT_EQ(verdicts[0].outcome, FolderOutcome::kPass);
+  EXPECT_FALSE(verdicts[0].ruled);
+  verdicts = Judge(Folder(L"P-product", 100), Folder(L"P-product", 100), 100, 142, {});
+  EXPECT_EQ(verdicts[0].outcome, FolderOutcome::kFail);
+  verdicts = Judge(Folder(L"P-product", 0), Folder(L"P-product", 142), 100, 142, {});
+  EXPECT_EQ(verdicts[0].outcome, FolderOutcome::kInvalid);
+}
+
+// ---- Judge with rules ----
+
+constexpr UINT kRuleSizes[] = {16, 96, 256};
+constexpr DWORD kCached = 2;  // WTS_CACHED
+const std::vector<std::wstring> kFourFiles = {L"portrait-001.pdf", L"portrait-002.pdf",
+                                              L"landscape-001.pdf", L"landscape-002.pdf"};
+
+// The control's eight files, the pages in turn.
+std::vector<std::wstring> EightFiles() {
+  std::vector<std::wstring> files;
+  for (const wchar_t* n : {L"001", L"002", L"003", L"004"}) {
+    files.push_back(std::wstring(L"portrait-") + n + L".pdf");
+    files.push_back(std::wstring(L"landscape-") + n + L".pdf");
+  }
+  return files;
+}
+
+// |files| of |label| at kRuleSizes, cached at |zoom| (0: not cached).
+std::vector<CacheRecord> Records(const std::wstring& label, const std::vector<std::wstring>& files,
+                                 int zoom) {
+  std::vector<CacheRecord> records;
+  for (const std::wstring& file : files) {
+    for (const UINT size : kRuleSizes) records.push_back(Entry(label, file, size, zoom));
+  }
+  return records;
+}
+
+// An extraction's answer for |file| at |size|: S_OK with a bitmap at |zoom| and the out |flags|;
+// a failure for zoom 0.
+CacheRecord Made(const std::wstring& label, const std::wstring& file, UINT size, int zoom,
+                 DWORD flags = kCached) {
+  CacheRecord record = Entry(label, file, size, zoom == 0 ? 100 : zoom);
+  record.cacheFlags = flags;
+  record.cached = (flags & kCached) != 0;
+  if (zoom == 0) {
+    record.hr = static_cast<HRESULT>(0x8004B200);  // WTS_E_FAILEDEXTRACTION
+    record.w = record.h = 0;
+    record.cached = false;
+  }
+  return record;
+}
+
+// |file|'s records in |records| (at |sizes|; at every size when empty) no longer held: the cache
+// dropped them.
+void Drop(std::vector<CacheRecord>* records, const std::wstring& file,
+          const std::vector<UINT>& sizes = {}) {
+  for (CacheRecord& record : *records) {
+    if (!record.key.ends_with(L"/" + file)) continue;
+    if (!sizes.empty() && std::find(sizes.begin(), sizes.end(), record.size) == sizes.end()) {
+      continue;
+    }
+    record = Entry(record.label, file, record.size, 0);
+    record.hr = static_cast<HRESULT>(0x80030002);  // STG_E_FILENOTFOUND
+  }
+}
+
+// The records of |records| other than |file|'s (at |size|; at every size for 0).
+std::vector<CacheRecord> Without(std::vector<CacheRecord> records, const std::wstring& file,
+                                 UINT size = 0) {
+  std::erase_if(records, [&](const CacheRecord& record) {
+    return record.key.ends_with(L"/" + file) && (size == 0 || record.size == size);
+  });
+  return records;
+}
+
+// A variant's folder refreshed as it should be: held at 100 % before, each entry made at 142 %
+// and stored, and held at 142 % afterwards.
+struct Refreshed {
+  std::vector<CacheRecord> before, after, made;
+  bool inProcess = true;  // |made| holds every extraction the refresh made
+};
+
+Refreshed Variant(const std::wstring& label = L"P-product") {
+  Refreshed r{Records(label, kFourFiles, 100), Records(label, kFourFiles, 142), {}};
+  for (const std::wstring& file : kFourFiles) {
+    for (const UINT size : kRuleSizes) r.made.push_back(Made(label, file, size, 142));
+  }
+  return r;
+}
+
+FolderVerdict JudgeOne(const std::vector<CacheRecord>& before,
+                       const std::vector<CacheRecord>& after, const JudgeRules& rules,
+                       std::span<const std::wstring> controls = {}) {
+  const std::vector<FolderVerdict> verdicts = Judge(before, after, 100, 142, controls, rules);
+  EXPECT_EQ(verdicts.size(), 1u);
+  return verdicts.empty() ? FolderVerdict{} : verdicts[0];
+}
+
+FolderVerdict JudgeRefreshed(const Refreshed& r, bool clean = true) {
+  JudgeRules rules;
+  rules.sizes = kRuleSizes;
+  rules.refreshClean = clean;
+  rules.made = r.made;
+  rules.inProcess = r.inProcess;
+  return JudgeOne(r.before, r.after, rules);
+}
+
+// A control's verdict with |filesPerPage|.
+FolderVerdict JudgeControl(const std::vector<CacheRecord>& before,
+                           const std::vector<CacheRecord>& after, size_t filesPerPage = 1) {
+  static const std::wstring controls[] = {L"C-control"};
+  JudgeRules rules;
+  rules.sizes = kRuleSizes;
+  rules.filesPerPage = filesPerPage;
+  return JudgeOne(before, after, rules, controls);
+}
+
+TEST(RefreshJudgeRules, AFolderMadeAgainPasses) {
+  const FolderVerdict v = JudgeRefreshed(Variant());
+  EXPECT_TRUE(v.ruled);
+  EXPECT_EQ(v.outcome, FolderOutcome::kPass);
+  EXPECT_TRUE(v.passA);
+  EXPECT_TRUE(v.baselineValid);
+  EXPECT_EQ(v.baseline, 12u);
+  EXPECT_EQ(v.newAfter, 12u);
+  EXPECT_EQ(v.heldAfter, 12u);
+  EXPECT_EQ(v.filesHeldAfter, 4u);
+  EXPECT_EQ(v.heldNewCached, 12u);
+  EXPECT_EQ(v.oldAfter + v.missAfter + v.otherAfter + v.madeWrong + v.droppedAfter, 0u);
+  EXPECT_EQ(v.portraitBefore, 2u);
+  EXPECT_EQ(v.landscapeBefore, 2u);
+  EXPECT_EQ(v.portraitAfter, 2u);
+  EXPECT_EQ(v.landscapeAfter, 2u);
+  EXPECT_FALSE(v.refreshFailed);
+  EXPECT_FALSE(v.nothingLeft);
+}
+
+TEST(RefreshJudgeRules, AFileDroppedWholeCountsNeitherWay) {
+  Refreshed r = Variant();
+  Drop(&r.after, L"portrait-001.pdf");
+  const FolderVerdict v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kPass);
+  EXPECT_EQ(v.droppedAfter, 3u);
+  EXPECT_EQ(v.filesDropped, std::vector<std::wstring>{L"P-product/portrait-001.pdf"});
+  EXPECT_EQ(v.filesGoneBefore, 0u);
+  EXPECT_EQ(v.missAfter, 0u);
+  EXPECT_EQ(v.newAfter, 9u);
+  EXPECT_EQ(v.portraitAfter, 1u);
+  EXPECT_EQ(v.landscapeAfter, 2u);
+}
+
+TEST(RefreshJudgeRules, AFilePartlyGoneFails) {
+  Refreshed r = Variant();
+  Drop(&r.after, L"portrait-001.pdf", {96, 256});
+  const FolderVerdict v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kFail);
+  EXPECT_EQ(v.missAfter, 2u);
+  EXPECT_EQ(v.droppedAfter, 0u);
+  EXPECT_TRUE(v.filesDropped.empty());
+}
+
+TEST(RefreshJudgeRules, ADroppedFileNeedsItsOwnExtractionMadeAndStored) {
+  struct Row {
+    const char* what;
+    int zoom;
+    DWORD flags;
+    size_t madeWrong, missAfter;
+  };
+  const Row rows[] = {
+      {"its extraction failed", 0, 0, 3, 0},
+      {"made at the old zoom", 100, kCached, 3, 0},
+      {"made without WTS_CACHED", 142, 0, 0, 3},
+  };
+  for (const Row& row : rows) {
+    SCOPED_TRACE(row.what);
+    Refreshed r = Variant();
+    for (CacheRecord& made : r.made) {
+      if (made.key == L"P-product/portrait-001.pdf") {
+        made = Made(L"P-product", L"portrait-001.pdf", made.size, row.zoom, row.flags);
+      }
+    }
+    Drop(&r.after, L"portrait-001.pdf");
+    const FolderVerdict v = JudgeRefreshed(r);
+    EXPECT_EQ(v.outcome, FolderOutcome::kFail);
+    EXPECT_EQ(v.madeWrong, row.madeWrong);
+    EXPECT_EQ(v.madeWrongGone, row.madeWrong);
+    EXPECT_EQ(v.madeWrongOld, 0u);
+    EXPECT_EQ(v.missAfter, row.missAfter);
+    EXPECT_EQ(v.droppedAfter, 0u);
+  }
+
+  // Not reached at all: the refresh found it gone already.
+  Refreshed r = Variant();
+  r.made = Without(r.made, L"portrait-001.pdf");
+  Drop(&r.after, L"portrait-001.pdf");
+  const FolderVerdict v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kPass);
+  EXPECT_EQ(v.droppedAfter, 3u);
+  EXPECT_EQ(v.filesDropped.size(), 1u);
+  EXPECT_EQ(v.filesGoneBefore, 1u);
+  EXPECT_EQ(v.madeWrong, 0u);
+}
+
+TEST(RefreshJudgeRules, AnEntryHeldNeedsItsOwnExtractionAtTheNewZoom) {
+  struct Row {
+    const char* what;
+    int zoom;  // -1: no record at that size
+  };
+  for (const Row& row : {Row{"its extraction failed", 0}, Row{"made at the old zoom", 100},
+                         Row{"never made, in a file made at other sizes", -1}}) {
+    SCOPED_TRACE(row.what);
+    Refreshed r = Variant();
+    r.made = Without(r.made, L"portrait-001.pdf", 96);
+    if (row.zoom >= 0) r.made.push_back(Made(L"P-product", L"portrait-001.pdf", 96, row.zoom));
+    const FolderVerdict v = JudgeRefreshed(r);
+    EXPECT_EQ(v.outcome, FolderOutcome::kFail);
+    EXPECT_EQ(v.madeWrong, 1u);
+    EXPECT_EQ(v.newAfter, 11u);
+  }
+
+  // Held and new right after: WTS_CACHED on its extraction is recorded, not needed.
+  Refreshed r = Variant();
+  for (CacheRecord& made : r.made) {
+    if (made.key == L"P-product/landscape-001.pdf") made.cacheFlags = 0;
+  }
+  const FolderVerdict v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kPass);
+  EXPECT_EQ(v.newAfter, 12u);
+  EXPECT_EQ(v.heldNewCached, 9u);
+}
+
+TEST(RefreshJudgeRules, AnEntryHeldInAFileTheRefreshDidNotReachFails) {
+  // Something else made it, or the refresh never got there and it stayed: either way not the
+  // refresh's doing.
+  Refreshed r = Variant();
+  r.made = Without(r.made, L"landscape-002.pdf");
+  FolderVerdict v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kFail);
+  EXPECT_EQ(v.madeWrong, 3u);
+  EXPECT_EQ(v.madeWrongOld + v.madeWrongGone, 0u);
+  EXPECT_EQ(v.newAfter, 9u);
+
+  // It stayed old: counted as made wrong, and as old by what the cache holds.
+  r.after = Without(r.after, L"landscape-002.pdf");
+  for (const UINT size : kRuleSizes)
+    r.after.push_back(Entry(L"P-product", L"landscape-002.pdf", size, 100));
+  v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kFail);
+  EXPECT_EQ(v.madeWrong, 3u);
+  EXPECT_EQ(v.madeWrongOld, 3u);
+  EXPECT_EQ(v.oldAfter, 0u);
+}
+
+TEST(RefreshJudgeRules, ARefreshHereThatReachedNoFileIsNotDecided) {
+  // The cache dropped every file before the refresh in this process asked about them: it made
+  // nothing, and nothing of it is a failure.
+  Refreshed r = Variant();
+  r.made.clear();
+  for (const std::wstring& file : kFourFiles) Drop(&r.after, file);
+  FolderVerdict v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kUndecided);
+  EXPECT_FALSE(v.nothingLeft);
+  EXPECT_EQ(v.droppedAfter, 12u);
+  EXPECT_EQ(v.filesDropped.size(), 4u);
+  EXPECT_EQ(v.filesGoneBefore, 4u);
+  EXPECT_EQ(v.madeWrong + v.missAfter, 0u);
+
+  // A file held afterwards although the refresh reached none: not its doing.
+  r = Variant();
+  r.made.clear();
+  for (const std::wstring& file :
+       {L"portrait-001.pdf", L"landscape-001.pdf", L"landscape-002.pdf"}) {
+    Drop(&r.after, file);
+  }
+  v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kFail);
+  EXPECT_EQ(v.madeWrong, 3u);
+  EXPECT_EQ(v.filesGoneBefore, 3u);
+}
+
+TEST(RefreshJudgeRules, TheLastExtractionCounts) {
+  // An extraction, then a call that stores it: each entry by its second answer.
+  Refreshed r = Variant();
+  std::vector<CacheRecord> twice;
+  for (const CacheRecord& made : r.made) {
+    twice.push_back(made);
+    twice.back().cacheFlags = 0;
+    twice.push_back(made);
+  }
+  r.made = twice;
+  FolderVerdict v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kPass);
+  EXPECT_EQ(v.heldNewCached, 12u);
+
+  // The second failed.
+  r.made.push_back(Made(L"P-product", L"portrait-002.pdf", 16, 0));
+  v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kFail);
+  EXPECT_EQ(v.madeWrong, 1u);
+}
+
+TEST(RefreshJudgeRules, ARefreshThatReportedAFailureFails) {
+  const FolderVerdict v = JudgeRefreshed(Variant(), false);
+  EXPECT_EQ(v.outcome, FolderOutcome::kFail);
+  EXPECT_TRUE(v.refreshFailed);
+  EXPECT_EQ(v.newAfter, 12u);
+}
+
+TEST(RefreshJudgeRules, NothingLeftAfterTheRefreshFails) {
+  // Each extraction said it stored its thumbnail, and none is held: they were not stored.
+  Refreshed r = Variant();
+  for (const std::wstring& file : kFourFiles) Drop(&r.after, file);
+  FolderVerdict v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kFail);
+  EXPECT_TRUE(v.nothingLeft);
+  EXPECT_EQ(v.droppedAfter, 12u);
+  EXPECT_EQ(v.filesDropped.size(), 4u);
+  EXPECT_EQ(v.missAfter, 0u);
+
+  // The same in another process (no extraction answers), with no failure reported.
+  r.made.clear();
+  r.inProcess = false;
+  v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kFail);
+  EXPECT_TRUE(v.nothingLeft);
+}
+
+TEST(RefreshJudgeRules, WithoutExtractionAnswersADropCountsOnlyAfterACleanRefresh) {
+  Refreshed r = Variant();
+  r.made.clear();
+  r.inProcess = false;
+  Drop(&r.after, L"portrait-001.pdf");
+  FolderVerdict v = JudgeRefreshed(r, true);
+  EXPECT_EQ(v.outcome, FolderOutcome::kPass);
+  EXPECT_EQ(v.droppedAfter, 3u);
+  EXPECT_EQ(v.missAfter, 0u);
+  EXPECT_EQ(v.filesGoneBefore, 0u);
+
+  v = JudgeRefreshed(r, false);
+  EXPECT_EQ(v.outcome, FolderOutcome::kFail);
+  EXPECT_EQ(v.missAfter, 3u);
+  EXPECT_EQ(v.droppedAfter, 0u);
+  EXPECT_TRUE(v.refreshFailed);
+}
+
+TEST(RefreshJudgeRules, TooManyFilesDroppedIsNotDecided) {
+  Refreshed r = Variant();
+  Drop(&r.after, L"portrait-001.pdf");
+  Drop(&r.after, L"portrait-002.pdf");
+  FolderVerdict v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kUndecided);
+  EXPECT_FALSE(v.passA);
+  EXPECT_FALSE(v.nothingLeft);
+  EXPECT_EQ(v.portraitAfter, 0u);
+  EXPECT_EQ(v.landscapeAfter, 2u);
+
+  // A control that lost every file changed nothing, and shows nothing.
+  const std::vector<CacheRecord> before = Records(L"C-control", kFourFiles, 100);
+  std::vector<CacheRecord> after = before;
+  for (const std::wstring& file : kFourFiles) Drop(&after, file);
+  v = JudgeControl(before, after);
+  EXPECT_TRUE(v.control);
+  EXPECT_EQ(v.outcome, FolderOutcome::kUndecided);
+  EXPECT_EQ(v.droppedAfter, 12u);
+  EXPECT_FALSE(v.nothingLeft);
+}
+
+TEST(RefreshJudgeRules, EnoughPagesOfEachKindAtEverySize) {
+  const std::vector<std::wstring> files = EightFiles();
+  for (const size_t need : {1u, 2u}) {
+    for (size_t portraits = 0; portraits <= 4; ++portraits) {
+      for (size_t landscapes = 0; landscapes <= 4; ++landscapes) {
+        SCOPED_TRACE(::testing::Message() << need << " needed, " << portraits << " portrait and "
+                                          << landscapes << " landscape files held");
+        std::vector<CacheRecord> before = Records(L"C-control", files, 100);
+        for (size_t n = portraits; n < 4; ++n) Drop(&before, files[2 * n]);
+        for (size_t n = landscapes; n < 4; ++n) Drop(&before, files[2 * n + 1]);
+        const FolderVerdict v = JudgeControl(before, before, need);
+        EXPECT_EQ(v.portraitBefore, portraits);
+        EXPECT_EQ(v.landscapeBefore, landscapes);
+        const bool enough = portraits >= need && landscapes >= need;
+        EXPECT_EQ(v.baselineValid, enough);
+        EXPECT_EQ(v.outcome, enough ? FolderOutcome::kPass : FolderOutcome::kInvalid);
+      }
+    }
+  }
+
+  // One size short: the only portrait held is missing at 96.
+  std::vector<CacheRecord> before = Records(L"C-control", kFourFiles, 100);
+  Drop(&before, L"portrait-001.pdf");
+  Drop(&before, L"portrait-002.pdf", {96});
+  FolderVerdict v = JudgeControl(before, before);
+  EXPECT_EQ(v.portraitBefore, 0u);
+  EXPECT_EQ(v.notHeldBefore, 4u);
+  EXPECT_EQ(v.outcome, FolderOutcome::kInvalid);
+
+  // A page the judge does not know by its name counts for neither (and shows neither zoom).
+  before = Records(L"C-control", {L"square-001.pdf", L"landscape-001.pdf"}, 100);
+  v = JudgeControl(before, before);
+  EXPECT_EQ(v.portraitBefore, 0u);
+  EXPECT_EQ(v.landscapeBefore, 1u);
+  EXPECT_EQ(v.outcome, FolderOutcome::kInvalid);
+}
+
+TEST(RefreshJudgeRules, TheControl) {
+  const std::vector<CacheRecord> before = Records(L"C-control", kFourFiles, 100);
+
+  // One file dropped, the rest old: it held.
+  std::vector<CacheRecord> after = before;
+  Drop(&after, L"landscape-001.pdf");
+  FolderVerdict v = JudgeControl(before, after);
+  EXPECT_EQ(v.outcome, FolderOutcome::kPass);
+  EXPECT_EQ(v.droppedAfter, 3u);
+  EXPECT_EQ(v.oldAfter, 9u);
+
+  // One entry new: something else made it again.
+  after = before;
+  after[4] = Entry(L"C-control", L"portrait-002.pdf", 96, 142);
+  v = JudgeControl(before, after);
+  EXPECT_EQ(v.outcome, FolderOutcome::kFail);
+  EXPECT_EQ(v.newAfter, 1u);
+
+  // One file partly gone.
+  after = before;
+  Drop(&after, L"portrait-002.pdf", {256});
+  v = JudgeControl(before, after);
+  EXPECT_EQ(v.outcome, FolderOutcome::kFail);
+  EXPECT_EQ(v.missAfter, 1u);
+
+  // Eight files, two of each page needed: four dropped, two of each left.
+  const std::vector<std::wstring> files = EightFiles();
+  const std::vector<CacheRecord> eight = Records(L"C-control", files, 100);
+  after = eight;
+  for (size_t i = 4; i < 8; ++i) Drop(&after, files[i]);
+  v = JudgeControl(eight, after, 2);
+  EXPECT_EQ(v.outcome, FolderOutcome::kPass);
+  EXPECT_EQ(v.portraitAfter, 2u);
+  EXPECT_EQ(v.landscapeAfter, 2u);
+  EXPECT_EQ(v.filesDropped.size(), 4u);
+
+  // One portrait and three landscapes left: not decided afterwards, and no baseline before.
+  after = eight;
+  for (const size_t i : {2u, 4u, 6u, 7u}) Drop(&after, files[i]);
+  v = JudgeControl(eight, after, 2);
+  EXPECT_EQ(v.outcome, FolderOutcome::kUndecided);
+  EXPECT_EQ(v.portraitAfter, 1u);
+  EXPECT_EQ(v.landscapeAfter, 3u);
+  v = JudgeControl(after, after, 2);
+  EXPECT_EQ(v.outcome, FolderOutcome::kInvalid);
+}
+
+TEST(RefreshJudgeRules, EntriesNotHeldBeforeAreNotJudged) {
+  Refreshed r = Variant();
+  Drop(&r.before, L"landscape-002.pdf");
+  // A size the rules do not judge is not counted at all.
+  r.before.push_back(Entry(L"P-product", L"portrait-001.pdf", 32, 0));
+  const FolderVerdict v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kPass);
+  EXPECT_EQ(v.notHeldBefore, 3u);
+  EXPECT_EQ(v.baseline, 9u);
+  EXPECT_EQ(v.newAfter, 9u);
+  EXPECT_EQ(v.created, 3u);
+  EXPECT_EQ(v.landscapeBefore, 1u);
 }
 
 // ---- WriteRecords / ReadRecords ----

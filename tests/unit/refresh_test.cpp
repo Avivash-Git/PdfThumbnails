@@ -268,9 +268,12 @@ SIZE Portrait(UINT edge) {
 // A thumbnail cache that holds what the test says, on a fake clock, and records every call. It
 // keeps its entries as the real one keeps them in its files, one file per size of kRefreshSizes
 // (CacheSizeOf): a WTS_INCACHEONLY question is answered from the size's own file first; else
-// from the smallest larger file, as stored (as CI showed for 1024, answered from 1280's file);
-// else from the largest smaller file, marked WTS_LOWQUALITY; else not at all. Bitmaps are A4
-// portrait pages at the size they were stored at.
+// from the smallest larger file, as stored (a case the code must handle, which CI never showed:
+// there a file stored at 256 answered 16 and 96 with bitmaps of those sizes, and 1024 is
+// answered from 1280's file because that is its own); else from the largest smaller file,
+// marked WTS_LOWQUALITY; else not at all. Bitmaps are A4 portrait pages at the size they were
+// stored at. A successful extraction that stores may drop whole files (dropsWhenStored), as the
+// real cache drops a file's every size while others are stored.
 class FakeCache final : public ThumbnailCacheOps {
  public:
   struct Call {
@@ -330,6 +333,11 @@ class FakeCache final : public ThumbnailCacheOps {
     }
     answer->bitmap = true;
     answer->dims = Portrait(size);
+    if (!(flags & WTS_EXTRACTDONOTCACHE)) {
+      if (const auto drops = dropsWhenStored.find(selected); drops != dropsWhenStored.end()) {
+        for (const std::wstring& file : drops->second) cached.erase(file);
+      }
+    }
     return S_OK;
   }
 
@@ -348,6 +356,9 @@ class FakeCache final : public ThumbnailCacheOps {
   std::set<UINT> refusedSizes;   // E_INVALIDARG at these sizes, whatever the flags
   std::set<DWORD> refusedFlags;  // E_INVALIDARG for these flags, as build 26100 answers 0x8001
   std::map<std::pair<std::wstring, UINT>, HRESULT> getFails;  // extractions that fail
+  // A successful extraction of the key without WTS_EXTRACTDONOTCACHE drops every entry of these
+  // files.
+  std::map<std::wstring, std::set<std::wstring>> dropsWhenStored;
   std::function<void(const Call&)> onGet;
   ULONGLONG now = 0;
   ULONGLONG selectMs = 0;
@@ -437,6 +448,63 @@ TEST(RefreshFiles, AFileHeldAtOneSizeIsMadeAgainAtThatSizeOnly) {
   EXPECT_EQ(counts.refreshed, 1u);
   EXPECT_EQ(counts.notCached, 0u);
   EXPECT_TRUE(counts.sizesDropped.empty());
+}
+
+TEST(RefreshFiles, AFileTheCacheDropsIsNotMadeAgainAndFailsNothing) {
+  // Storing the first file's thumbnails drops the third's: the third is asked about, misses, and
+  // is left for File Explorer to make when it shows it.
+  FakeCache cache;
+  for (const wchar_t* file : {L"C:\\a\\1.pdf", L"C:\\a\\2.pdf", L"C:\\a\\3.pdf"}) {
+    cache.cached[file] = {16, 96, 256};
+  }
+  cache.dropsWhenStored[L"C:\\a\\1.pdf"] = {L"C:\\a\\3.pdf"};
+  const std::vector<path> files = {L"C:\\a\\1.pdf", L"C:\\a\\2.pdf", L"C:\\a\\3.pdf"};
+  FakeNotifier notifier;
+  RefreshCounts counts;
+  const HRESULT hr = RunRefresh(files, Options(&cache), &cache, &notifier, &counts);
+  ASSERT_EQ(hr, S_OK);
+  EXPECT_EQ(cache.GetsWith(kRefreshProbeFlags).size(), 9u);  // the third asked at every size
+  EXPECT_EQ(cache.GetsWith(kRefreshExtractFlags), (Entries{{L"C:\\a\\1.pdf", 16},
+                                                           {L"C:\\a\\1.pdf", 96},
+                                                           {L"C:\\a\\1.pdf", 256},
+                                                           {L"C:\\a\\2.pdf", 16},
+                                                           {L"C:\\a\\2.pdf", 96},
+                                                           {L"C:\\a\\2.pdf", 256}}));
+  EXPECT_EQ(counts.notCached, 1u);
+  EXPECT_EQ(counts.refreshed, 6u);
+  EXPECT_EQ(counts.failed, 0u);
+  EXPECT_EQ(RefreshExitCode(hr, counts), ExitCode::kOk);
+  EXPECT_EQ(notifier.events,
+            (std::vector<std::wstring>{L"item C:\\a\\1.pdf", L"item C:\\a\\2.pdf"}));
+}
+
+TEST(RefreshFiles, AFileDroppedAfterItsRefreshChangesNothing) {
+  // Storing the second file's thumbnails drops the first's, made again just before: the refresh
+  // reports what it made, as without the drop.
+  const auto run = [](bool drop, RefreshCounts* counts, std::vector<std::wstring>* events) {
+    FakeCache cache;
+    cache.cached[L"C:\\a\\1.pdf"] = {16, 96, 256};
+    cache.cached[L"C:\\a\\2.pdf"] = {16, 96, 256};
+    if (drop) cache.dropsWhenStored[L"C:\\a\\2.pdf"] = {L"C:\\a\\1.pdf"};
+    const std::vector<path> files = {L"C:\\a\\1.pdf", L"C:\\a\\2.pdf"};
+    FakeNotifier notifier;
+    EXPECT_EQ(RunRefresh(files, Options(&cache), &cache, &notifier, counts), S_OK);
+    EXPECT_EQ(cache.cached.count(L"C:\\a\\1.pdf"), drop ? 0u : 1u);
+    *events = notifier.events;
+  };
+  RefreshCounts dropped, kept;
+  std::vector<std::wstring> droppedEvents, keptEvents;
+  run(true, &dropped, &droppedEvents);
+  run(false, &kept, &keptEvents);
+  EXPECT_EQ(dropped.files, kept.files);
+  EXPECT_EQ(dropped.notCached, kept.notCached);
+  EXPECT_EQ(dropped.entriesCached, kept.entriesCached);
+  EXPECT_EQ(dropped.refreshed, kept.refreshed);
+  EXPECT_EQ(dropped.refreshed, 6u);
+  EXPECT_EQ(dropped.filesRefreshed, kept.filesRefreshed);
+  EXPECT_EQ(dropped.failed, 0u);
+  EXPECT_EQ(dropped.otherSize, kept.otherSize);
+  EXPECT_EQ(droppedEvents, keptEvents);
 }
 
 TEST(RefreshFiles, TheQuestionWithIdealCacheSizeOnlyRefusedEverywhereRefreshesNothing) {

@@ -2,13 +2,18 @@
 
 #include "refresh_judge.h"
 
+#include <thumbcache.h>
+
 #include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <climits>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <optional>
+#include <set>
 #include <string>
 #include <utility>
 
@@ -270,6 +275,221 @@ std::vector<FolderVerdict> Judge(std::span<const CacheRecord> before,
     const size_t expected = v.control ? v.oldAfter : v.newAfter;
     const size_t wrong = v.missAfter + v.otherAfter + (v.control ? v.newAfter : v.oldAfter);
     v.passA = v.baselineValid && expected > 0 && wrong == 0;
+    v.outcome = !v.baselineValid ? FolderOutcome::kInvalid
+                : v.passA        ? FolderOutcome::kPass
+                                 : FolderOutcome::kFail;
+  }
+  return verdicts;
+}
+
+std::vector<FolderVerdict> Judge(std::span<const CacheRecord> before,
+                                 std::span<const CacheRecord> after, int zoomBefore, int zoomAfter,
+                                 std::span<const std::wstring> controls, const JudgeRules& rules) {
+  std::vector<FolderVerdict> verdicts;
+  std::map<std::wstring, size_t> byLabel;
+  const auto verdictOf = [&](const std::wstring& label) {
+    const auto [at, added] = byLabel.try_emplace(label, verdicts.size());
+    if (added) {
+      FolderVerdict& verdict = verdicts.emplace_back();
+      verdict.label = label;
+      verdict.control = std::find(controls.begin(), controls.end(), label) != controls.end();
+      verdict.ruled = true;
+    }
+    return at->second;
+  };
+  const auto judgedSize = [&rules](UINT size) {
+    return std::find(rules.sizes.begin(), rules.sizes.end(), size) != rules.sizes.end();
+  };
+
+  // The refresh's last extraction answer per entry, the files it reached and their folders.
+  std::map<std::pair<std::wstring, UINT>, const CacheRecord*> lastMade;
+  std::set<std::wstring> reached, refreshed;
+  for (const CacheRecord& made : rules.made) {
+    lastMade[{made.key, made.size}] = &made;
+    reached.insert(made.key);
+    refreshed.insert(made.label);
+  }
+
+  // The records of |after| per entry, in their order; each goes with one record of |before|.
+  std::map<std::pair<std::wstring, UINT>, std::vector<size_t>> afterOf;
+  for (size_t i = 0; i < after.size(); ++i) afterOf[{after[i].key, after[i].size}].push_back(i);
+  std::map<std::pair<std::wstring, UINT>, size_t> takenOf;
+  std::vector<bool> inBaseline(after.size(), false);  // goes with an entry cached before
+
+  // The judged entries, and their files in the order they first appear.
+  struct Judged {
+    std::pair<std::wstring, UINT> entry;
+    const CacheRecord* now = nullptr;  // its record afterwards, if any
+  };
+  struct File {
+    size_t verdict = 0;
+    std::wstring key;
+    std::vector<Judged> entries;
+    bool anyHeld = false;      // a judged entry is held afterwards
+    bool heldCounted = false;  // ... and counts in heldAfter
+    bool dropped = false;
+  };
+  std::vector<File> files;
+  std::map<std::wstring, size_t> fileOf;
+
+  for (const CacheRecord& old : before) {
+    const size_t index = verdictOf(old.label);
+    FolderVerdict& verdict = verdicts[index];
+    const CacheRecord* now = nullptr;
+    const std::pair<std::wstring, UINT> entry{old.key, old.size};
+    if (const auto found = afterOf.find(entry); found != afterOf.end()) {
+      size_t& taken = takenOf[entry];
+      if (taken < found->second.size()) {
+        const size_t at = found->second[taken++];
+        now = &after[at];
+        inBaseline[at] = old.cached;
+      }
+    }
+    if (!judgedSize(old.size)) continue;
+    if (!old.cached) {
+      ++verdict.notHeldBefore;
+      continue;
+    }
+    ++verdict.baseline;
+    if (now && now->cached && now->id != old.id) ++verdict.idChanged;
+    const Crop was = ClassifyCrop(old.key, old.w, old.h, zoomBefore, zoomAfter);
+    if (was != Crop::kOld) {
+      if (was != Crop::kIndistinguishable) ++verdict.baselineNotOld;
+      continue;
+    }
+    const auto [at, added] = fileOf.try_emplace(old.key, files.size());
+    if (added) files.push_back({index, old.key, {}, false, false, false});
+    File& file = files[at->second];
+    file.entries.push_back({entry, now});
+    if (now && now->cached) file.anyHeld = true;
+  }
+  for (size_t i = 0; i < after.size(); ++i) {
+    const size_t index = verdictOf(after[i].label);
+    if (after[i].cached && !inBaseline[i]) ++verdicts[index].created;
+  }
+
+  // Per folder, per judged size, per page (portrait, landscape): the files judged before and the
+  // files shown afterwards.
+  using PageFiles = std::array<std::set<std::wstring>, 2>;
+  std::vector<std::map<UINT, PageFiles>> judgedAt(verdicts.size()), shownAt(verdicts.size());
+
+  // A folder refreshed in this process: a file of it without extraction answers was not reached.
+  const auto inProcess = [&rules, &refreshed](const FolderVerdict& v) {
+    return !v.control && (rules.inProcess || refreshed.count(v.label) > 0);
+  };
+
+  for (File& file : files) {
+    FolderVerdict& v = verdicts[file.verdict];
+    const bool withMade = inProcess(v);
+    const bool fileReached = reached.count(file.key) > 0;
+    // The page's place in PageFiles; none for a page the name does not give.
+    Page page;
+    const std::optional<size_t> side =
+        PageOf(file.key, &page) ? std::optional<size_t>(page.w < page.h ? 0 : 1) : std::nullopt;
+    for (const Judged& judged : file.entries) {
+      if (side) judgedAt[file.verdict][judged.entry.second][*side].insert(file.key);
+      const bool held = judged.now && judged.now->cached;
+      const auto found = lastMade.find(judged.entry);
+      const CacheRecord* made = found == lastMade.end() ? nullptr : found->second;
+      const bool madeNew =
+          made && made->hr == S_OK && made->w > 0 && made->h > 0 &&
+          ClassifyCrop(file.key, made->w, made->h, zoomBefore, zoomAfter) == Crop::kNew;
+      const bool storedSaid = made && (made->cacheFlags & WTS_CACHED);
+      if (withMade && (fileReached ? !madeNew : held)) {
+        ++v.madeWrong;
+        if (!held) {
+          ++v.madeWrongGone;
+        } else if (ClassifyCrop(file.key, judged.now->w, judged.now->h, zoomBefore, zoomAfter) ==
+                   Crop::kOld) {
+          ++v.madeWrongOld;
+        }
+        continue;
+      }
+      if (held) {
+        ++v.heldAfter;
+        file.heldCounted = true;
+        const Crop crop =
+            ClassifyCrop(file.key, judged.now->w, judged.now->h, zoomBefore, zoomAfter);
+        switch (crop) {
+          case Crop::kNew:
+            ++v.newAfter;
+            if (storedSaid) ++v.heldNewCached;
+            break;
+          case Crop::kOld:
+            ++v.oldAfter;
+            break;
+          case Crop::kOther:
+            ++v.otherAfter;
+            break;
+          case Crop::kIndistinguishable:
+            break;
+        }
+        if (side && crop == (v.control ? Crop::kOld : Crop::kNew)) {
+          shownAt[file.verdict][judged.entry.second][*side].insert(file.key);
+        }
+        continue;
+      }
+      const bool dropped =
+          !file.anyHeld &&
+          (v.control || (withMade ? !fileReached || storedSaid : rules.refreshClean));
+      if (dropped) {
+        ++v.droppedAfter;
+        file.dropped = true;
+      } else {
+        ++v.missAfter;
+      }
+    }
+    if (file.dropped) {
+      v.filesDropped.push_back(file.key);
+      if (withMade && !fileReached) ++v.filesGoneBefore;
+    }
+    if (file.heldCounted) ++v.filesHeldAfter;
+  }
+
+  for (size_t i = 0; i < verdicts.size(); ++i) {
+    FolderVerdict& v = verdicts[i];
+    // The fewest files of each page at any judged size.
+    const auto fewest = [&rules](const std::map<UINT, PageFiles>& at, size_t side) {
+      size_t least = SIZE_MAX;
+      for (const UINT size : rules.sizes) {
+        const auto found = at.find(size);
+        least = std::min(least, found == at.end() ? 0 : found->second[side].size());
+      }
+      return least == SIZE_MAX ? 0 : least;
+    };
+    v.portraitBefore = fewest(judgedAt[i], 0);
+    v.landscapeBefore = fewest(judgedAt[i], 1);
+    v.portraitAfter = fewest(shownAt[i], 0);
+    v.landscapeAfter = fewest(shownAt[i], 1);
+    const bool enoughBefore =
+        v.portraitBefore >= rules.filesPerPage && v.landscapeBefore >= rules.filesPerPage;
+    const bool enoughAfter =
+        v.portraitAfter >= rules.filesPerPage && v.landscapeAfter >= rules.filesPerPage;
+    if (!v.control) {
+      v.refreshFailed = !rules.refreshClean;
+      // The files the refresh reached (every judged one, for a refresh in another process).
+      const bool withMade = inProcess(v);
+      size_t filesReached = 0, filesEmpty = 0;
+      for (const File& file : files) {
+        if (file.verdict != i || (withMade && !reached.count(file.key))) continue;
+        ++filesReached;
+        if (!file.anyHeld) ++filesEmpty;
+      }
+      v.nothingLeft = filesReached > 0 && filesEmpty == filesReached;
+    }
+    v.baselineValid = enoughBefore && v.baselineNotOld == 0;
+    const size_t wrong =
+        v.missAfter + v.otherAfter + v.madeWrong + (v.control ? v.newAfter : v.oldAfter);
+    if (!v.baselineValid) {
+      v.outcome = FolderOutcome::kInvalid;
+    } else if (wrong > 0 || v.refreshFailed || v.nothingLeft) {
+      v.outcome = FolderOutcome::kFail;
+    } else if (enoughAfter) {
+      v.outcome = FolderOutcome::kPass;
+    } else {
+      v.outcome = FolderOutcome::kUndecided;
+    }
+    v.passA = v.outcome == FolderOutcome::kPass;
   }
   return verdicts;
 }

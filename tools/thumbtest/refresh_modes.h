@@ -73,9 +73,16 @@ std::vector<pdft::test::CacheRecord> AskCache(pdft::ThumbnailCacheOps& cache,
                                               const std::optional<std::wstring>& label, bool print,
                                               bool* failed);
 
-// The judge's line for one folder's verdict: PASS, FAIL, HELD, CHANGED or INVALID, then the
-// counts; |zoomBefore| is the zoom the baseline should show.
-std::string VerdictText(const pdft::test::FolderVerdict& verdict, long zoomBefore);
+// The word for a verdict's outcome: PASS, FAIL, HELD, CHANGED (for a control), INVALID or
+// UNDECIDED.
+const char* OutcomeText(const pdft::test::FolderVerdict& verdict);
+
+// The judge's line for one folder's verdict: OutcomeText, the label and |when| ("right after its
+// refresh"; with a space first), then the counts, and for a verdict judged with rules the
+// thumbnails dropped with their file and the pages shown; |zoomBefore| is the zoom the baseline
+// should show.
+std::string VerdictText(const pdft::test::FolderVerdict& verdict, long zoomBefore,
+                        const std::string& when = {});
 
 // One thumbcache_*.db file, by its metadata only.
 struct CacheFile {

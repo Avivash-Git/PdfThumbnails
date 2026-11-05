@@ -379,18 +379,49 @@ HRESULT ListCacheFiles(std::map<std::string, CacheFile>* files,
   return hr;
 }
 
-std::string VerdictText(const pdft::test::FolderVerdict& v, long zoomBefore) {
-  const char* word = !v.baselineValid ? "INVALID"
-                     : v.passA        ? (v.control ? "HELD" : "PASS")
-                                      : (v.control ? "CHANGED" : "FAIL");
+const char* OutcomeText(const pdft::test::FolderVerdict& verdict) {
+  switch (verdict.outcome) {
+    case pdft::test::FolderOutcome::kInvalid:
+      return "INVALID";
+    case pdft::test::FolderOutcome::kFail:
+      return verdict.control ? "CHANGED" : "FAIL";
+    case pdft::test::FolderOutcome::kPass:
+      return verdict.control ? "HELD" : "PASS";
+    case pdft::test::FolderOutcome::kUndecided:
+      return "UNDECIDED";
+  }
+  return "?";
+}
+
+std::string VerdictText(const pdft::test::FolderVerdict& v, long zoomBefore,
+                        const std::string& when) {
   char text[320];
-  std::snprintf(
-      text, sizeof(text),
-      "%-8s %s%s: %zu cached before (%zu not at %ld %%); after: %zu new, %zu old, %zu gone, %zu "
-      "neither; %zu created, %zu under a new ID",
-      word, Utf8(v.label).c_str(), v.control ? " (control)" : "", v.baseline, v.baselineNotOld,
-      zoomBefore, v.newAfter, v.oldAfter, v.missAfter, v.otherAfter, v.created, v.idChanged);
-  return text;
+  std::snprintf(text, sizeof(text),
+                "%-8s %s%s%s: %zu cached before (%zu not at %ld %%); after: %zu new, %zu old, %zu "
+                "gone, %zu neither",
+                OutcomeText(v), Utf8(v.label).c_str(), v.control ? " (control)" : "", when.c_str(),
+                v.baseline, v.baselineNotOld, zoomBefore, v.newAfter, v.oldAfter, v.missAfter,
+                v.otherAfter);
+  std::string line = text;
+  if (v.ruled) {
+    std::snprintf(text, sizeof(text), ", %zu dropped with their file (%zu files)", v.droppedAfter,
+                  v.filesDropped.size());
+    line += text;
+  }
+  if (v.madeWrong) {
+    std::snprintf(text, sizeof(text), ", %zu made wrong", v.madeWrong);
+    line += text;
+  }
+  std::snprintf(text, sizeof(text), "; %zu created, %zu under a new ID", v.created, v.idChanged);
+  line += text;
+  if (v.refreshFailed) line += "; the refresh reported failures";
+  if (v.nothingLeft) line += "; nothing left";
+  if (v.ruled) {
+    std::snprintf(text, sizeof(text), "; on %zu portrait and %zu landscape pages at every size",
+                  v.portraitAfter, v.landscapeAfter);
+    line += text;
+  }
+  return line;
 }
 
 std::string TimeText(ULONGLONG written) {

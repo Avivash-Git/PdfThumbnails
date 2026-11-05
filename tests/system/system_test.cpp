@@ -94,22 +94,28 @@ constexpr wchar_t kIntegrationTestsExe[] = L"pdft_integration_tests.exe";
 constexpr wchar_t kThumbtestExe[] = L"thumbtest.exe";
 
 // The refresh experiment's automatic part fills the cache at every size, so it gets longer than
-// one command; its timing folder is kept small, since this runner's timings decide nothing.
-constexpr DWORD kExperimentTimeoutMs = 20 * 60 * 1000;
+// one command (at its limit the runner ends it, and its report is lost); its timing folder and
+// the files made again each in a thumbnail process of their own are kept few, since this
+// runner's timings decide nothing.
+constexpr DWORD kExperimentTimeoutMs = 30 * 60 * 1000;
 constexpr int kExperimentTimingFiles = 200;
+constexpr int kExperimentInstanceFiles = 40;
 
 // The starts of the experiment's lines that are repeated as "[ system ] refresh experiment:
 // <line>".
 constexpr std::string_view kExperimentLines[] = {
     // The fill, the baseline and the check that the thumbnail process sees the new zoom.
     "size ", "fill ", "cache files", "baseline", "not held:", "asked again", "VALID ", "EXCLUDED ",
-    "sanity check",
+    "files not held", "untouched ", "sanity check", "elapsed ",
     // How the cache answers other flags.
-    "flags 0x", "the old question", "which size answered", "the probe file's thumbnail ID",
+    "flags 0x", "the old question", "WTS_IDEALCACHESIZEONLY", "which size answered",
+    "scaled to the size asked", "the product's extraction flags", "stored at its file's size",
+    "thumbnail IDs",
     // The verdicts per folder, and what they decide.
-    "PASS ", "FAIL ", "HELD ", "CHANGED ", "INVALID ", "Pass A", "No Pass A",
+    "PASS ", "FAIL ", "HELD ", "CHANGED ", "INVALID ", "UNDECIDED ", "Pass A", "No Pass A",
+    "dropped since", "dropped whole", "round T-touch after",
     // The timing folder filled after them.
-    "timing fill", "control after",
+    "timing fill", "control after", "timing files held",
     // Why it stopped, and what it put back.
     "STOPPED:", "zoom: ", "File Explorer not restarted:"};
 
@@ -1028,10 +1034,11 @@ class System : public ::testing::Test {
   // or 1 without a pass or after a stop) and put the zoom back.
   void RunRefreshExperiment(const path& thumbtest) {
     const std::optional<DWORD> zoom = StoredZoom();
-    const std::wstring arguments = L"experiment --non-interactive --cli " +
-                                   test::QuoteArgument(InstalledCli().native()) + L" --root " +
-                                   test::QuoteArgument((scratch_ / L"experiment").native()) +
-                                   L" --timing-files " + std::to_wstring(kExperimentTimingFiles);
+    const std::wstring arguments =
+        L"experiment --non-interactive --cli " + test::QuoteArgument(InstalledCli().native()) +
+        L" --root " + test::QuoteArgument((scratch_ / L"experiment").native()) +
+        L" --timing-files " + std::to_wstring(kExperimentTimingFiles) + L" --instance-files " +
+        std::to_wstring(kExperimentInstanceFiles);
     const Outcome run = CurrentTestAccount()->Run(thumbtest, arguments, kExperimentTimeoutMs);
     Print("user", thumbtest, arguments, run);
     for (const std::string& line : OutputLines(run.out)) {
