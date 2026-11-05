@@ -29,14 +29,17 @@
 // "<Desktop>", and no path of the user's appears.
 //
 // The steps: a read-only pre-flight; the files; the baseline zoom; the cache filled at every
-// size; the baseline checked; the zoom flipped, and checked in the thumbnail process; the
+// size (two ladder files at one size each first) and asked at once (the baseline), and its
+// answers to other flags recorded; the baseline checked, by the bitmaps' sizes (an answer counts
+// only from its size's own file); the zoom flipped, and checked in the thumbnail process; the
 // extraction variants judged. With the user: rounds judged by eye (no notification, per file, per
 // folder, then a ladder of further steps; the files' times touched; associations changed), the
-// Desktop and another program's File Open dialog. Then timing, contention and how fast a refresh
-// stops; with the user, the product's --refresh --folder from a Windows Terminal tab and the
-// copy progress window (--copy-check); File Explorer not restarted; the zoom put back, the files
-// deleted and the report written. --non-interactive (CI) asks nothing: it leaves out the rounds,
-// the Desktop, the dialog, the product check and the copy window, and decides Pass A only.
+// Desktop and another program's File Open dialog. Then the timing folder filled (only now, so its
+// entries cannot push the judged ones out of the cache first), timing, contention and how fast a
+// refresh stops; with the user, the product's --refresh --folder from a Windows Terminal tab and
+// the copy progress window (--copy-check); File Explorer not restarted; the zoom put back, the
+// files deleted and the report written. --non-interactive (CI) asks nothing: it leaves out the
+// rounds, the Desktop, the dialog, the product check and the copy window, and decides Pass A only.
 
 #include <windows.h>
 
@@ -103,16 +106,48 @@ using pdft::test::FolderVerdict;
 constexpr int kBaselineZoom = 100;
 constexpr int kFlippedZoom = 142;
 
-// The sizes the cache is filled at and asked about: the product's, and 1024, the largest size
-// the documentation names.
+// The sizes the cache is filled at: the product's, and 1024, the largest size the documentation
+// names. 1024 lands in 1280's file, so its entry is 1280's: it is reported and asked about, but
+// neither judged nor refreshed.
 constexpr UINT kExperimentSizes[] = {16, 32, 48, 96, 256, 768, 1024, 1280, 1920, 2560};
 
 // A thumbnail made and stored, as File Explorer has one made (in the shared thumbnail process).
 constexpr DWORD kPopulateFlags = static_cast<DWORD>(WTS_EXTRACT | WTS_FORCEEXTRACTION);
 // A thumbnail made and not stored: the checks that must leave the cache alone.
 constexpr DWORD kNoCacheFlags = static_cast<DWORD>(WTS_FORCEEXTRACTION | WTS_EXTRACTDONOTCACHE);
-// The question without WTS_IDEALCACHESIZEONLY: any size the cache holds may answer.
-constexpr DWORD kPlainProbeFlags = static_cast<DWORD>(WTS_INCACHEONLY);
+
+// An answer neither held nor refused is asked again after each of these waits in turn.
+constexpr DWORD kAskAgainMs[] = {2000, 10000};
+
+// The flag answers recorded after the baseline. None extracts in this process, and none but the
+// last stores a thumbnail: the question scaled to the size asked; an extraction that stores
+// nothing, with WTS_IDEALCACHESIZEONLY and with the product's own extraction flags; last, a
+// plain extraction with WTS_IDEALCACHESIZEONLY, answered from the cache or made and stored at the
+// baseline zoom (for the probe file, which is never judged).
+constexpr DWORD kScaledProbeFlags = static_cast<DWORD>(WTS_INCACHEONLY | WTS_SCALETOREQUESTEDSIZE);
+constexpr DWORD kIdealNoCacheFlags =
+    static_cast<DWORD>(WTS_FORCEEXTRACTION | WTS_EXTRACTDONOTCACHE | WTS_IDEALCACHESIZEONLY);
+constexpr DWORD kProductNoCacheFlags =
+    static_cast<DWORD>(WTS_FORCEEXTRACTION | WTS_EXTRACTDONOTCACHE | WTS_REQUIRESURROGATE);
+constexpr DWORD kIdealExtractFlags = static_cast<DWORD>(WTS_EXTRACT | WTS_IDEALCACHESIZEONLY);
+// The probe file's sizes (filled at every size), and those of the product's extraction flags.
+constexpr UINT kProbeAskSizes[] = {16, 100, 256, 1024, 2560};
+constexpr UINT kProductExtractSizes[] = {256, 2560};
+
+// The ladder: portraits each filled at one size only, before the rest, so that the flag answers
+// show what the other sizes answer for them. The first one's answers tell whether the bitmap's
+// size names the size that answered; the second's, whether an entry is stored at the size asked
+// (100) or at its file's (256).
+struct LadderFile {
+  const wchar_t* name;
+  UINT size;                   // the one size it is filled at
+  std::span<const UINT> asks;  // the sizes it is asked about
+  bool scaled;                 // also asked with kScaledProbeFlags
+};
+constexpr UINT kAt256Asks[] = {16, 96, 100, 256, 300, 768, 1280, 2560};
+constexpr UINT kAt100Asks[] = {16, 96, 100, 256, 768};
+constexpr LadderFile kLadderFiles[] = {{L"portrait-at-256.pdf", 256, kAt256Asks, true},
+                                       {L"portrait-at-100.pdf", 100, kAt100Asks, false}};
 
 // The size the timing folder is filled at, and the size of the check that the thumbnail process
 // renders at the new zoom.
@@ -181,7 +216,8 @@ constexpr wchar_t kAssocLabel[] = L"A-assoc";
 constexpr wchar_t kDialogLabel[] = L"B-dialog";
 constexpr wchar_t kTimingLabel[] = L"timing";  // portrait copies, filled at kTimingSize only
 constexpr wchar_t kSlowLabel[] = L"slow";      // heavy pages and the largest page
-constexpr wchar_t kProbeLabel[] = L"probe";    // one portrait for the checks that store nothing
+constexpr wchar_t kProbeLabel[] = L"probe";    // one portrait for checks and flag answers
+constexpr wchar_t kLadderLabel[] = L"ladder";  // kLadderFiles, never judged
 
 // The names of the slow folder's largest pages start with this. They are square, and the judge
 // does not know them by their names; the heavy pages are A4 portrait (portrait-heavy-NNN.pdf).
@@ -955,6 +991,7 @@ std::string CountsText(HRESULT hr, const pdft::RefreshCounts& counts) {
       Text("%zu of %zu cached thumbnails made again in %zu files, %zu failed", counts.refreshed,
            counts.entriesCached, counts.filesRefreshed, counts.failed);
   if (counts.failed) text += " (first " + Hr(counts.firstFailure) + ")";
+  if (counts.otherSize) text += Text(", %zu answered from another size", counts.otherSize);
   if (!counts.sizesDropped.empty()) {
     text += "; sizes refused:";
     for (const UINT size : counts.sizesDropped) text += Text(" %u", size);
@@ -963,15 +1000,84 @@ std::string CountsText(HRESULT hr, const pdft::RefreshCounts& counts) {
   return text;
 }
 
-// The edges (the longer side) of the bitmaps in |records| at |size|, as "256" or "181/256".
-std::string EdgesAt(std::span<const CacheRecord> records, UINT size) {
-  std::set<int> edges;
-  for (const CacheRecord& record : records) {
-    if (record.size == size && record.cached) edges.insert(std::max(record.w, record.h));
-  }
+// Edges (the longer side of bitmaps) as "256" or "181/256"; "-" for none.
+std::string EdgesText(const std::set<int>& edges) {
   std::string text;
   for (const int edge : edges) text += (text.empty() ? "" : "/") + std::to_string(edge);
   return text.empty() ? "-" : text;
+}
+
+// "S_OK", or the HRESULT in hexadecimal.
+std::string HrOrOk(HRESULT hr) { return hr == S_OK ? "S_OK" : Hr(hr); }
+
+// A bitmap's size as "181x256"; "no bitmap" without one.
+std::string BitmapText(const pdft::CacheAnswer& answer) {
+  return answer.bitmap ? Text("%ldx%ld", answer.dims.cx, answer.dims.cy) : "no bitmap";
+}
+
+// Why an answer is not held, for the "not held:" lines: a miss's HRESULT, else its class.
+std::string WhyNotHeld(const CacheRecord& record) {
+  const pdft::CacheHit hit = HitOf(record);
+  return hit == pdft::CacheHit::kNotCached ? Hr(record.hr) : HitText(hit);
+}
+
+// A file of some records with answers that are not held.
+struct NotHeldFile {
+  std::wstring key;
+  std::string sizes;             // "every size" when none of its answers is held, or "1920, 2560"
+  std::vector<std::string> why;  // WhyNotHeld of those answers, each once
+};
+
+// The files of |records| (in the order they first appear) with an answer not held.
+std::vector<NotHeldFile> NotHeldFiles(std::span<const CacheRecord> records) {
+  struct Seen {
+    NotHeldFile file;
+    size_t asked = 0;
+    size_t missed = 0;
+  };
+  std::vector<Seen> seen;  // in the order the files first appear
+  std::map<std::wstring, size_t> at;
+  for (const CacheRecord& record : records) {
+    const auto [found, added] = at.try_emplace(record.key, seen.size());
+    if (added) seen.push_back({NotHeldFile{record.key, {}, {}}});
+    Seen& file = seen[found->second];
+    ++file.asked;
+    if (record.cached) continue;
+    ++file.missed;
+    file.file.sizes += (file.file.sizes.empty() ? "" : ", ") + std::to_string(record.size);
+    const std::string why = WhyNotHeld(record);
+    std::vector<std::string>& whys = file.file.why;
+    if (std::find(whys.begin(), whys.end(), why) == whys.end()) whys.push_back(why);
+  }
+  std::vector<NotHeldFile> files;
+  for (Seen& file : seen) {
+    if (file.missed == 0) continue;
+    if (file.missed == file.asked) file.file.sizes = "every size";
+    files.push_back(std::move(file.file));
+  }
+  return files;
+}
+
+// The names of the files |records| does not hold, grouped by the sizes: "portrait-001.pdf,
+// portrait-002.pdf at every size; landscape-001.pdf at 1920, 2560".
+std::string NotHeldNames(std::span<const CacheRecord> records) {
+  std::vector<std::pair<std::string, std::string>> groups;  // the sizes, then the names
+  for (const NotHeldFile& file : NotHeldFiles(records)) {
+    const std::wstring_view key = file.key;
+    const std::string name = Utf8(std::wstring(key.substr(key.find(L'/') + 1)));
+    const auto group = std::find_if(groups.begin(), groups.end(),
+                                    [&file](const auto& g) { return g.first == file.sizes; });
+    if (group == groups.end()) {
+      groups.emplace_back(file.sizes, name);
+    } else {
+      group->second += ", " + name;
+    }
+  }
+  std::string text;
+  for (const auto& [sizes, names] : groups) {
+    text += (text.empty() ? "" : "; ") + names + " at " + sizes;
+  }
+  return text;
 }
 
 // "20261104-201530" (UTC).
@@ -1014,8 +1120,8 @@ class Experiment {
     if (const std::optional<int> refused = PreFlight()) return *refused;
     // From here the zoom may change: the console handler puts it back on Ctrl+C and the like.
     SetConsoleCtrlHandler(PutZoomBackOnExit, TRUE);
-    bool go = MakeFiles() && SetZoom(kBaselineZoom) && Populate() && CheckBaseline() && Flip() &&
-              JudgeVariants();
+    bool go = MakeFiles() && SetZoom(kBaselineZoom) && Populate() && FlagAnswers() &&
+              CheckBaseline() && Flip() && JudgeVariants();
     if (go && best_) {
       if (options_.interactive) go = Rounds() && DesktopAndDialog();
       if (go) go = Timing();
@@ -1066,6 +1172,104 @@ class Experiment {
   void SaveRecords(const std::wstring& name, std::span<const CacheRecord> records) {
     if (!pdft::test::WriteRecords(reportDir_ / name, records)) {
       Say("cannot write " + Utf8(name) + " into the report folder");
+    }
+  }
+
+  // The product's question about |files| at sizes_ (AskCache). An answer neither held nor
+  // refused is asked again after 2 s, and again 10 s later, and a held answer then takes its
+  // place; |first| (when set) sees the first answers before that, and a line says each time how
+  // many of |what|'s answers are held now. *again: how many were held only when asked again. An
+  // entry is held only through a held answer, and its record is that answer.
+  std::vector<CacheRecord> AskHeld(std::span<const std::filesystem::path> files,
+                                   const std::string& what,
+                                   const std::function<void(std::span<const CacheRecord>)>& first,
+                                   size_t* again, bool* unopened) {
+    std::vector<CacheRecord> records =
+        AskCache(*cache_, files, sizes_, pdft::kRefreshProbeFlags, std::nullopt, false, unopened);
+    if (first) first(records);
+    *again = 0;
+    const auto pending = [](const CacheRecord& record) {
+      const pdft::CacheHit hit = HitOf(record);
+      return hit != pdft::CacheHit::kHeld && hit != pdft::CacheHit::kRefused;
+    };
+    // AskCache's records: each file at each of sizes_, in order.
+    const size_t perFile = sizes_.size();
+    for (const DWORD waitMs : kAskAgainMs) {
+      const size_t asked =
+          static_cast<size_t>(std::count_if(records.begin(), records.end(), pending));
+      if (asked == 0) break;
+      Sleep(waitMs);
+      size_t heldNow = 0;
+      for (size_t f = 0; f < files.size(); ++f) {
+        std::vector<UINT> sizes;
+        std::vector<size_t> at;
+        for (size_t s = 0; s < perFile && f * perFile + s < records.size(); ++s) {
+          if (!pending(records[f * perFile + s])) continue;
+          sizes.push_back(sizes_[s]);
+          at.push_back(f * perFile + s);
+        }
+        if (sizes.empty()) continue;
+        std::vector<CacheRecord> now =
+            AskCache(*cache_, files.subspan(f, 1), sizes, pdft::kRefreshProbeFlags, std::nullopt,
+                     false, unopened);
+        for (size_t k = 0; k < now.size() && k < at.size(); ++k) {
+          if (!now[k].cached) continue;
+          records[at[k]] = std::move(now[k]);
+          ++heldNow;
+        }
+      }
+      *again += heldNow;
+      Say(Text("asked again after %lu s: %zu of %zu held now (%s)", waitMs / 1000, heldNow, asked,
+               what.c_str()));
+    }
+    return records;
+  }
+
+  // Per size of sizes_, how |records| answered, as "<what> size  256: 48 asked: 48 held, 0 a
+  // larger size's, 0 a smaller size's, 0 not cached, 0 refused; edges 181/256", the misses by
+  // HRESULT, and S_OK answers that are no cached thumbnail counted when there are any.
+  void SayAnswers(const std::string& what, std::span<const CacheRecord> records) {
+    for (const UINT size : sizes_) {
+      size_t asked = 0, withoutCached = 0, withoutBitmap = 0;
+      std::map<pdft::CacheHit, size_t> hits;
+      std::map<HRESULT, size_t> misses;
+      std::set<int> edges;
+      for (const CacheRecord& record : records) {
+        if (record.size != size) continue;
+        ++asked;
+        const pdft::CacheHit hit = HitOf(record);
+        ++hits[hit];
+        const bool bitmap = record.w > 0 || record.h > 0;
+        if (bitmap) edges.insert(std::max(record.w, record.h));
+        if (hit != pdft::CacheHit::kNotCached) continue;
+        ++misses[record.hr];
+        if (record.hr == S_OK && !bitmap) ++withoutBitmap;
+        if (record.hr == S_OK && bitmap) ++withoutCached;
+      }
+      std::string byHr;
+      for (const auto& [hr, count] : misses) {
+        byHr += (byHr.empty() ? " (by hr: " : ", ") + Hr(hr) + Text(" x%zu", count);
+      }
+      if (!byHr.empty()) byHr += ")";
+      std::string text = Text(
+          "%s size %4u: %zu asked: %zu held, %zu a larger size's, %zu a smaller size's, %zu "
+          "not cached%s, %zu refused; edges %s",
+          what.c_str(), size, asked, hits[pdft::CacheHit::kHeld], hits[pdft::CacheHit::kLarger],
+          hits[pdft::CacheHit::kSmaller], hits[pdft::CacheHit::kNotCached], byHr.c_str(),
+          hits[pdft::CacheHit::kRefused], EdgesText(edges).c_str());
+      if (withoutCached) text += Text("; S_OK without WTS_CACHED x%zu", withoutCached);
+      if (withoutBitmap) text += Text("; S_OK without a bitmap x%zu", withoutBitmap);
+      Say(text);
+    }
+  }
+
+  // One line per file of |records| with an answer not held: "not held: <label>/<file> at every
+  // size (<why>)", or at the sizes it missed.
+  void SayNotHeld(std::span<const CacheRecord> records) {
+    for (const NotHeldFile& file : NotHeldFiles(records)) {
+      std::string why;
+      for (const std::string& each : file.why) why += (why.empty() ? "" : ", ") + each;
+      Say("not held: " + Utf8(file.key) + " at " + file.sizes + " (" + why + ")");
     }
   }
 
@@ -1382,6 +1586,10 @@ class Experiment {
       return false;
     }
     probeFile_ = files_[kProbeLabel].front();
+    if (!MakeFolder(Folder(kLadderLabel))) return false;
+    for (const LadderFile& ladder : kLadderFiles) {
+      if (!MakeFile(kLadderLabel, Folder(kLadderLabel) / ladder.name, portrait)) return false;
+    }
     // Each folder as the refresh sees it: not on the network, not too long a path.
     for (const auto& [label, files] : files_) {
       if (files.empty()) continue;
@@ -1393,8 +1601,9 @@ class Experiment {
                     ", and the refresh leaves such files alone");
       }
     }
-    Say(Text("%zu folders of 4 files, %ld timing files, 6 slow files, 1 probe file", judged_.size(),
-             options_.timingFiles));
+    Say(Text(
+        "%zu folders of 4 files, %ld timing files, 6 slow files, 1 probe file, %zu ladder files",
+        judged_.size(), options_.timingFiles, std::size(kLadderFiles)));
 
     if (options_.desktop && !MakeDesktopFile(portrait)) return false;
     return true;
@@ -1527,6 +1736,47 @@ class Experiment {
 
   // ---- The cache filled, and the baseline ----
 
+  // The cache files now, by name and size (metadata only): "thumbcache_16.db 1048576, ...".
+  static std::string CacheFilesText() {
+    std::map<std::string, CacheFile> files;
+    std::map<std::string, DWORD> unreadable;
+    const HRESULT hr = ListCacheFiles(&files, &unreadable);
+    if (FAILED(hr)) return "not listed (" + Hr(hr) + ")";
+    std::string text;
+    for (const auto& [name, file] : files) {
+      text += (text.empty() ? "" : ", ") + name + " " + std::to_string(file.size);
+    }
+    for (const auto& [name, error] : unreadable) {
+      text += (text.empty() ? "" : ", ") + name + Text(" (unreadable: error %lu)", error);
+    }
+    return text.empty() ? "none" : text;
+  }
+
+  // The answers of |records| that are not held, by kind: "MISS 0x8004B200 x3, a smaller size's
+  // x2".
+  static std::string ShortfallText(std::span<const CacheRecord> records) {
+    std::vector<std::pair<std::string, size_t>> kinds;
+    for (const CacheRecord& record : records) {
+      if (record.cached) continue;
+      const pdft::CacheHit hit = HitOf(record);
+      const std::string kind = hit == pdft::CacheHit::kNotCached ? "MISS " + Hr(record.hr)
+                               : hit == pdft::CacheHit::kRefused ? std::string("REFUSED")
+                                                                 : std::string(HitText(hit));
+      const auto found = std::find_if(kinds.begin(), kinds.end(),
+                                      [&kind](const auto& known) { return known.first == kind; });
+      if (found == kinds.end()) {
+        kinds.emplace_back(kind, 1);
+      } else {
+        ++found->second;
+      }
+    }
+    std::string text;
+    for (const auto& [kind, count] : kinds) {
+      text += (text.empty() ? "" : ", ") + kind + Text(" x%zu", count);
+    }
+    return text;
+  }
+
   bool Populate() {
     Say("");
     Say("Filling the cache at every size (made and stored in the shared thumbnail process)");
@@ -1534,6 +1784,33 @@ class Experiment {
     HRESULT hr = pdft::MakeThumbnailCacheOps(&cache);
     if (FAILED(hr)) return Stop("cannot create the thumbnail cache: " + Hr(hr));
     cache_ = std::move(cache);
+
+    std::map<std::string, CacheFile> before, after;
+    std::map<std::string, DWORD> unreadable;
+    const bool listed = SUCCEEDED(ListCacheFiles(&before, &unreadable));
+    // The cache files written since the last listing; |record| (when named) keeps the listing.
+    const auto written = [&](const std::wstring& record) {
+      if (!listed || FAILED(ListCacheFiles(&after, &unreadable))) return std::string("not listed");
+      const std::string names = ChangedFiles(before, after);
+      if (!record.empty()) SaveText(record, CacheFilesRecord(after));
+      before = after;
+      return names;
+    };
+
+    // The ladder first, each file at its one size only.
+    const std::vector<std::filesystem::path>& ladder = FilesOf(kLadderLabel);
+    for (size_t i = 0; i < ladder.size() && i < std::size(kLadderFiles); ++i) {
+      const LadderFile& file = kLadderFiles[i];
+      pdft::CacheAnswer answer;
+      hr = cache_->Select(ladder[i]);
+      if (SUCCEEDED(hr)) hr = cache_->Get(file.size, kPopulateFlags, &answer);
+      if (Blocked(hr)) return StopIfBlocked(hr);
+      const std::string went = written(L"");
+      Say(Text("fill %s/%s made at %u: %s, %s, out 0x%lX; cache files written: %s",
+               Utf8(kLadderLabel).c_str(), Utf8(file.name).c_str(), file.size, HrOrOk(hr).c_str(),
+               BitmapText(answer).c_str(), static_cast<unsigned long>(answer.cacheFlags),
+               went.c_str()));
+    }
 
     std::vector<std::pair<std::wstring, std::filesystem::path>> all;
     for (const std::wstring& label : judged_) {
@@ -1543,15 +1820,16 @@ class Experiment {
       for (const std::filesystem::path& file : FilesOf(label)) all.push_back({label, file});
     }
     if (desktopFile_) all.push_back({kDesktopLabel, *desktopFile_});
+    std::vector<std::filesystem::path> allFiles;
+    for (const auto& [label, file] : all) allFiles.push_back(file);
 
-    std::map<std::string, CacheFile> before, after;
-    std::map<std::string, DWORD> unreadable;
-    const bool listed = SUCCEEDED(ListCacheFiles(&before, &unreadable));
     std::vector<CacheRecord> records;
     for (const UINT size : kExperimentSizes) {
       size_t made = 0, failed = 0;
       HRESULT firstFailure = S_OK;
       bool refused = false;
+      std::set<int> edges;
+      std::map<DWORD, size_t> outFlags;  // the answers' WTS_CACHEFLAGS
       for (size_t i = 0; i < all.size(); ++i) {
         CacheRecord record;
         record.label = all[i].first;
@@ -1569,92 +1847,82 @@ class Experiment {
         record.cached = record.hr == S_OK && answer.bitmap && (answer.cacheFlags & WTS_CACHED);
         const HRESULT got = record.hr;
         records.push_back(std::move(record));
-        if (Blocked(got)) {
-          return Stop("Application Control blocked the handler (" + Hr(got) +
-                      "): stopped at the first block");
-        }
+        if (Blocked(got)) return StopIfBlocked(got);
         if (got == E_INVALIDARG && i == 0) {
           refused = true;
           break;
         }
         if (SUCCEEDED(got) && answer.bitmap) {
           ++made;
+          edges.insert(static_cast<int>(std::max(answer.dims.cx, answer.dims.cy)));
+          ++outFlags[answer.cacheFlags];
         } else {
           ++failed;
           if (SUCCEEDED(firstFailure)) firstFailure = FAILED(got) ? got : E_FAIL;
         }
       }
-      if (made > 0) {
-        sizes_.push_back(size);
-      } else {
+      if (made == 0) {
         refusedSizes_.push_back(size);
+      } else if (std::find(std::begin(pdft::kRefreshSizes), std::end(pdft::kRefreshSizes), size) !=
+                 std::end(pdft::kRefreshSizes)) {
+        // Judged and refreshed: the sizes with a file of their own.
+        sizes_.push_back(size);
       }
-      std::string went = "not listed";
-      if (listed && SUCCEEDED(ListCacheFiles(&after, &unreadable))) {
-        went = ChangedFiles(before, after);
-        SaveText(L"cachefiles-" + std::to_wstring(size) + L".tsv", CacheFilesRecord(after));
-        before = after;
-      }
+      const std::string went = written(L"cachefiles-" + std::to_wstring(size) + L".tsv");
       if (refused) {
         Say(Text("size %4u: refused (E_INVALIDARG)", size));
-      } else {
-        Say(Text("size %4u: %zu made, %zu failed%s; cache files written: %s", size, made, failed,
-                 failed ? (" (first " + Hr(firstFailure) + ")").c_str() : "", went.c_str()));
+        continue;
       }
-      std::fflush(stdout);
+      // Whether the cache holds what it has just made: asked once, at once.
+      std::string heldNow;
+      if (made > 0) {
+        bool unopened = false;
+        const UINT asked[] = {size};
+        const std::vector<CacheRecord> now = AskCache(
+            *cache_, allFiles, asked, pdft::kRefreshProbeFlags, std::nullopt, false, &unopened);
+        const size_t held = static_cast<size_t>(std::count_if(
+            now.begin(), now.end(), [](const CacheRecord& record) { return record.cached; }));
+        heldNow = Text("; held right after: %zu of %zu", held, now.size());
+        if (held < now.size()) heldNow += " (" + ShortfallText(now) + ")";
+      }
+      std::string out;
+      for (const auto& [flags, count] : outFlags) {
+        out += (out.empty() ? "" : ", ") +
+               Text("0x%lX x%zu", static_cast<unsigned long>(flags), count);
+      }
+      Say(Text("size %4u: %zu made, %zu failed%s; edges %s; out %s%s; cache files written: %s",
+               size, made, failed, failed ? (" (first " + Hr(firstFailure) + ")").c_str() : "",
+               EdgesText(edges).c_str(), out.empty() ? "-" : out.c_str(), heldNow.c_str(),
+               went.c_str()));
     }
     SaveRecords(L"populate.tsv", records);
-    if (sizes_.empty()) return Stop("the cache made no thumbnail at any size");
+    Say("cache files after the fill: " + CacheFilesText());
+    if (sizes_.empty())
+      return Stop("the cache made no thumbnail at any size the refresh asks about");
 
-    // The timing folder at one size only.
-    size_t made = 0, failed = 0;
-    const std::vector<std::filesystem::path>& timing = FilesOf(kTimingLabel);
-    for (size_t i = 0; i < timing.size(); ++i) {
-      pdft::CacheAnswer answer;
-      hr = cache_->Select(timing[i]);
-      if (SUCCEEDED(hr)) hr = cache_->Get(kTimingSize, kPopulateFlags, &answer);
-      if (Blocked(hr)) {
-        return Stop("Application Control blocked the handler (" + Hr(hr) +
-                    "): stopped at the first block");
-      }
-      if (SUCCEEDED(hr) && answer.bitmap) {
-        ++made;
-      } else {
-        ++failed;
-      }
-      if ((i + 1) % 500 == 0) {
-        std::printf("  timing: %zu of %zu\n", i + 1, timing.size());
-        std::fflush(stdout);
-      }
-    }
-    if (!timing.empty()) Say(Text("timing at %u: %zu made, %zu failed", kTimingSize, made, failed));
-
-    // The baseline: what the cache holds now, asked under each size only and under any size.
+    // The baseline, asked straight after the fill: what the cache holds now.
     std::vector<std::filesystem::path> judgedFiles;
     for (const std::wstring& label : judged_) {
       for (const std::filesystem::path& file : FilesOf(label)) judgedFiles.push_back(file);
     }
+    Say("Baseline: the product's question (WTS_INCACHEONLY) at each size judged");
     bool unopened = false;
-    baseline_ = AskCache(*cache_, judgedFiles, sizes_, pdft::kRefreshProbeFlags, std::nullopt,
-                         false, &unopened);
-    const std::vector<CacheRecord> plain =
-        AskCache(*cache_, judgedFiles, sizes_, kPlainProbeFlags, std::nullopt, false, &unopened);
-    slowBefore_ = AskCache(*cache_, FilesOf(kSlowLabel), sizes_, pdft::kRefreshProbeFlags,
-                           std::nullopt, false, &unopened);
+    size_t again = 0;
+    baseline_ = AskHeld(
+        judgedFiles, "the baseline",
+        [this](std::span<const CacheRecord> first) {
+          SayAnswers("baseline", first);
+          SayNotHeld(first);
+        },
+        &again, &unopened);
+    const size_t held =
+        static_cast<size_t>(std::count_if(baseline_.begin(), baseline_.end(),
+                                          [](const CacheRecord& record) { return record.cached; }));
+    Say(Text("baseline: %zu of %zu entries held (%zu only when asked again)", held,
+             baseline_.size(), again));
+    slowBefore_ = AskHeld(FilesOf(kSlowLabel), "the slow folder", {}, &again, &unopened);
     SaveRecords(L"baseline.tsv", baseline_);
-    SaveRecords(L"baseline-plain.tsv", plain);
     SaveRecords(L"slow-before.tsv", slowBefore_);
-    Say("Baseline: cached under its own size (IDEALCACHESIZEONLY) / under any size, and the edges");
-    for (const UINT size : sizes_) {
-      const auto cachedAt = [size](const std::vector<CacheRecord>& records) {
-        return static_cast<size_t>(std::count_if(
-            records.begin(), records.end(),
-            [size](const CacheRecord& record) { return record.size == size && record.cached; }));
-      };
-      Say(Text("size %4u: %zu / %zu of %zu; edges %s / %s", size, cachedAt(baseline_),
-               cachedAt(plain), judgedFiles.size(), EdgesAt(baseline_, size).c_str(),
-               EdgesAt(plain, size).c_str()));
-    }
     if (unopened) Say("some files could not be opened for the questions");
     return true;
   }
@@ -1672,37 +1940,216 @@ class Experiment {
     return names.empty() ? "none" : names;
   }
 
-  // Every judged folder's baseline must be cached and old; a folder that is not is left out.
+  // ---- The cache's answers to other flags ----
+
+  // One question about |file| of |label| at |size| with |flags|, said as one line; false
+  // (stopped) at Application Control's block.
+  bool AskFlags(const std::wstring& label, const std::filesystem::path& file, UINT size,
+                DWORD flags, pdft::CacheAnswer* answer, HRESULT* hr) {
+    *answer = {};
+    *hr = cache_->Select(file);
+    if (SUCCEEDED(*hr)) *hr = cache_->Get(size, flags, answer);
+    if (Blocked(*hr)) return StopIfBlocked(*hr);
+    std::string what;
+    if (flags & WTS_INCACHEONLY) {
+      what = HitText(pdft::ClassifyCacheAnswer(size, *hr, *answer));
+    } else if (*hr == E_INVALIDARG) {
+      what = "refused";
+    } else if (FAILED(*hr)) {
+      what = "failed";
+    } else if (answer->bitmap && (answer->cacheFlags & WTS_CACHED)) {
+      what = "answered from the cache";
+    } else {
+      what = answer->bitmap ? "made" : "nothing came back";
+    }
+    const std::string key = Utf8(label + L"/" + file.filename().native());
+    std::string bitmap = "no bitmap";
+    if (answer->bitmap) {
+      bitmap = BitmapText(*answer) + Text(", out 0x%lX, id %s",
+                                          static_cast<unsigned long>(answer->cacheFlags),
+                                          IdHex(answer->id).c_str());
+    }
+    Say(Text("flags 0x%05lX %s %4u: hr %s, %s: %s", static_cast<unsigned long>(flags), key.c_str(),
+             size, Hr(*hr).c_str(), bitmap.c_str(), what.c_str()));
+    return true;
+  }
+
+  // How the cache answers other flags, straight after the baseline: the probe file (filled at
+  // every size) and the ladder (each file at one size). Synthetic files only, never extracted in
+  // this process. Then what the answers show: whether the old question is refused, whether the
+  // bitmap's size tells which size answered, and whether the thumbnail ID names the file.
+  bool FlagAnswers() {
+    Say("");
+    Say("Flag answers (the probe and ladder files only, which are never judged)");
+    struct Answered {
+      UINT size = 0;
+      DWORD flags = 0;
+      HRESULT hr = S_OK;
+      pdft::CacheAnswer answer;
+    };
+    std::vector<Answered> probe;
+    std::vector<std::vector<Answered>> ladderAnswers(std::size(kLadderFiles));
+    const auto ask = [this](const std::wstring& label, const std::filesystem::path& file, UINT size,
+                            DWORD flags, std::vector<Answered>* into) {
+      Answered answered{size, flags, S_OK, {}};
+      if (!AskFlags(label, file, size, flags, &answered.answer, &answered.hr)) return false;
+      into->push_back(answered);
+      return true;
+    };
+    for (const DWORD flags :
+         {pdft::kRefreshProbeFlags, kIdealProbeFlags, kScaledProbeFlags, kIdealNoCacheFlags}) {
+      for (const UINT size : kProbeAskSizes) {
+        if (!ask(kProbeLabel, probeFile_, size, flags, &probe)) return false;
+      }
+    }
+    for (const UINT size : kProductExtractSizes) {
+      if (!ask(kProbeLabel, probeFile_, size, kProductNoCacheFlags, &probe)) return false;
+    }
+    const std::vector<std::filesystem::path>& ladder = FilesOf(kLadderLabel);
+    for (size_t i = 0; i < ladder.size() && i < std::size(kLadderFiles); ++i) {
+      const LadderFile& file = kLadderFiles[i];
+      for (const DWORD flags : {pdft::kRefreshProbeFlags, kScaledProbeFlags}) {
+        if (flags == kScaledProbeFlags && !file.scaled) continue;
+        for (const UINT size : file.asks) {
+          if (!ask(kLadderLabel, ladder[i], size, flags, &ladderAnswers[i])) return false;
+        }
+      }
+    }
+    // Last, since it may store the probe file's thumbnail.
+    for (const UINT size : kProbeAskSizes) {
+      if (!ask(kProbeLabel, probeFile_, size, kIdealExtractFlags, &probe)) return false;
+    }
+
+    const size_t oldRefused =
+        static_cast<size_t>(std::count_if(probe.begin(), probe.end(), [](const Answered& a) {
+          return a.flags == kIdealProbeFlags && a.hr == E_INVALIDARG;
+        }));
+    Say(Text("the old question (INCACHEONLY|IDEALCACHESIZEONLY): refused at %zu of %zu sizes",
+             oldRefused, std::size(kProbeAskSizes)));
+
+    // The first ladder file, held at its size only, must answer the sizes of smaller files with
+    // its own edge (a larger size's), the sizes of its own file held, and the sizes of larger
+    // files with a smaller size's or not at all. Without its entry at its own size the answers
+    // tell nothing.
+    const LadderFile& first = kLadderFiles[0];
+    const UINT own = pdft::CacheSizeOf(first.size);
+    bool told = true, there = false;
+    std::string came;
+    for (const Answered& a : ladderAnswers[0]) {
+      if (a.flags != pdft::kRefreshProbeFlags) continue;
+      const pdft::CacheHit hit = pdft::ClassifyCacheAnswer(a.size, a.hr, a.answer);
+      const LONG edge = a.answer.bitmap ? std::max(a.answer.dims.cx, a.answer.dims.cy) : 0;
+      const UINT file = pdft::CacheSizeOf(a.size);
+      const bool expected =
+          file < own    ? hit == pdft::CacheHit::kLarger && edge == static_cast<LONG>(first.size)
+          : file == own ? hit == pdft::CacheHit::kHeld
+                        : hit == pdft::CacheHit::kSmaller || hit == pdft::CacheHit::kNotCached;
+      if (a.size == first.size && hit == pdft::CacheHit::kHeld) there = true;
+      told = told && expected;
+      came += (came.empty() ? "" : ", ") +
+              (a.answer.bitmap ? Text("%u: edge %ld, %s", a.size, edge, HitText(hit))
+                               : Text("%u: %s (%s)", a.size, HitText(hit), Hr(a.hr).c_str()));
+    }
+    if (!there) {
+      Say(
+          Text("which size answered can be told from the bitmap's size: not known (the ladder "
+               "file filled at %u only is not held at %u: %s)",
+               first.size, first.size, came.empty() ? "not asked" : came.c_str()));
+    } else {
+      Say(told ? std::string("which size answered can be told from the bitmap's size: yes")
+               : "which size answered can be told from the bitmap's size: no (" + came + ")");
+    }
+
+    std::set<std::array<BYTE, 16>> ids;
+    size_t withBitmap = 0;
+    for (const Answered& a : probe) {
+      if (a.flags != pdft::kRefreshProbeFlags || a.hr != S_OK || !a.answer.bitmap) continue;
+      ids.insert(a.answer.id);
+      ++withBitmap;
+    }
+    Say(withBitmap < 2
+            ? Text("the probe file's thumbnail ID: the same at every size: not known (%zu answers "
+                   "with a bitmap)",
+                   withBitmap)
+            : Text("the probe file's thumbnail ID: the same at every size: %s",
+                   ids.size() == 1 ? "yes" : "no"));
+    return true;
+  }
+
+  // Every judged folder's baseline must be held and old; a folder that is not is left out.
   bool CheckBaseline() {
     Say("");
-    Say(Text("Baseline check: every thumbnail cached and at %d %%", kBaselineZoom));
+    Say(Text("Baseline check: every thumbnail held and at %d %%", kBaselineZoom));
+    // A size at which the cache refused every question cannot be asked about: it is not judged.
+    std::vector<UINT> asked;
+    for (const UINT size : sizes_) {
+      const auto at = [size](const CacheRecord& record) { return record.size == size; };
+      const bool refused =
+          std::any_of(baseline_.begin(), baseline_.end(), at) &&
+          std::all_of(baseline_.begin(), baseline_.end(), [&at](const CacheRecord& record) {
+            return !at(record) || HitOf(record) == pdft::CacheHit::kRefused;
+          });
+      if (refused) {
+        Say(Text("size %4u: the cache refuses the question (E_INVALIDARG): not judged", size));
+      } else {
+        asked.push_back(size);
+      }
+    }
+    if (asked.empty()) {
+      valid_ = false;
+      return Stop(
+          "the cache refuses the question WTS_INCACHEONLY at every size (E_INVALIDARG): nothing "
+          "can be asked");
+    }
+    if (asked.size() < sizes_.size()) {
+      sizes_ = std::move(asked);
+      const auto notJudged = [this](const CacheRecord& record) {
+        return std::find(sizes_.begin(), sizes_.end(), record.size) == sizes_.end();
+      };
+      std::erase_if(baseline_, notJudged);
+      std::erase_if(slowBefore_, notJudged);
+    }
+
     const std::vector<FolderVerdict> verdicts =
         pdft::test::Judge(baseline_, baseline_, kBaselineZoom, kFlippedZoom, {});
-    // The sizes the cache holds under their own size at all.
+    // The sizes the cache holds at all.
     std::set<UINT> held;
     for (const CacheRecord& record : baseline_) {
       if (record.cached) held.insert(record.size);
     }
+    size_t controlNotHeld = 0, controlEntries = 0;
     for (const std::wstring& label : judged_) {
       const FolderVerdict* verdict = VerdictOf(verdicts, label);
-      const size_t missing = static_cast<size_t>(
-          std::count_if(baseline_.begin(), baseline_.end(), [&](const CacheRecord& record) {
-            return record.label == label && held.count(record.size) && !record.cached;
-          }));
-      const bool valid = verdict && verdict->baselineValid && missing == 0;
+      const std::vector<CacheRecord> own =
+          Only(baseline_, std::span<const std::wstring>(&label, 1));
+      const size_t notHeld = static_cast<size_t>(std::count_if(
+          own.begin(), own.end(), [](const CacheRecord& record) { return !record.cached; }));
+      const bool valid = verdict && verdict->baselineValid && notHeld == 0;
       if (!valid) excluded_.insert(label);
-      Say(Text("%-8s %s: %zu cached, %zu not at %d %%, %zu missing", valid ? "VALID" : "EXCLUDED",
+      std::string line =
+          Text("%-8s %s: %zu held, %zu not at %d %%, %zu not held", valid ? "VALID" : "EXCLUDED",
                Utf8(label).c_str(), verdict ? verdict->baseline : 0,
-               verdict ? verdict->baselineNotOld : 0, kBaselineZoom, missing));
+               verdict ? verdict->baselineNotOld : 0, kBaselineZoom, notHeld);
+      if (notHeld > 0) line += " (" + NotHeldNames(own) + ")";
+      Say(line);
+      if (label == kControlLabel) {
+        controlNotHeld = notHeld;
+        controlEntries = own.size();
+      }
     }
     std::string sizes;
     for (const UINT size : held) sizes += Text(" %u", size);
-    Say("sizes held under their own size:" + (sizes.empty() ? std::string(" none") : sizes));
+    Say("sizes held:" + (sizes.empty() ? std::string(" none") : sizes));
+    if (held.empty()) {
+      valid_ = false;
+      return Stop("the cache holds none of the thumbnails the fill made (see the baseline lines)");
+    }
     if (Excluded(kControlLabel)) {
       valid_ = false;
       return Stop(
-          "the control folder has no valid baseline, so a pass could not be told from thumbnails "
-          "made again by something else");
+          Text("the control folder has no valid baseline, so a pass could not be told from "
+               "thumbnails made again by something else (%zu of its %zu entries not held)",
+               controlNotHeld, controlEntries));
     }
     if (std::all_of(std::begin(kVariants), std::end(kVariants),
                     [this](const Variant& variant) { return Excluded(variant.label); })) {
@@ -1758,8 +2205,11 @@ class Experiment {
       for (const std::filesystem::path& file : FilesOf(label)) files.push_back(file);
     }
     bool unopened = false;
-    const std::vector<CacheRecord> after =
-        AskCache(*cache_, files, sizes_, pdft::kRefreshProbeFlags, std::nullopt, false, &unopened);
+    size_t again = 0;
+    const std::vector<CacheRecord> after = AskHeld(
+        files, "after the variants",
+        [this](std::span<const CacheRecord> first) { SayAnswers("after the variants", first); },
+        &again, &unopened);
     SaveRecords(L"after-variants.tsv", after);
     const std::wstring controls[] = {kControlLabel};
     const std::vector<FolderVerdict> verdicts =
@@ -2083,10 +2533,46 @@ class Experiment {
     Say("");
     if (options_.timingFiles == 0) {
       Say("Timing: left out (--timing-files 0)");
-    } else if (!TimeRefresh()) {
+    } else if (!FillTiming() || !TimeRefresh()) {
       return false;
     }
     return StopTest();
+  }
+
+  // The timing folder filled at one size only, once the variants were judged, so that its
+  // entries go into the cache after theirs; then whether the control folder is still held (what
+  // it lost here and not at the baseline, the timing fill pushed out).
+  bool FillTiming() {
+    size_t made = 0, failed = 0;
+    const std::vector<std::filesystem::path>& timing = FilesOf(kTimingLabel);
+    for (size_t i = 0; i < timing.size(); ++i) {
+      pdft::CacheAnswer answer;
+      HRESULT hr = cache_->Select(timing[i]);
+      if (SUCCEEDED(hr)) hr = cache_->Get(kTimingSize, kPopulateFlags, &answer);
+      if (Blocked(hr)) return StopIfBlocked(hr);
+      if (SUCCEEDED(hr) && answer.bitmap) {
+        ++made;
+      } else {
+        ++failed;
+      }
+      if ((i + 1) % 500 == 0) {
+        std::printf("  timing: %zu of %zu\n", i + 1, timing.size());
+        std::fflush(stdout);
+      }
+    }
+    Say(Text("timing fill at %u: %zu made, %zu failed", kTimingSize, made, failed));
+    Say("cache files after the timing fill: " + CacheFilesText());
+    bool unopened = false;
+    size_t again = 0;
+    const std::vector<CacheRecord> control =
+        AskHeld(FilesOf(kControlLabel), "the control folder", {}, &again, &unopened);
+    SaveRecords(L"control-after-timing-fill.tsv", control);
+    const size_t held = static_cast<size_t>(std::count_if(
+        control.begin(), control.end(), [](const CacheRecord& record) { return record.cached; }));
+    Say(Text("control after the timing fill: %zu of %zu held%s", held, control.size(),
+             again ? Text(" (%zu only when asked again)", again).c_str() : ""));
+    SayNotHeld(control);
+    return true;
   }
 
   // The timing folder refreshed while the contention probe runs, then its first files each in a
@@ -2155,6 +2641,20 @@ class Experiment {
   // at both zooms (the judge does not know them by their names), so theirs only have to be still
   // cached.
   bool StopTest() {
+    // The slow folder as the cache holds it just before the stop: what the timing fill and the
+    // refreshes since the baseline pushed out is not the stop's doing.
+    bool unopened = false;
+    size_t again = 0;
+    const std::vector<CacheRecord> slowBefore =
+        AskHeld(FilesOf(kSlowLabel), "the slow folder before the stop", {}, &again, &unopened);
+    SaveRecords(L"slow-before-stop.tsv", slowBefore);
+    const auto held = [](std::span<const CacheRecord> records) {
+      return static_cast<size_t>(std::count_if(
+          records.begin(), records.end(), [](const CacheRecord& record) { return record.cached; }));
+    };
+    Say(Text("the slow folder before the stop: %zu of %zu held (%zu at the baseline)",
+             held(slowBefore), slowBefore.size(), held(slowBefore_)));
+
     ULONGLONG asked = 0, returned = 0;
     pdft::RefreshCounts counts;
     HRESULT blocked = S_OK;
@@ -2171,14 +2671,12 @@ class Experiment {
       Say(Text("the slow folder's refresh ended before the stop was asked (%s)",
                CountsText(hr, counts).c_str()));
     }
-    bool unopened = false;
     const std::vector<CacheRecord> slowAfter =
-        AskCache(*cache_, FilesOf(kSlowLabel), sizes_, pdft::kRefreshProbeFlags, std::nullopt,
-                 false, &unopened);
+        AskHeld(FilesOf(kSlowLabel), "the slow folder after the stop", {}, &again, &unopened);
     SaveRecords(L"slow-after-stop.tsv", slowAfter);
     std::vector<CacheRecord> heavyBefore, heavyAfter;
     size_t largestBefore = 0, largestGone = 0;
-    for (const CacheRecord& record : slowBefore_) {
+    for (const CacheRecord& record : slowBefore) {
       if (!IsLargest(record)) {
         heavyBefore.push_back(record);
       } else if (record.cached) {
@@ -2220,11 +2718,11 @@ class Experiment {
     Say("");
     Say("Product check: --refresh --folder from a Windows Terminal tab");
     bool unopened = false;
+    size_t again = 0;
     const std::wstring labels[] = {kControlLabel};
     // The control folder must still be old now, or a pass after the command would not be its own.
     const std::vector<CacheRecord> before =
-        AskCache(*cache_, FilesOf(kControlLabel), sizes_, pdft::kRefreshProbeFlags, std::nullopt,
-                 false, &unopened);
+        AskHeld(FilesOf(kControlLabel), "the control folder", {}, &again, &unopened);
     SaveRecords(L"control-before-cli.tsv", before);
     const std::vector<FolderVerdict> held =
         pdft::test::Judge(Only(baseline_, labels), before, kBaselineZoom, kFlippedZoom, labels);
@@ -2243,9 +2741,8 @@ class Experiment {
         "  \"%s\" --refresh --folder \"%s\"\n",
         cli.c_str(), control.c_str(), cli.c_str(), control.c_str());
     if (!WaitForEnter("Then come back here and press Enter.")) return StopByUser();
-    const std::vector<CacheRecord> after =
-        AskCache(*cache_, FilesOf(kControlLabel), sizes_, pdft::kRefreshProbeFlags, std::nullopt,
-                 false, &unopened);
+    const std::vector<CacheRecord> after = AskHeld(
+        FilesOf(kControlLabel), "the control folder after the command", {}, &again, &unopened);
     SaveRecords(L"control-after-cli.tsv", after);
     const std::vector<FolderVerdict> verdicts =
         pdft::test::Judge(Only(baseline_, labels), after, kBaselineZoom, kFlippedZoom, {});
@@ -2556,7 +3053,9 @@ class Experiment {
   bool copyFolderMade_ = false;
 
   std::unique_ptr<pdft::ThumbnailCacheOps> cache_;
-  std::vector<UINT> sizes_;  // the experiment's sizes the cache accepted
+  // The sizes judged and refreshed: those of kRefreshSizes the fill made thumbnails at, less those
+  // at which the cache refuses the question.
+  std::vector<UINT> sizes_;
   std::vector<UINT> refusedSizes_;
   std::vector<CacheRecord> baseline_;
   std::vector<CacheRecord> slowBefore_;

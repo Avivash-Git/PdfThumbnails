@@ -27,7 +27,7 @@ struct CacheRecord {
   std::wstring key;           // "<label>/<file name>"
   UINT size = 0;              // the size asked for, in pixels
   HRESULT hr = S_OK;          // GetThumbnail's answer (or why the file could not be asked about)
-  bool cached = false;        // S_OK with a bitmap that came from the cache (WTS_CACHED)
+  bool cached = false;        // held: from the cache, the size's own file (ClassifyCacheAnswer)
   int w = 0, h = 0;           // the bitmap's size; 0 x 0 without one
   DWORD cacheFlags = 0;       // WTS_CACHEFLAGS
   std::array<BYTE, 16> id{};  // the thumbnail's ID in the cache (WTS_THUMBNAILID)

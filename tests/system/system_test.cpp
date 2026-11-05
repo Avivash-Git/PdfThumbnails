@@ -101,12 +101,21 @@ constexpr int kExperimentTimingFiles = 200;
 // The starts of the experiment's lines that are repeated as "[ system ] refresh experiment:
 // <line>".
 constexpr std::string_view kExperimentLines[] = {
-    // The sizes, the baseline and the check that the thumbnail process sees the new zoom.
-    "size ", "VALID ", "EXCLUDED ", "sanity check",
+    // The fill, the baseline and the check that the thumbnail process sees the new zoom.
+    "size ", "fill ", "cache files", "baseline", "not held:", "asked again", "VALID ", "EXCLUDED ",
+    "sanity check",
+    // How the cache answers other flags.
+    "flags 0x", "the old question", "which size answered", "the probe file's thumbnail ID",
     // The verdicts per folder, and what they decide.
     "PASS ", "FAIL ", "HELD ", "CHANGED ", "INVALID ", "Pass A", "No Pass A",
+    // The timing folder filled after them.
+    "timing fill", "control after",
     // Why it stopped, and what it put back.
     "STOPPED:", "zoom: ", "File Explorer not restarted:"};
+
+// The experiment's report is printed after its lines, up to this many lines and bytes.
+constexpr size_t kMaxReportLines = 600;
+constexpr DWORD kMaxReportBytes = 1024 * 1024;
 
 // The eviction question asks the cache about these two files at one size the refresh makes again.
 constexpr UINT kEvictionSize = 256;
@@ -261,8 +270,8 @@ std::wstring ProcessUserSid(DWORD pid) {
 }
 
 // What became of the thumbnails |before| holds, in |after|: "<k> kept, <e> evicted, <r>
-// replaced". Kept: cached with the same size and thumbnail ID; replaced: cached with another;
-// evicted: not cached any more.
+// replaced". Kept: held (CacheRecord::cached: from the size's own file) with the same size and
+// thumbnail ID; replaced: held with another; evicted: not held any more.
 std::string EvictionText(const std::vector<test::CacheRecord>& before,
                          const std::vector<test::CacheRecord>& after) {
   size_t kept = 0, evicted = 0, replaced = 0;
@@ -281,6 +290,91 @@ std::string EvictionText(const std::vector<test::CacheRecord>& before,
   }
   return std::to_string(kept) + " kept, " + std::to_string(evicted) + " evicted, " +
          std::to_string(replaced) + " replaced";
+}
+
+// The text of the refresh experiment's report.txt, which its line "The report: <file>" in
+// |output| names, at most kMaxReportBytes of it (*cut set when there is more); std::nullopt with
+// *why set when it is not read. The test account wrote that name and can change what is in
+// |scratch|, and this process reads with administrator rights, so only a plain file in
+// |scratch|\refresh-experiment is read: opened without following a link at its name, and read
+// only when where it really is (links and junctions on the way followed) is still in that folder.
+std::optional<std::string> ExperimentReport(const std::string& output, const path& scratch,
+                                            bool* cut, std::string* why) {
+  constexpr std::string_view kReportLine = "The report: ";
+  *cut = false;
+  const size_t at = output.rfind(kReportLine);
+  std::wstring name;
+  path real;
+  if (at == std::string::npos) {
+    *why = "the experiment named no report";
+  } else if (FAILED(Utf8ToWide(LineAt(output, at + kReportLine.size()), &name)) || name.empty()) {
+    *why = "its name cannot be read";
+  } else if (FAILED(Canonicalize(scratch, &real))) {
+    *why = "the scratch folder cannot be found";
+  }
+  if (!why->empty()) return std::nullopt;
+  const path file(name);
+  const path folder = real / L"refresh-experiment";
+  if (!IsUnderLexically(file, scratch / L"refresh-experiment") && !IsUnderLexically(file, folder)) {
+    *why = "it is not in the experiment's folder";
+    return std::nullopt;
+  }
+  const wil::unique_hfile handle(CreateFileW(
+      file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+      FILE_FLAG_OPEN_REPARSE_POINT | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
+  BY_HANDLE_FILE_INFORMATION info = {};
+  if (!handle || !GetFileInformationByHandle(handle.get(), &info)) {
+    *why = "it cannot be opened";
+    return std::nullopt;
+  }
+  // Where the opened file really is: a junction on the way is followed in this name.
+  std::wstring opened(32768, L'\0');
+  const DWORD length =
+      GetFinalPathNameByHandleW(handle.get(), opened.data(), static_cast<DWORD>(opened.size()),
+                                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  opened.resize(length < opened.size() ? length : 0);
+  if (opened.empty() ||
+      (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+      !IsUnderLexically(opened, folder)) {
+    *why = "it is not a plain file in the experiment's folder";
+    return std::nullopt;
+  }
+  std::string text(kMaxReportBytes, '\0');
+  DWORD read = 0;
+  if (!ReadFile(handle.get(), text.data(), kMaxReportBytes, &read, nullptr)) {
+    *why = "it cannot be read";
+    return std::nullopt;
+  }
+  text.resize(read);
+  *cut = info.nFileSizeHigh != 0 || info.nFileSizeLow > kMaxReportBytes;
+  return text;
+}
+
+// The refresh experiment's report (ExperimentReport), one "[ system ] report.txt: <line>" each
+// (at most kMaxReportLines; it names no path of the test account's), or one line that says why
+// it is not there.
+void PrintExperimentReport(const std::string& output, const path& scratch) {
+  bool cut = false;
+  std::string why;
+  const std::optional<std::string> report = ExperimentReport(output, scratch, &cut, &why);
+  if (!report) {
+    std::printf("[ system ] report.txt: none (%s)\n", why.c_str());
+    return;
+  }
+  size_t printed = 0, more = 0;
+  for (const std::string& line : OutputLines(*report)) {
+    if (printed == kMaxReportLines) {
+      ++more;
+      continue;
+    }
+    std::printf("[ system ] report.txt: %s\n", line.c_str());
+    ++printed;
+  }
+  if (more > 0) std::printf("[ system ] report.txt: (%zu more lines not shown)\n", more);
+  if (cut) {
+    std::printf("[ system ] report.txt: (cut after %lu bytes)\n",
+                static_cast<unsigned long>(kMaxReportBytes));
+  }
 }
 
 // The member at |keys| below |root|; nullptr when one is missing.
@@ -929,9 +1023,9 @@ class System : public ::testing::Test {
   // --non-interactive), with the installed command-line executable and its folder in the scratch
   // folder: it sets the account's zoom to 100 % and 142 % and puts it back, fills the account's
   // thumbnail cache with synthetic PDFs at every size, makes them again with each extraction
-  // variant and judges them by the bitmaps' sizes (Pass A). Its verdict is printed, not judged:
-  // the experiment must only have reached one (exit 0, or 1 without a pass or after a stop) and
-  // put the zoom back.
+  // variant and judges them by the bitmaps' sizes (Pass A). Its verdict is printed, not judged
+  // (its main lines, then its whole report): the experiment must only have reached one (exit 0,
+  // or 1 without a pass or after a stop) and put the zoom back.
   void RunRefreshExperiment(const path& thumbtest) {
     const std::optional<DWORD> zoom = StoredZoom();
     const std::wstring arguments = L"experiment --non-interactive --cli " +
@@ -946,6 +1040,7 @@ class System : public ::testing::Test {
         std::printf("[ system ] refresh experiment: %s\n", line.c_str());
       }
     }
+    PrintExperimentReport(run.out, scratch_);
     if (FAILED(run.hr)) {
       // Not started, or ended at its time limit: there is no exit code to read.
       const std::string why =
@@ -1281,7 +1376,8 @@ TEST_F(System, UninstallCleanupAsTheInstallersUninstaller) {
 // experiment's automatic part, --refresh --full refused while File Explorer is the runner's, and
 // the eviction question: what the cache answers for two thumbnails it held once the uninstall has
 // unregistered the handler, and again after a forced extraction (kept, evicted or replaced;
-// printed, not judged).
+// printed, not judged). A cache that refuses the product's question fails the test: --refresh
+// would then refresh nothing.
 TEST_F(System, ThumbnailRefreshAndRebuildAsTheUser) {
   const path thumbtest = CopyThumbtest();
   ASSERT_FALSE(thumbtest.empty());
@@ -1316,10 +1412,20 @@ TEST_F(System, ThumbnailRefreshAndRebuildAsTheUser) {
   (void)User(thumbtest, extract);
   const std::vector<test::CacheRecord> before =
       AskTheCache(thumbtest, eviction, L"eviction-before");
+  // A refusal is no answer: the product asks the same question, so --refresh would refresh
+  // nothing.
+  const bool refused = std::any_of(before.begin(), before.end(),
+                                   [](const test::CacheRecord& r) { return r.hr == E_INVALIDARG; });
   const size_t cached = static_cast<size_t>(std::count_if(
       before.begin(), before.end(), [](const test::CacheRecord& r) { return r.cached; }));
-  std::printf("[ system ] eviction: %zu of %zu thumbnails cached at %u before the uninstall\n",
-              cached, std::size(kEvictionFiles), kEvictionSize);
+  if (refused) {
+    std::printf("[ system ] eviction: the cache refuses the question at %u (0x%08lX)\n",
+                kEvictionSize, static_cast<unsigned long>(E_INVALIDARG));
+    ADD_FAILURE() << "the cache refuses the product's question: --refresh would refresh nothing";
+  } else {
+    std::printf("[ system ] eviction: %zu of %zu thumbnails held at %u before the uninstall\n",
+                cached, std::size(kEvictionFiles), kEvictionSize);
+  }
 
   const Outcome uninstall = User(InstalledCli(), L"--uninstall --yes");
   EXPECT_EQ(uninstall.exitCode, 0u);
@@ -1328,9 +1434,12 @@ TEST_F(System, ThumbnailRefreshAndRebuildAsTheUser) {
   const Outcome forced = User(thumbtest, extract);
   const std::vector<test::CacheRecord> extracted =
       AskTheCache(thumbtest, eviction, L"eviction-forced");
-  if (cached == 0) {
+  if (refused) {
     std::printf(
-        "[ system ] eviction after the uninstall: not answered (nothing was cached before it)\n");
+        "[ system ] eviction after the uninstall: not answered (the cache refused the question)\n");
+  } else if (cached == 0) {
+    std::printf(
+        "[ system ] eviction after the uninstall: not answered (nothing was held before it)\n");
   } else {
     std::printf("[ system ] eviction after the uninstall: %s\n",
                 EvictionText(before, unregistered).c_str());

@@ -371,7 +371,8 @@ TEST(RefreshFolder, WhatIsWrongWithAFolder) {
 
 // ---- RefreshPdfThumbnails against a fake cache ----
 
-// A cache that holds every file at |sizes| and records what it is asked.
+// A cache that holds every file at |sizes| and records what it is asked. Its bitmaps have the
+// size asked for, so each answer comes from that size's own file (ClassifyCacheAnswer).
 class FakeCache final : public ThumbnailCacheOps {
  public:
   HRESULT Select(const path& file) noexcept override {
@@ -383,6 +384,7 @@ class FakeCache final : public ThumbnailCacheOps {
     ++gets;
     if (std::find(sizes.begin(), sizes.end(), size) == sizes.end()) return E_FAIL;
     answer->bitmap = true;
+    answer->dims = {static_cast<LONG>(size), static_cast<LONG>(size)};
     if (flags & WTS_INCACHEONLY) answer->cacheFlags = WTS_CACHED;
     return S_OK;
   }
@@ -449,9 +451,9 @@ TEST(RefreshFake, RefreshesAFolderAndLogsCountsNotNames) {
 
   const std::string lines = ReadLog(log);
   EXPECT_NE(lines.find("refresh start source=folders zoom="), std::string::npos) << lines;
-  EXPECT_NE(lines.find("refresh end files=3 cached=3 refreshed=3 failed=0 fail-hr=0x00000000 "
-                       "gone=0 skipped=0,0,0,0,0,0 sources=0,0,0,3 index=no capped=no "
-                       "stopped=no sizes-dropped=none ms="),
+  EXPECT_NE(lines.find("refresh end files=3 cached=3 other-size=0 refreshed=3 failed=0 "
+                       "fail-hr=0x00000000 gone=0 skipped=0,0,0,0,0,0 sources=0,0,0,3 index=no "
+                       "capped=no stopped=no sizes-dropped=none ms="),
             std::string::npos)
       << lines;
   EXPECT_EQ(lines.find("very-private-folder"), std::string::npos) << lines;

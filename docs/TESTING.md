@@ -64,15 +64,20 @@ change. `q` at any question stops the experiment (exit code 3) and puts everythi
    synthetic PDFs each (two A4 portrait pages, two landscape): `C-control`; one per extraction
    variant, `P-product`, `F-force`, `R-slowreclaim`, `S-instance` and `E-force-then-store`; one
    per round, `N-none`, `I-item`, `D-dir`, `T-touch`, `A-assoc` and `B-dialog`; and `timing`
-   (2,000 copies), `slow` (heavy and very large pages) and `probe`.
+   (2,000 copies), `slow` (heavy and very large pages), `probe` and `ladder` (two portraits).
 3. **Zoom 100 %**, through `PdfThumbnailsCli --zoom 100 --no-refresh`.
-4. **The cache filled**: every file but the timing ones at every size from 16 to 2560 pixels,
-   the timing files at 256; then the cache's answers are recorded, asked under each size alone
-   and under any size. Which cache file each size went to is recorded from the files' sizes and
-   times (never their contents).
-5. **The baseline checked**: every thumbnail cached and at 100 %. A folder that is not is left out,
-   by name; without a valid `C-control` the run stops, since nothing would then show that a pass
-   came from the refresh.
+4. **The cache filled**: first the two `ladder` files, one at 256 pixels only and one at 100
+   only; then every other file but the timing ones at every size from 16 to 2560 pixels, each
+   size asked about at once. Which cache file each size went to is recorded from the files' sizes
+   and times (never their contents). Straight after, the baseline: the cache is asked about every
+   file of the judged folders at each size, as the refresh asks (`WTS_INCACHEONLY`); an answer
+   that is not held is asked again after 2 seconds and after 10 more. Then the cache's answers to
+   other flags are recorded, for the `probe` and `ladder` files only.
+5. **The baseline checked**: every thumbnail held and at 100 %, at each size the refresh asks
+   about (1024 lands in 1280's cache file, so it is filled but not judged). A thumbnail is held
+   when the bitmap's size shows it came from its size's own cache file; an answer from another
+   size's never counts. A folder that is not is left out, by name; without a valid `C-control`
+   the run stops, since nothing would then show that a pass came from the refresh.
 6. **Zoom 142 %**; then one thumbnail made without storing it must show 142 %, else the thumbnail
    process does not see the new zoom and the run stops.
 7. **The extraction variants** (about a minute): each variant's folder is refreshed and judged;
@@ -94,10 +99,11 @@ change. `q` at any question stops the experiment (exit code 3) and puts everythi
 9. **The Desktop and another program's dialog**, when something turned a window square, with that
    same way: the test PDF on the Desktop (with `--desktop`), and a File Open dialog on
    `B-dialog`.
-10. **Timing**: the timing files refreshed while another thread measures how long a thumbnail
-    like File Explorer's waits meanwhile (against how long it takes before); the first 200 again,
-    each in a thumbnail process of its own; how fast a refresh of the slow folder stops when
-    asked to, and whether the cache answers consistently afterwards.
+10. **Timing**: the timing files filled at 256 (only now, after the variants were judged), and
+    `C-control` asked about again; then the timing files refreshed while another thread measures
+    how long a thumbnail like File Explorer's waits meanwhile (against how long it takes before);
+    the first 200 again, each in a thumbnail process of its own; how fast a refresh of the slow
+    folder stops when asked to, and whether the cache answers consistently afterwards.
 11. **The product**: you open a Windows Terminal tab and run the `PdfThumbnailsCli.exe --refresh
     --folder` command it prints, for `C-control`. The experiment first checks that `C-control`
     still shows 100 %, then judges it after the command (it must now show 142 %) and counts the thumbnail cache files in Windows Terminal's private folders
@@ -153,4 +159,5 @@ Control is on. It changes the zoom like the whole experiment, so run it only whe
 harm. It is the `e2e` label's test ([Tests](BUILDING.md#tests)): no CTest test is registered for
 it, so no preset or `ctest` run starts it. CI's `system-x64` job runs it as the system tests'
 throw-away test account, after the install for all users (with `--timing-files 200`): its
-verdict is in that job's log, on the lines that start with `[ system ] refresh experiment`.
+verdict is in that job's log, on the lines that start with `[ system ] refresh experiment`, and
+its whole report on the lines that start with `[ system ] report.txt`.

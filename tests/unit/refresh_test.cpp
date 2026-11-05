@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include <thumbcache.h>
 
+#include <algorithm>
 #include <map>
 #include <new>
 #include <set>
@@ -178,9 +179,98 @@ TEST(RefreshGroup, FoldersInTheOrderTheyFirstAppear) {
   EXPECT_TRUE(GroupByFolder({}).empty());
 }
 
+// ---- CacheSizeOf and ClassifyCacheAnswer ----
+
+TEST(RefreshCacheAnswer, TheFileASizeLandsIn) {
+  EXPECT_EQ(kRefreshProbeFlags, static_cast<DWORD>(WTS_INCACHEONLY));
+  for (const UINT size : kRefreshSizes) EXPECT_EQ(CacheSizeOf(size), size);
+  EXPECT_EQ(CacheSizeOf(1), 16u);
+  EXPECT_EQ(CacheSizeOf(17), 32u);
+  EXPECT_EQ(CacheSizeOf(100), 256u);
+  EXPECT_EQ(CacheSizeOf(257), 768u);
+  EXPECT_EQ(CacheSizeOf(1024), 1280u);  // as on build 26100
+  EXPECT_EQ(CacheSizeOf(2561), 2561u);  // above the largest: itself
+}
+
+CacheAnswer Cached(LONG w, LONG h, DWORD flags = WTS_CACHED) {
+  CacheAnswer answer;
+  answer.bitmap = true;
+  answer.cacheFlags = flags;
+  answer.dims = {w, h};
+  return answer;
+}
+
+TEST(RefreshCacheAnswer, TheLongerEdgeNamesTheFile) {
+  struct Row {
+    UINT size;
+    LONG w, h;
+    CacheHit hit;
+  };
+  const Row rows[] = {
+      // 256's file holds edges above 96 up to 256.
+      {256, 68, 96, CacheHit::kSmaller},
+      {256, 69, 97, CacheHit::kHeld},
+      {256, 181, 256, CacheHit::kHeld},
+      {256, 256, 181, CacheHit::kHeld},  // landscape: the longer side
+      {256, 182, 257, CacheHit::kLarger},
+      // A size between two is its file's: 100 is 256's.
+      {100, 68, 96, CacheHit::kSmaller},
+      {100, 71, 100, CacheHit::kHeld},
+      {100, 181, 256, CacheHit::kHeld},
+      {100, 362, 512, CacheHit::kLarger},
+      // The smallest file holds every edge up to 16.
+      {16, 1, 1, CacheHit::kHeld},
+      {16, 11, 16, CacheHit::kHeld},
+      {16, 12, 17, CacheHit::kLarger},
+      {16, 0, 0, CacheHit::kSmaller},  // a bitmap of no size is no file's
+      // 1024 is 1280's: from 768 up.
+      {1024, 543, 768, CacheHit::kSmaller},
+      {1024, 544, 769, CacheHit::kHeld},
+      {1024, 905, 1280, CacheHit::kHeld},
+      {1024, 905, 1281, CacheHit::kLarger},
+      {2560, 1810, 2560, CacheHit::kHeld},
+      {2560, 1357, 1920, CacheHit::kSmaller},
+      // Above the largest, the size itself is the file.
+      {3000, 1810, 2560, CacheHit::kSmaller},
+      {3000, 1811, 2561, CacheHit::kHeld},
+      {3000, 2122, 3001, CacheHit::kLarger},
+  };
+  for (const Row& row : rows) {
+    EXPECT_EQ(ClassifyCacheAnswer(row.size, S_OK, Cached(row.w, row.h)), row.hit)
+        << row.size << ": " << row.w << "x" << row.h;
+  }
+  // Smaller than asked (WTS_LOWQUALITY), but in the size's own file: held.
+  EXPECT_EQ(ClassifyCacheAnswer(256, S_OK, Cached(102, 144, WTS_CACHED | WTS_LOWQUALITY)),
+            CacheHit::kHeld);
+}
+
+TEST(RefreshCacheAnswer, RefusalsAndAnswersNotFromTheCache) {
+  EXPECT_EQ(ClassifyCacheAnswer(256, E_INVALIDARG, CacheAnswer{}), CacheHit::kRefused);
+  EXPECT_EQ(ClassifyCacheAnswer(256, E_INVALIDARG, Cached(181, 256)), CacheHit::kRefused);
+  EXPECT_EQ(ClassifyCacheAnswer(256, WTS_E_FAILEDEXTRACTION, CacheAnswer{}), CacheHit::kNotCached);
+  EXPECT_EQ(ClassifyCacheAnswer(256, E_FAIL, Cached(181, 256)), CacheHit::kNotCached);
+  EXPECT_EQ(ClassifyCacheAnswer(256, S_FALSE, Cached(181, 256)), CacheHit::kNotCached);
+  // S_OK without a bitmap, and a bitmap without WTS_CACHED.
+  CacheAnswer none;
+  none.cacheFlags = WTS_CACHED;
+  EXPECT_EQ(ClassifyCacheAnswer(256, S_OK, none), CacheHit::kNotCached);
+  EXPECT_EQ(ClassifyCacheAnswer(256, S_OK, Cached(181, 256, 0)), CacheHit::kNotCached);
+  EXPECT_EQ(ClassifyCacheAnswer(256, S_OK, Cached(181, 256, WTS_LOWQUALITY)), CacheHit::kNotCached);
+}
+
 // ---- RefreshFiles against a fake cache ----
 
-// A thumbnail cache that holds what the test says, on a fake clock, and records every call.
+// An A4 portrait page's bitmap at |edge| pixels, as the handler makes it at 100 %.
+SIZE Portrait(UINT edge) {
+  return {std::max<LONG>(1, static_cast<LONG>(edge * 595 / 842)), static_cast<LONG>(edge)};
+}
+
+// A thumbnail cache that holds what the test says, on a fake clock, and records every call. It
+// keeps its entries as the real one keeps them in its files, one file per size of kRefreshSizes
+// (CacheSizeOf): a WTS_INCACHEONLY question is answered from the size's own file first; else
+// from the smallest larger file, as stored (as CI showed for 1024, answered from 1280's file);
+// else from the largest smaller file, marked WTS_LOWQUALITY; else not at all. Bitmaps are A4
+// portrait pages at the size they were stored at.
 class FakeCache final : public ThumbnailCacheOps {
  public:
   struct Call {
@@ -207,20 +297,39 @@ class FakeCache final : public ThumbnailCacheOps {
     const Call call{selected, size, flags};
     calls.push_back(call);
     if (onGet) onGet(call);
-    if (refusedSizes.count(size)) return E_INVALIDARG;
-    const bool held = cached.count(selected) && cached.at(selected).count(size);
+    if (refusedSizes.count(size) || refusedFlags.count(flags)) return E_INVALIDARG;
     if (flags & WTS_INCACHEONLY) {
-      if (!held) return WTS_E_FAILEDEXTRACTION;
+      const auto file = cached.find(selected);
+      if (file == cached.end()) return WTS_E_FAILEDEXTRACTION;
+      const std::set<UINT>& held = file->second;  // smallest first
+      const UINT own = CacheSizeOf(size);
+      UINT stored = 0;
+      DWORD quality = 0;
+      for (const UINT entry : held) {
+        if (CacheSizeOf(entry) == own) stored = entry;
+      }
+      if (stored == 0) {
+        const auto larger = std::find_if(held.begin(), held.end(),
+                                         [own](UINT entry) { return CacheSizeOf(entry) > own; });
+        if (larger != held.end()) stored = *larger;
+      }
+      if (stored == 0) {
+        for (const UINT entry : held) {
+          if (CacheSizeOf(entry) < own) stored = entry;
+        }
+        quality = WTS_LOWQUALITY;
+      }
+      if (stored == 0) return WTS_E_FAILEDEXTRACTION;
       answer->bitmap = true;
-      answer->cacheFlags = WTS_CACHED;
-      answer->dims = {static_cast<LONG>(size), static_cast<LONG>(size)};
+      answer->cacheFlags = WTS_CACHED | quality;
+      answer->dims = Portrait(stored);
       return S_OK;
     }
     if (const auto failure = getFails.find({selected, size}); failure != getFails.end()) {
       return failure->second;
     }
     answer->bitmap = true;
-    answer->dims = {static_cast<LONG>(size), static_cast<LONG>(size)};
+    answer->dims = Portrait(size);
     return S_OK;
   }
 
@@ -233,10 +342,11 @@ class FakeCache final : public ThumbnailCacheOps {
     return found;
   }
 
-  std::map<std::wstring, std::set<UINT>> cached;  // file -> the sizes the cache holds
+  std::map<std::wstring, std::set<UINT>> cached;  // file -> the sizes it was stored at
   std::set<std::wstring> gone;
   std::map<std::wstring, HRESULT> selectFails;
-  std::set<UINT> refusedSizes;  // E_INVALIDARG, as the cache answers sizes above 1024
+  std::set<UINT> refusedSizes;   // E_INVALIDARG at these sizes, whatever the flags
+  std::set<DWORD> refusedFlags;  // E_INVALIDARG for these flags, as build 26100 answers 0x8001
   std::map<std::pair<std::wstring, UINT>, HRESULT> getFails;  // extractions that fail
   std::function<void(const Call&)> onGet;
   ULONGLONG now = 0;
@@ -299,11 +409,67 @@ TEST(RefreshFiles, OnlyCachedSizesAreMadeAgain) {
   EXPECT_EQ(counts.files, 3u);
   EXPECT_EQ(counts.notCached, 1u);
   EXPECT_EQ(counts.entriesCached, 3u);
+  // 1.pdf at 16 (from 96's file), 3.pdf at 96 and 256 (from 16's): left alone.
+  EXPECT_EQ(counts.otherSize, 3u);
   EXPECT_EQ(counts.refreshed, 3u);
   EXPECT_EQ(counts.filesRefreshed, 2u);
   EXPECT_EQ(counts.failed, 0u);
   EXPECT_EQ(counts.gone, 0u);
   EXPECT_FALSE(counts.stopped);
+  EXPECT_TRUE(counts.sizesDropped.empty());
+}
+
+TEST(RefreshFiles, AFileHeldAtOneSizeIsMadeAgainAtThatSizeOnly) {
+  // The other sizes' questions are answered from 256's file: by a larger size's thumbnail below
+  // 256, by a smaller size's above it.
+  FakeCache cache;
+  cache.cached[L"C:\\a\\1.pdf"] = {256};
+  const std::vector<path> files = {L"C:\\a\\1.pdf"};
+  RefreshFilesOptions options;  // every size of kRefreshSizes
+  options.clock = [&cache]() { return cache.now; };
+  FakeNotifier notifier;
+  RefreshCounts counts;
+  ASSERT_EQ(RunRefresh(files, options, &cache, &notifier, &counts), S_OK);
+  EXPECT_EQ(cache.GetsWith(kRefreshProbeFlags).size(), std::size(kRefreshSizes));
+  EXPECT_EQ(cache.GetsWith(kRefreshExtractFlags), (Entries{{L"C:\\a\\1.pdf", 256}}));
+  EXPECT_EQ(counts.entriesCached, 1u);
+  EXPECT_EQ(counts.otherSize, 8u);
+  EXPECT_EQ(counts.refreshed, 1u);
+  EXPECT_EQ(counts.notCached, 0u);
+  EXPECT_TRUE(counts.sizesDropped.empty());
+}
+
+TEST(RefreshFiles, TheQuestionWithIdealCacheSizeOnlyRefusedEverywhereRefreshesNothing) {
+  // Build 26100 refuses WTS_INCACHEONLY | WTS_IDEALCACHESIZEONLY at every size, for thumbnails
+  // it holds: a refresh that asked so would drop every size after the first file.
+  constexpr DWORD kIdeal = static_cast<DWORD>(WTS_INCACHEONLY | WTS_IDEALCACHESIZEONLY);
+  FakeCache cache;
+  cache.refusedFlags = {kIdeal};
+  cache.cached[L"C:\\a\\1.pdf"] = {16, 256};
+  cache.cached[L"C:\\a\\2.pdf"] = {256};
+  const std::vector<path> files = {L"C:\\a\\1.pdf", L"C:\\a\\2.pdf"};
+  RefreshFilesOptions options;
+  options.probeFlags = kIdeal;
+  options.clock = [&cache]() { return cache.now; };
+  FakeNotifier notifier;
+  RefreshCounts counts;
+  EXPECT_EQ(RunRefresh(files, options, &cache, &notifier, &counts),
+            HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
+  EXPECT_EQ(cache.GetsWith(kIdeal).size(), std::size(kRefreshSizes));  // the first file's only
+  EXPECT_EQ(counts.sizesDropped,
+            std::vector<UINT>(std::begin(kRefreshSizes), std::end(kRefreshSizes)));
+  EXPECT_EQ(counts.files, 1u);
+  EXPECT_EQ(counts.refreshed, 0u);
+  EXPECT_EQ(counts.entriesCached, 0u);
+  EXPECT_TRUE(notifier.events.empty());
+  // The product's question finds both.
+  FakeCache product;
+  product.refusedFlags = {kIdeal};
+  product.cached = cache.cached;
+  options.probeFlags = kRefreshProbeFlags;
+  options.clock = [&product]() { return product.now; };
+  ASSERT_EQ(RunRefresh(files, options, &product, &notifier, &counts), S_OK);
+  EXPECT_EQ(counts.refreshed, 3u);
   EXPECT_TRUE(counts.sizesDropped.empty());
 }
 

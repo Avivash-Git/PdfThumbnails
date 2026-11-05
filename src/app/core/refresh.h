@@ -35,13 +35,16 @@
 
 namespace pdft {
 
-// The thumbnail sizes asked about, in pixels: the cache's buckets.
+// The thumbnail sizes asked about, in pixels: the cache's sizes, smallest first, one file each
+// (thumbcache_<n>.db on Windows 10 and 11). A size between two lands in the larger one's file
+// (1024 in 1280's on build 26100).
 inline constexpr UINT kRefreshSizes[] = {16, 32, 48, 96, 256, 768, 1280, 1920, 2560};
 
-// The flags (WTS_FLAGS) of the question "is this thumbnail cached?": WTS_INCACHEONLY (never
-// extract) | WTS_IDEALCACHESIZEONLY (only the bucket of the size asked for, so a small size is
-// never answered from a larger one).
-inline constexpr DWORD kRefreshProbeFlags = 0x1 | 0x8000;
+// The flags (WTS_FLAGS) of the question "is this thumbnail cached?": WTS_INCACHEONLY alone
+// (never extract), the only documented combination that only asks. With
+// WTS_IDEALCACHESIZEONLY the cache refuses the question (E_INVALIDARG on build 26100). Any
+// size the cache holds may answer it; ClassifyCacheAnswer tells which one did.
+inline constexpr DWORD kRefreshProbeFlags = 0x1;
 // The flags of the extraction that replaces a cached thumbnail: WTS_FORCEEXTRACTION (never answer
 // from the cache) | WTS_REQUIRESURROGATE (only in the thumbnail process). Never WTS_EXTRACTINPROC,
 // never WTS_EXTRACTDONOTCACHE (checked when compiled and when run).
@@ -138,6 +141,26 @@ struct CacheAnswer {
   std::array<BYTE, 16> id{};  // the thumbnail's ID in the cache (WTS_THUMBNAILID)
 };
 
+// What a WTS_INCACHEONLY answer at |size| says.
+enum class CacheHit {
+  kHeld,       // the thumbnail in |size|'s own file
+  kLarger,     // a larger size's thumbnail: |size|'s file holds none
+  kSmaller,    // a smaller size's thumbnail: |size|'s file holds none
+  kNotCached,  // another failure, or S_OK without a bitmap or without WTS_CACHED
+  kRefused,    // E_INVALIDARG: the cache refuses the question at |size|
+};
+
+// The size whose file |size| lands in (pure): the smallest of kRefreshSizes at or above it;
+// |size| itself above the largest.
+UINT CacheSizeOf(UINT size) noexcept;
+
+// (pure) With B = CacheSizeOf(size), and P the size below B in kRefreshSizes (0 below the
+// smallest), a cached bitmap whose longer edge E has P < E <= B is kHeld, E > B kLarger, and
+// E <= P kSmaller. The handler's bitmap always has the edge it was asked for (crop_math.h), and
+// without WTS_SCALETOREQUESTEDSIZE the cache returns an entry as it was stored, so the edge
+// names the file it came from.
+CacheHit ClassifyCacheAnswer(UINT size, HRESULT hr, const CacheAnswer& answer) noexcept;
+
 // The thumbnail cache as the refresh uses it: the real one (MakeThumbnailCacheOps) and the tests'
 // fake.
 class ThumbnailCacheOps {
@@ -199,6 +222,7 @@ struct RefreshCounts {
   size_t files = 0;          // checked
   size_t gone = 0;           // no longer there
   size_t notCached = 0;      // the cache answered and held no thumbnail of them
+  size_t otherSize = 0;      // answers from another size's thumbnail: not made again
   size_t entriesCached = 0;  // thumbnails the cache held (each file and size once)
   size_t refreshed = 0;      // ... made again
   // ... that could not be made again; also each file the shell could not open (other than gone)
@@ -227,10 +251,12 @@ struct RefreshCounts {
 // Refreshes the cached thumbnails of |files|, one request at a time (see the top of this file),
 // and tells File Explorer as |options|.notify says. |files| should come grouped by folder
 // (GroupByFolder), so each folder is told once. The stop is honoured between files and between
-// sizes; a request already running finishes first (the handler's own limits bound it). A size the
-// cache refuses with E_INVALIDARG is not asked for again. Fills the refreshing fields of *counts
-// (from |files| to |stopped|) and the probe, extract and notify times, and leaves the others as
-// they are. S_OK when every file was checked; HRESULT_FROM_WIN32(ERROR_CANCELLED) when stopped;
+// sizes; a request already running finishes first (the handler's own limits bound it). Only a
+// thumbnail the size's own file holds is made again (ClassifyCacheAnswer: kHeld); an answer from
+// another size's is counted and left alone. A size the cache refuses with E_INVALIDARG is not
+// asked for again. Fills the refreshing fields of *counts (from |files| to |stopped|) and the
+// probe, extract and notify times, and leaves the others as they are. S_OK when every file was
+// checked; HRESULT_FROM_WIN32(ERROR_CANCELLED) when stopped;
 // HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) when the cache refused every size, so the files after
 // that were not asked about (what was refreshed until then is still told); E_INVALIDARG for no
 // sizes or flags AreSafeRefreshFlags refuses, before any call.

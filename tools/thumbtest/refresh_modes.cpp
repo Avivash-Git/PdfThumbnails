@@ -6,22 +6,25 @@
 // registry canary (a volatile key it deletes again), and refuses otherwise (exit 8). incache and
 // refresh also refuse files the refresh leaves alone (online-only, on the network, ...).
 //
-//   thumbtest incache [--plain] [--sizes <list>] [--label <label>] [--record <tsv>]
+//   thumbtest incache [--flags <hex>] [--sizes <list>] [--label <label>] [--record <tsv>]
 //                     <file.pdf|dir>...
-//       Asks the cache whether it holds each file's thumbnail at each size (WTS_INCACHEONLY, and
-//       WTS_IDEALCACHESIZEONLY unless --plain), one line each: "CACHED 181x256 flags=0x2
-//       id=<32 hex>" or "MISS hr=0x...". Never makes a thumbnail. --record writes the answers
-//       for judge (refresh_judge.h), each file as "<label>/<file name>"; the label is the name
-//       of the file's folder unless --label gives one.
-//   thumbtest refresh [--probe ideal|plain]
+//       Asks the cache whether it holds each file's thumbnail at each size (the product's
+//       question, WTS_INCACHEONLY, unless --flags gives other flags that only ask), one line
+//       each: "CACHED 256 181x256 flags=0x2 id=<32 hex>" (from the size's own file), "OTHER"
+//       (another size's thumbnail, by its size: ClassifyCacheAnswer), "MISS hr=0x..." or
+//       "REFUSED" (E_INVALIDARG). Never makes a thumbnail. --record writes the answers for judge
+//       (refresh_judge.h), each file as "<label>/<file name>"; the label is the name of the
+//       file's folder unless --label gives one.
+//   thumbtest refresh [--probe product|ideal]
 //                     [--extract product|force|slowreclaim|instance|force-then-extract]
 //                     [--notify none|item|dir|views|assoc[+...]] [--sizes <list>]
 //                     [--cancel-after <ms>] [--timing <tsv>] <file.pdf|dir>...
 //       Makes the cached thumbnails of the files again as --refresh --folder does (RefreshFiles),
 //       with the experiment's probe, extraction and notification (by default the product's), and
 //       prints the counts and how long the extractions took (min, mean, 95th percentile, max).
-//       --cancel-after asks it to stop after that many milliseconds and prints how long it took
-//       to; --timing writes how long each extraction took.
+//       --probe ideal asks with WTS_IDEALCACHESIZEONLY as well, which build 26100 refuses (to try
+//       again on other builds). --cancel-after asks it to stop after that many milliseconds and
+//       prints how long it took to; --timing writes how long each extraction took.
 //   thumbtest judge --before <tsv> --after <tsv> --zoom-before <z> --zoom-after <z>
 //                   [--control <label>]...
 //       The verdict per folder from two incache records (Judge); exit 0 when every folder did what
@@ -45,7 +48,8 @@
 //       The one-sitting refresh experiment, which uses the modes' parts (experiment.cpp).
 //
 // <list> is sizes in pixels separated by commas ("16,32,256"); without --sizes the product's
-// (kRefreshSizes). Output names files and folders by name only, apart from what was typed.
+// (kRefreshSizes). <hex> is WTS_FLAGS in hexadecimal ("0x8001"). Output names files and folders
+// by name only, apart from what was typed.
 
 #include <windows.h>
 
@@ -122,6 +126,8 @@ constexpr long kMaxCancelAfterMs = 24 * 3600 * 1000;
 // ASCII: IsThumbnailCacheFileName).
 constexpr std::string_view kCacheFilesHeader = "name\tsize\twritten";
 
+}  // namespace
+
 std::string IdHex(const std::array<BYTE, 16>& id) {
   std::string text;
   for (const BYTE byte : id) {
@@ -131,8 +137,6 @@ std::string IdHex(const std::array<BYTE, 16>& id) {
   }
   return text;
 }
-
-}  // namespace
 
 ULONGLONG PreciseMs() noexcept {
   static const LONGLONG frequency = [] {
@@ -268,6 +272,30 @@ std::string TimesText(std::vector<DWORD> times) {
   return text;
 }
 
+pdft::CacheHit HitOf(const CacheRecord& record) noexcept {
+  pdft::CacheAnswer answer;
+  answer.bitmap = record.w > 0 || record.h > 0;
+  answer.cacheFlags = record.cacheFlags;
+  answer.dims = {static_cast<LONG>(record.w), static_cast<LONG>(record.h)};
+  return pdft::ClassifyCacheAnswer(record.size, record.hr, answer);
+}
+
+const char* HitText(pdft::CacheHit hit) {
+  switch (hit) {
+    case pdft::CacheHit::kHeld:
+      return "held";
+    case pdft::CacheHit::kLarger:
+      return "a larger size's";
+    case pdft::CacheHit::kSmaller:
+      return "a smaller size's";
+    case pdft::CacheHit::kNotCached:
+      return "not cached";
+    case pdft::CacheHit::kRefused:
+      return "refused";
+  }
+  return "?";
+}
+
 std::vector<CacheRecord> AskCache(pdft::ThumbnailCacheOps& cache,
                                   std::span<const std::filesystem::path> files,
                                   std::span<const UINT> sizes, DWORD flags,
@@ -279,7 +307,7 @@ std::vector<CacheRecord> AskCache(pdft::ThumbnailCacheOps& cache,
     const std::wstring key = folder + L"/" + file.filename().native();
     const HRESULT selected = cache.Select(file);
     if (FAILED(selected)) {
-      std::printf("ERROR        hr=0x%08lX (cannot open the file)  %s\n",
+      std::printf("ERROR          hr=0x%08lX (cannot open the file)  %s\n",
                   static_cast<unsigned long>(selected), Utf8(key).c_str());
       *failed = true;
     }
@@ -296,19 +324,28 @@ std::vector<CacheRecord> AskCache(pdft::ThumbnailCacheOps& cache,
         entry.w = static_cast<int>(answer.dims.cx);
         entry.h = static_cast<int>(answer.dims.cy);
       }
-      entry.cached = entry.hr == S_OK && answer.bitmap && (answer.cacheFlags & WTS_CACHED);
+      // From the size's own file only: an answer from another size's says nothing of it.
+      const pdft::CacheHit hit = HitOf(entry);
+      entry.cached = hit == pdft::CacheHit::kHeld;
       if (print && SUCCEEDED(selected)) {
         if (entry.cached) {
-          std::printf("CACHED %5u  %dx%d flags=0x%lX id=%s  %s\n", size, entry.w, entry.h,
+          std::printf("CACHED  %5u  %dx%d flags=0x%lX id=%s  %s\n", size, entry.w, entry.h,
                       static_cast<unsigned long>(entry.cacheFlags), IdHex(entry.id).c_str(),
                       Utf8(key).c_str());
+        } else if (hit == pdft::CacheHit::kLarger || hit == pdft::CacheHit::kSmaller) {
+          std::printf("OTHER   %5u  %dx%d flags=0x%lX (%s)  %s\n", size, entry.w, entry.h,
+                      static_cast<unsigned long>(entry.cacheFlags), HitText(hit),
+                      Utf8(key).c_str());
+        } else if (hit == pdft::CacheHit::kRefused) {
+          std::printf("REFUSED %5u  hr=0x%08lX (the cache refuses these flags)  %s\n", size,
+                      static_cast<unsigned long>(entry.hr), Utf8(key).c_str());
         } else if (answer.bitmap) {
-          std::printf("MISS   %5u  hr=0x%08lX flags=0x%lX, a bitmap %dx%d  %s\n", size,
+          std::printf("MISS    %5u  hr=0x%08lX flags=0x%lX, a bitmap %dx%d  %s\n", size,
                       static_cast<unsigned long>(entry.hr),
                       static_cast<unsigned long>(entry.cacheFlags), entry.w, entry.h,
                       Utf8(key).c_str());
         } else {
-          std::printf("MISS   %5u  hr=0x%08lX  %s\n", size, static_cast<unsigned long>(entry.hr),
+          std::printf("MISS    %5u  hr=0x%08lX  %s\n", size, static_cast<unsigned long>(entry.hr),
                       Utf8(key).c_str());
         }
       }
@@ -449,15 +486,38 @@ bool ReadText(const std::wstring& file, std::string* text) {
 
 // ---- incache ----------------------------------------------------------------------------------
 
+// "0x8001" or "8001": WTS_FLAGS in hexadecimal, up to 8 digits.
+bool ParseFlags(const std::wstring& text, DWORD* flags) {
+  std::wstring_view digits = text;
+  if (digits.starts_with(L"0x") || digits.starts_with(L"0X")) digits.remove_prefix(2);
+  if (digits.empty() || digits.size() > 8) return false;
+  DWORD value = 0;
+  for (const wchar_t c : digits) {
+    DWORD digit = 0;
+    if (c >= L'0' && c <= L'9') {
+      digit = c - L'0';
+    } else if (c >= L'a' && c <= L'f') {
+      digit = c - L'a' + 10;
+    } else if (c >= L'A' && c <= L'F') {
+      digit = c - L'A' + 10;
+    } else {
+      return false;
+    }
+    value = value << 4 | digit;
+  }
+  *flags = value;
+  return true;
+}
+
 int RunInCache(const std::vector<std::wstring>& args) {
-  bool plain = false;
+  DWORD flags = pdft::kRefreshProbeFlags;
   std::vector<UINT> sizes(std::begin(pdft::kRefreshSizes), std::end(pdft::kRefreshSizes));
   std::optional<std::wstring> label, record;
   size_t i = 0;
   for (; i < args.size() && args[i].starts_with(L"--"); ++i) {
     const bool value = i + 1 < args.size();
-    if (args[i] == L"--plain") {
-      plain = true;
+    if (args[i] == L"--flags" && value) {
+      if (!ParseFlags(args[++i], &flags)) return BadUsage();
     } else if (args[i] == L"--sizes" && value) {
       if (!ParseSizes(args[++i], &sizes)) return BadUsage();
     } else if (args[i] == L"--label" && value && !args[i + 1].empty()) {
@@ -469,6 +529,14 @@ int RunInCache(const std::vector<std::wstring>& args) {
     }
   }
   if (i == args.size()) return BadUsage();
+  // Never extracts: a question only.
+  if ((flags & WTS_INCACHEONLY) == 0 || (flags & (WTS_FORCEEXTRACTION | WTS_EXTRACTINPROC)) != 0) {
+    std::printf(
+        "refused: --flags 0x%lX: incache only asks, so the flags must hold WTS_INCACHEONLY (0x1)\n"
+        "and neither WTS_FORCEEXTRACTION (0x4) nor WTS_EXTRACTINPROC (0x100)\n",
+        static_cast<unsigned long>(flags));
+    return 2;
+  }
   std::vector<std::filesystem::path> files;
   if (!FinalFiles(args, i, &files)) return 2;
   pdft::ProcessContext context;
@@ -480,8 +548,6 @@ int RunInCache(const std::vector<std::wstring>& args) {
     std::printf("cannot create the thumbnail cache: 0x%08lX\n", static_cast<unsigned long>(hr));
     return 2;
   }
-  // Never extracts: the question only (refresh.h's probe, or without the ideal size only).
-  const DWORD flags = plain ? static_cast<DWORD>(WTS_INCACHEONLY) : pdft::kRefreshProbeFlags;
   bool failed = false;
   const std::vector<CacheRecord> records =
       AskCache(*cache, files, sizes, flags, label, true, &failed);
@@ -554,9 +620,8 @@ int RunRefresh(const std::vector<std::wstring>& args) {
     const std::wstring& value = args[++i];
     bool ok = true;
     if (name == L"--probe") {
-      ok = value == L"ideal" || value == L"plain";
-      options.probeFlags =
-          value == L"plain" ? static_cast<DWORD>(WTS_INCACHEONLY) : pdft::kRefreshProbeFlags;
+      ok = value == L"product" || value == L"ideal";
+      options.probeFlags = value == L"ideal" ? kIdealProbeFlags : pdft::kRefreshProbeFlags;
     } else if (name == L"--extract") {
       ok = ParseExtract(value, &options);
     } else if (name == L"--notify") {
@@ -622,6 +687,7 @@ int RunRefresh(const std::vector<std::wstring>& args) {
   if (counts.failed) {
     std::printf(" (first 0x%08lX)", static_cast<unsigned long>(counts.firstFailure));
   }
+  std::printf("; %zu answered from another size (left alone)", counts.otherSize);
   std::printf("; %zu without a cached thumbnail, %zu gone\n", counts.notCached, counts.gone);
   std::printf("sizes refused:");
   if (counts.sizesDropped.empty()) std::printf(" none");
@@ -1116,9 +1182,9 @@ int RunRefreshMode(int argc, wchar_t** argv) {
 
 void PrintRefreshUsage() {
   std::printf(
-      "  thumbtest incache [--plain] [--sizes <list>] [--label <label>] [--record <tsv>]\n"
+      "  thumbtest incache [--flags <hex>] [--sizes <list>] [--label <label>] [--record <tsv>]\n"
       "                    <file.pdf|dir>...\n"
-      "  thumbtest refresh [--probe ideal|plain]\n"
+      "  thumbtest refresh [--probe product|ideal]\n"
       "                    [--extract product|force|slowreclaim|instance|force-then-extract]\n"
       "                    [--notify none|item|dir|views|assoc[+...]] [--sizes <list>]\n"
       "                    [--cancel-after <ms>] [--timing <tsv>] <file.pdf|dir>...\n"
@@ -1132,7 +1198,7 @@ void PrintRefreshUsage() {
       "The refresh modes use the signed-in user's own thumbnail cache and File Explorer (judge\n"
       "reads only its two files): synthetic PDFs only, from a normal prompt with no app package\n"
       "above it (a Command Prompt opened with Win+R); elsewhere they refuse (exit 8).\n"
-      "<list>: sizes such as 16,32,256.\n");
+      "<list>: sizes such as 16,32,256. <hex>: WTS_FLAGS such as 0x8001.\n");
 }
 
 }  // namespace thumbtest

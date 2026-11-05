@@ -38,7 +38,7 @@ static_assert((kRefreshExtractFlags & WTS_FORCEEXTRACTION) != 0,
 static_assert((kRefreshProbeFlags & WTS_INCACHEONLY) != 0 &&
                   (kRefreshProbeFlags & (WTS_FORCEEXTRACTION | WTS_EXTRACTINPROC)) == 0,
               "asking whether a thumbnail is cached must never extract it");
-static_assert(kRefreshProbeFlags == (WTS_INCACHEONLY | WTS_IDEALCACHESIZEONLY));
+static_assert(kRefreshProbeFlags == WTS_INCACHEONLY);
 static_assert(kRefreshExtractFlags == (WTS_FORCEEXTRACTION | WTS_REQUIRESURROGATE));
 static_assert(std::tuple_size_v<decltype(RefreshCounts::skipped)> ==
                   static_cast<size_t>(CandidateSkip::kNotPdf),
@@ -151,6 +151,7 @@ void ResetRefreshing(RefreshCounts* counts) noexcept {
   counts->files = 0;
   counts->gone = 0;
   counts->notCached = 0;
+  counts->otherSize = 0;
   counts->entriesCached = 0;
   counts->refreshed = 0;
   counts->failed = 0;
@@ -218,14 +219,14 @@ void LogEnd(const RefreshCounts& c, HRESULT hr, ULONGLONG ms) noexcept try {
       hr == S_OK && c.failed == 0 && !c.capped && !c.stopped && !droppedDocumented;
   Log(complete ? LogLevel::kInfo : LogLevel::kWarning, kLogComponent,
       L"refresh end files=" + Count(c.files) + L" cached=" + Count(c.entriesCached) +
-          L" refreshed=" + Count(c.refreshed) + L" failed=" + Count(c.failed) + L" fail-hr=" +
-          HResultText(c.firstFailure) + L" gone=" + Count(c.gone) + L" skipped=" + skipped +
-          L" sources=" + Count(c.fromWindows) + L"," + Count(c.fromDesktops) + L"," +
-          Count(c.fromIndex) + L"," + Count(c.fromWalk) + L" index=" + YesNo(c.indexUsed) +
-          L" capped=" + YesNo(c.capped) + L" stopped=" + YesNo(c.stopped) + L" sizes-dropped=" +
-          dropped + L" ms=" + Count(ms) + L" find-ms=" + Count(c.findMs) + L" probe-ms=" +
-          Count(c.probeMs) + L" extract-ms=" + Count(c.extractMs) + L" notify-ms=" +
-          Count(c.notifyMs));
+          L" other-size=" + Count(c.otherSize) + L" refreshed=" + Count(c.refreshed) + L" failed=" +
+          Count(c.failed) + L" fail-hr=" + HResultText(c.firstFailure) + L" gone=" + Count(c.gone) +
+          L" skipped=" + skipped + L" sources=" + Count(c.fromWindows) + L"," +
+          Count(c.fromDesktops) + L"," + Count(c.fromIndex) + L"," + Count(c.fromWalk) +
+          L" index=" + YesNo(c.indexUsed) + L" capped=" + YesNo(c.capped) + L" stopped=" +
+          YesNo(c.stopped) + L" sizes-dropped=" + dropped + L" ms=" + Count(ms) + L" find-ms=" +
+          Count(c.findMs) + L" probe-ms=" + Count(c.probeMs) + L" extract-ms=" +
+          Count(c.extractMs) + L" notify-ms=" + Count(c.notifyMs));
 } catch (...) {
   // Logging is best effort.
 }
@@ -575,6 +576,30 @@ std::vector<std::filesystem::path> GroupByFolder(std::vector<std::filesystem::pa
   return grouped;
 }
 
+UINT CacheSizeOf(UINT size) noexcept {
+  for (const UINT own : kRefreshSizes) {
+    if (own >= size) return own;
+  }
+  return size;
+}
+
+CacheHit ClassifyCacheAnswer(UINT size, HRESULT hr, const CacheAnswer& answer) noexcept {
+  if (hr == E_INVALIDARG) return CacheHit::kRefused;
+  if (hr != S_OK || !answer.bitmap || (answer.cacheFlags & WTS_CACHED) == 0) {
+    return CacheHit::kNotCached;
+  }
+  const UINT own = CacheSizeOf(size);
+  UINT below = 0;  // the size before |own|'s
+  for (const UINT other : kRefreshSizes) {
+    if (other < own) below = other;
+  }
+  const LONG longer = std::max(answer.dims.cx, answer.dims.cy);
+  const UINT edge = longer > 0 ? static_cast<UINT>(longer) : 0;
+  if (edge > own) return CacheHit::kLarger;
+  if (edge <= below) return CacheHit::kSmaller;
+  return CacheHit::kHeld;
+}
+
 HRESULT MakeThumbnailCacheOps(std::unique_ptr<ThumbnailCacheOps>* ops) noexcept try {
   ops->reset();
   wil::com_ptr_nothrow<IThumbnailCache> cache;
@@ -667,12 +692,18 @@ HRESULT RefreshFiles(std::span<const std::filesystem::path> files,
         const ULONGLONG probeStart = now();
         const HRESULT probe = cache.Get(size, options.probeFlags, &answer);
         counts->probeMs += Elapsed(probeStart, now());
-        if (probe == E_INVALIDARG) {
+        const CacheHit hit = ClassifyCacheAnswer(size, probe, answer);
+        if (hit == CacheHit::kRefused) {
           drop(s);
           continue;
         }
         answered = true;
-        if (probe != S_OK || !answer.bitmap || (answer.cacheFlags & WTS_CACHED) == 0) continue;
+        // Another size's thumbnail: this size's own file holds none to make again.
+        if (hit == CacheHit::kLarger || hit == CacheHit::kSmaller) {
+          ++counts->otherSize;
+          continue;
+        }
+        if (hit != CacheHit::kHeld) continue;
         cached = true;
         ++counts->entriesCached;
         const ULONGLONG extractStart = now();

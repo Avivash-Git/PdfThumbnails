@@ -5,6 +5,7 @@
 
 #include <windows.h>
 
+#include <array>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -20,6 +21,11 @@ namespace thumbtest {
 
 // The app's exit code for "cannot run here" (ExitCode::kWrongContext).
 inline constexpr int kRefused = 8;
+
+// The product's question with WTS_IDEALCACHESIZEONLY as well (WTS_INCACHEONLY |
+// WTS_IDEALCACHESIZEONLY), which the cache refuses on build 26100 (E_INVALIDARG): kept to ask
+// again on other builds.
+inline constexpr DWORD kIdealProbeFlags = 0x1 | 0x8000;
 
 // Milliseconds from the performance counter: GetTickCount64 moves in steps of about 16 ms.
 ULONGLONG PreciseMs() noexcept;
@@ -45,10 +51,22 @@ bool WriteText(const std::wstring& file, const std::string& text);
 // there are none.
 std::string TimesText(std::vector<DWORD> times);
 
+// A thumbnail ID (WTS_THUMBNAILID) as 32 hexadecimal digits.
+std::string IdHex(const std::array<BYTE, 16>& id);
+
+// The class of |record|'s answer (ClassifyCacheAnswer at the record's size), from what the
+// record keeps: it had a bitmap when it has a size.
+pdft::CacheHit HitOf(const pdft::test::CacheRecord& record) noexcept;
+
+// "held", "a larger size's", "a smaller size's", "not cached" or "refused".
+const char* HitText(pdft::CacheHit hit);
+
 // Asks |cache| about each of |files| at each of |sizes| with |flags| (a question only: the flags
-// must hold WTS_INCACHEONLY) and returns the answers, one record per file and size, each file
-// keyed "<label>/<file name>": the label is |label|, or the name of the file's folder. |print|
-// prints a line per answer. *failed is set when a file could not be opened.
+// must hold WTS_INCACHEONLY) and returns the answers, one record per file and size (the files in
+// order, each at |sizes| in order), each file keyed "<label>/<file name>": the label is |label|,
+// or the name of the file's folder. A record is cached only when it is held (HitOf: from the
+// size's own file). |print| prints a line per answer. *failed is set when a file could not be
+// opened.
 std::vector<pdft::test::CacheRecord> AskCache(pdft::ThumbnailCacheOps& cache,
                                               std::span<const std::filesystem::path> files,
                                               std::span<const UINT> sizes, DWORD flags,
