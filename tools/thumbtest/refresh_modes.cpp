@@ -718,6 +718,8 @@ int RunRefresh(const std::vector<std::wstring>& args) {
   if (counts.failed) {
     std::printf(" (first 0x%08lX)", static_cast<unsigned long>(counts.firstFailure));
   }
+  std::printf("; %zu by an extraction of their own, %zu gone after a larger size's store",
+              counts.extracted, counts.superseded);
   std::printf("; %zu answered from another size (left alone)", counts.otherSize);
   std::printf("; %zu without a cached thumbnail, %zu gone\n", counts.notCached, counts.gone);
   std::printf("sizes refused:");

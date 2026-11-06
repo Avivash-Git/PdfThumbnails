@@ -9,6 +9,7 @@
 #include <wil/result_macros.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <map>
 #include <set>
 #include <string>
@@ -154,6 +155,8 @@ void ResetRefreshing(RefreshCounts* counts) noexcept {
   counts->otherSize = 0;
   counts->entriesCached = 0;
   counts->refreshed = 0;
+  counts->extracted = 0;
+  counts->superseded = 0;
   counts->failed = 0;
   counts->firstFailure = S_OK;
   counts->filesRefreshed = 0;
@@ -219,9 +222,10 @@ void LogEnd(const RefreshCounts& c, HRESULT hr, ULONGLONG ms) noexcept try {
       hr == S_OK && c.failed == 0 && !c.capped && !c.stopped && !droppedDocumented;
   Log(complete ? LogLevel::kInfo : LogLevel::kWarning, kLogComponent,
       L"refresh end files=" + Count(c.files) + L" cached=" + Count(c.entriesCached) +
-          L" other-size=" + Count(c.otherSize) + L" refreshed=" + Count(c.refreshed) + L" failed=" +
-          Count(c.failed) + L" fail-hr=" + HResultText(c.firstFailure) + L" gone=" + Count(c.gone) +
-          L" skipped=" + skipped + L" sources=" + Count(c.fromWindows) + L"," +
+          L" other-size=" + Count(c.otherSize) + L" refreshed=" + Count(c.refreshed) +
+          L" extracted=" + Count(c.extracted) + L" superseded=" + Count(c.superseded) +
+          L" failed=" + Count(c.failed) + L" fail-hr=" + HResultText(c.firstFailure) + L" gone=" +
+          Count(c.gone) + L" skipped=" + skipped + L" sources=" + Count(c.fromWindows) + L"," +
           Count(c.fromDesktops) + L"," + Count(c.fromIndex) + L"," + Count(c.fromWalk) +
           L" index=" + YesNo(c.indexUsed) + L" capped=" + YesNo(c.capped) + L" stopped=" +
           YesNo(c.stopped) + L" sizes-dropped=" + dropped + L" ms=" + Count(ms) + L" find-ms=" +
@@ -576,6 +580,17 @@ std::vector<std::filesystem::path> GroupByFolder(std::vector<std::filesystem::pa
   return grouped;
 }
 
+bool HasShapeOf(SIZE dims, SIZE stored) noexcept {
+  const LONG edge = std::max(dims.cx, dims.cy);
+  const LONG storedEdge = std::max(stored.cx, stored.cy);
+  if (dims.cx <= 0 || dims.cy <= 0 || stored.cx <= 0 || stored.cy <= 0) return false;
+  // |stored| scaled to |edge|, rounded to the nearest pixel.
+  const auto scaled = [edge, storedEdge](LONG side) {
+    return static_cast<LONG>((2LL * side * edge + storedEdge) / (2LL * storedEdge));
+  };
+  return std::abs(scaled(stored.cx) - dims.cx) <= 1 && std::abs(scaled(stored.cy) - dims.cy) <= 1;
+}
+
 UINT CacheSizeOf(UINT size) noexcept {
   for (const UINT own : kRefreshSizes) {
     if (own >= size) return own;
@@ -718,30 +733,40 @@ HRESULT RefreshFiles(std::span<const std::filesystem::path> files,
       }
       // The largest first. A store at one size replaces the file's whole record in the cache with
       // that size and every smaller one (build 26100), so a smaller size made after a larger one
-      // would take the larger one away. Once one size is stored, a smaller one held again is that
-      // store's, at the new zoom, and is not made again; one not held any more could only be
-      // made again by giving up the larger one, and counts as failed.
+      // would take the larger one away. Once one size is stored, each smaller one is asked about
+      // again: held with the stored bitmap's shape, it is that store's, at the new zoom, and is
+      // not made again; held with another shape, the store left the old one there (a cache that
+      // does not replace the record), and it is made again; not held any more, nothing old is
+      // left at that size (superseded). These questions are asked also after a stop: they make
+      // nothing.
       std::sort(held.begin(), held.end(),
                 [&options](size_t a, size_t b) { return options.sizes[a] > options.sizes[b]; });
       bool storedLarger = false;  // a larger size of this file was made again and stored
+      SIZE storedDims{};          // ... the bitmap that store answered with
       for (const size_t s : held) {
-        if (stopped) break;
-        if (stop.stop_requested()) {
-          stopped = true;
-          break;
-        }
         const UINT size = options.sizes[s];
         CacheAnswer answer;
         if (storedLarger) {
           HRESULT probe = S_OK;
           const CacheHit hit = ask(size, &answer, &probe);
-          if (hit == CacheHit::kHeld) {
+          if (hit == CacheHit::kHeld && HasShapeOf(answer.dims, storedDims)) {
             ++counts->refreshed;
             ++fileRefreshed;
             continue;
           }
-          if (hit == CacheHit::kRefused) drop(s);
-          failedWith(FAILED(probe) ? probe : E_UNEXPECTED);
+          if (hit == CacheHit::kRefused) {
+            drop(s);
+            failedWith(probe);
+            continue;
+          }
+          if (hit != CacheHit::kHeld) {
+            ++counts->superseded;
+            continue;
+          }
+        }
+        if (stopped || stop.stop_requested()) {
+          stopped = true;
+          if (!storedLarger) break;
           continue;
         }
         const ULONGLONG extractStart = now();
@@ -754,8 +779,12 @@ HRESULT RefreshFiles(std::span<const std::filesystem::path> files,
         RecordMs(options.extractionMs, spent);
         if (SUCCEEDED(made)) {
           ++counts->refreshed;
+          ++counts->extracted;
           ++fileRefreshed;
-          storedLarger = true;
+          if (!storedLarger) {
+            storedLarger = true;
+            storedDims = answer.bitmap ? answer.dims : SIZE{};
+          }
         } else {
           failedWith(made);
           if (made == E_INVALIDARG) drop(s);

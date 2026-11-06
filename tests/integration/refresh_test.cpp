@@ -451,7 +451,8 @@ TEST(RefreshFake, RefreshesAFolderAndLogsCountsNotNames) {
 
   const std::string lines = ReadLog(log);
   EXPECT_NE(lines.find("refresh start source=folders zoom="), std::string::npos) << lines;
-  EXPECT_NE(lines.find("refresh end files=3 cached=3 other-size=0 refreshed=3 failed=0 "
+  EXPECT_NE(lines.find("refresh end files=3 cached=3 other-size=0 refreshed=3 extracted=3 "
+                       "superseded=0 failed=0 "
                        "fail-hr=0x00000000 gone=0 skipped=0,0,0,0,0,0 sources=0,0,0,3 index=no "
                        "capped=no stopped=no sizes-dropped=none ms="),
             std::string::npos)

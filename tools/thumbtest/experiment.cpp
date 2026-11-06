@@ -1075,9 +1075,11 @@ const FolderVerdict* VerdictOf(const std::vector<FolderVerdict>& verdicts,
 
 std::string CountsText(HRESULT hr, const pdft::RefreshCounts& counts) {
   std::string text =
-      Text("%zu of %zu cached thumbnails made again in %zu files, %zu failed", counts.refreshed,
-           counts.entriesCached, counts.filesRefreshed, counts.failed);
+      Text("%zu of %zu cached thumbnails made again in %zu files (%zu extractions), %zu failed",
+           counts.refreshed, counts.entriesCached, counts.filesRefreshed, counts.extracted,
+           counts.failed);
   if (counts.failed) text += " (first " + Hr(counts.firstFailure) + ")";
+  if (counts.superseded) text += Text(", %zu gone after a larger size's store", counts.superseded);
   if (counts.otherSize) text += Text(", %zu answered from another size", counts.otherSize);
   if (!counts.sizesDropped.empty()) {
     text += "; sizes refused:";

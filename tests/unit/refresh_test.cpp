@@ -265,6 +265,9 @@ SIZE Portrait(UINT edge) {
   return {std::max<LONG>(1, static_cast<LONG>(edge * 595 / 842)), static_cast<LONG>(edge)};
 }
 
+// The same page's bitmap at the new zoom: square.
+SIZE NewZoom(UINT edge) { return {static_cast<LONG>(edge), static_cast<LONG>(edge)}; }
+
 // A thumbnail cache that holds what the test says, on a fake clock, and records every call. It
 // keeps its entries as the real one keeps them in its files, one file per size of kRefreshSizes
 // (CacheSizeOf): a WTS_INCACHEONLY question is answered from the size's own file first; else
@@ -272,10 +275,12 @@ SIZE Portrait(UINT edge) {
 // there a file stored at 256 answered 16 and 96 with bitmaps of those sizes, and 1024 is
 // answered from 1280's file because that is its own); else from the largest smaller file,
 // marked WTS_LOWQUALITY; else not at all. Bitmaps are A4 portrait pages at the size they were
-// stored at. A successful extraction that stores replaces the file's record, as build 26100's
-// cache does: afterwards it holds that size and every smaller size of kRefreshSizes (only that
-// size without storeFillsSmaller), each of them made in this run (made). It may also drop whole
-// files (dropsWhenStored), as the real cache drops a file's every size while others are stored.
+// stored at, and those made in this run (made) are square, as the new zoom's crop of such a page
+// is on CI. A successful extraction that stores replaces the file's record, as build 26100's
+// cache does: afterwards it holds that size and every smaller size of kRefreshSizes; with
+// kReplaceOnly that size only; with kAdd it adds that size and leaves the others as they were.
+// It may also drop whole files, its own included (dropsWhenStored), as the real cache drops a
+// file's every size while others are stored.
 class FakeCache final : public ThumbnailCacheOps {
  public:
   struct Call {
@@ -327,26 +332,36 @@ class FakeCache final : public ThumbnailCacheOps {
       if (stored == 0) return WTS_E_FAILEDEXTRACTION;
       answer->bitmap = true;
       answer->cacheFlags = WTS_CACHED | quality;
-      answer->dims = Portrait(stored);
+      const auto fresh = made.find(selected);
+      answer->dims =
+          fresh != made.end() && fresh->second.count(stored) ? NewZoom(stored) : Portrait(stored);
       return S_OK;
     }
     if (const auto failure = getFails.find({selected, size}); failure != getFails.end()) {
       return failure->second;
     }
     answer->bitmap = true;
-    answer->dims = Portrait(size);
+    answer->dims = NewZoom(size);
     if (!(flags & WTS_EXTRACTDONOTCACHE)) {
-      if (const auto drops = dropsWhenStored.find(selected); drops != dropsWhenStored.end()) {
-        for (const std::wstring& file : drops->second) cached.erase(file);
+      if (store == Store::kAdd) {
+        cached[selected].insert(size);
+        made[selected].insert(size);
+      } else {
+        std::set<UINT> record{size};
+        if (store == Store::kReplaceAndFill) {
+          for (const UINT smaller : kRefreshSizes) {
+            if (smaller < size) record.insert(smaller);
+          }
+        }
+        cached[selected] = record;
+        made[selected] = record;
       }
-      std::set<UINT> record{size};
-      if (storeFillsSmaller) {
-        for (const UINT smaller : kRefreshSizes) {
-          if (smaller < size) record.insert(smaller);
+      if (const auto drops = dropsWhenStored.find(selected); drops != dropsWhenStored.end()) {
+        for (const std::wstring& file : drops->second) {
+          cached.erase(file);
+          made.erase(file);
         }
       }
-      cached[selected] = record;
-      made[selected] = record;
     }
     return S_OK;
   }
@@ -361,9 +376,9 @@ class FakeCache final : public ThumbnailCacheOps {
   }
 
   std::map<std::wstring, std::set<UINT>> cached;  // file -> the sizes it was stored at
-  // file -> the sizes its last store in this run left it with (the new zoom's)
+  // file -> the sizes stored in this run that it still holds (the new zoom's)
   std::map<std::wstring, std::set<UINT>> made;
-  bool storeFillsSmaller = true;
+  enum class Store { kReplaceAndFill, kReplaceOnly, kAdd } store = Store::kReplaceAndFill;
   std::set<std::wstring> gone;
   std::map<std::wstring, HRESULT> selectFails;
   std::set<UINT> refusedSizes;   // E_INVALIDARG at these sizes, whatever the flags
@@ -493,17 +508,20 @@ TEST(RefreshFiles, AFileHeldAtEverySizeEndsWithEverySizeMadeAgain) {
   EXPECT_EQ(cache.GetsWith(kRefreshProbeFlags).size(), 2 * std::size(kRefreshSizes) - 1);
   EXPECT_EQ(counts.entriesCached, std::size(kRefreshSizes));
   EXPECT_EQ(counts.refreshed, std::size(kRefreshSizes));
+  EXPECT_EQ(counts.extracted, 1u);
+  EXPECT_EQ(counts.superseded, 0u);
   EXPECT_EQ(counts.otherSize, 0u);
   EXPECT_EQ(counts.failed, 0u);
   EXPECT_EQ(counts.filesRefreshed, 1u);
   EXPECT_EQ(notifier.events, (std::vector<std::wstring>{L"item C:\\a\\1.pdf"}));
 }
 
-TEST(RefreshFiles, ASmallerSizeTheLargerStoreDidNotKeepCountsAsFailed) {
-  // A cache whose store kept only the size stored: 96 is not held any more, and is not made
-  // again, which would take 256's new thumbnail away.
+TEST(RefreshFiles, ASmallerSizeGoneAfterTheLargerStoreIsSuperseded) {
+  // A cache whose store kept only the size stored: 96 answers with 256's thumbnail, so nothing old
+  // is left at 96. It is not made again, which would take 256's new thumbnail away, and fails
+  // nothing.
   FakeCache cache;
-  cache.storeFillsSmaller = false;
+  cache.store = FakeCache::Store::kReplaceOnly;
   cache.cached[L"C:\\a\\1.pdf"] = {96, 256};
   const std::vector<path> files = {L"C:\\a\\1.pdf"};
   FakeNotifier notifier;
@@ -515,9 +533,83 @@ TEST(RefreshFiles, ASmallerSizeTheLargerStoreDidNotKeepCountsAsFailed) {
   EXPECT_EQ(cache.cached[L"C:\\a\\1.pdf"], std::set<UINT>{256});
   EXPECT_EQ(counts.entriesCached, 2u);
   EXPECT_EQ(counts.refreshed, 1u);
+  EXPECT_EQ(counts.extracted, 1u);
+  EXPECT_EQ(counts.superseded, 1u);
+  EXPECT_EQ(counts.failed, 0u);
+  EXPECT_EQ(counts.firstFailure, S_OK);
+  EXPECT_EQ(RefreshExitCode(hr, counts), ExitCode::kOk);
+}
+
+TEST(RefreshFiles, AStoreThatLeavesTheOtherSizesMakesThemAgain) {
+  // A cache whose store leaves the file's other sizes as they were: 96 and 16 still hold the old
+  // zoom's bitmaps (another shape than 256's new one), so each is made again by its own
+  // extraction, which takes nothing away there.
+  FakeCache cache;
+  cache.store = FakeCache::Store::kAdd;
+  cache.cached[L"C:\\a\\1.pdf"] = {16, 96, 256};
+  const std::vector<path> files = {L"C:\\a\\1.pdf"};
+  FakeNotifier notifier;
+  RefreshCounts counts;
+  ASSERT_EQ(RunRefresh(files, Options(&cache), &cache, &notifier, &counts), S_OK);
+  EXPECT_EQ(cache.GetsWith(kRefreshExtractFlags),
+            (Entries{{L"C:\\a\\1.pdf", 256}, {L"C:\\a\\1.pdf", 96}, {L"C:\\a\\1.pdf", 16}}));
+  EXPECT_EQ(cache.made[L"C:\\a\\1.pdf"], (std::set<UINT>{16, 96, 256}));
+  EXPECT_EQ(counts.refreshed, 3u);
+  EXPECT_EQ(counts.extracted, 3u);
+  EXPECT_EQ(counts.superseded, 0u);
+  EXPECT_EQ(counts.failed, 0u);
+}
+
+TEST(RefreshFiles, AFileDroppedRightAfterItsStoreIsSuperseded) {
+  // The cache drops the file whole as it stores it: the smaller sizes miss (a failed HRESULT),
+  // nothing old is left, and nothing fails.
+  FakeCache cache;
+  cache.cached[L"C:\\a\\1.pdf"] = {16, 96, 256};
+  cache.dropsWhenStored[L"C:\\a\\1.pdf"] = {L"C:\\a\\1.pdf"};
+  const std::vector<path> files = {L"C:\\a\\1.pdf"};
+  FakeNotifier notifier;
+  RefreshCounts counts;
+  const HRESULT hr = RunRefresh(files, Options(&cache), &cache, &notifier, &counts);
+  ASSERT_EQ(hr, S_OK);
+  EXPECT_EQ(cache.GetsWith(kRefreshExtractFlags), (Entries{{L"C:\\a\\1.pdf", 256}}));
+  EXPECT_EQ(cache.calls.back(), (FakeCache::Call{L"C:\\a\\1.pdf", 16, kRefreshProbeFlags}));
+  EXPECT_EQ(counts.refreshed, 1u);
+  EXPECT_EQ(counts.superseded, 2u);
+  EXPECT_EQ(counts.failed, 0u);
+  EXPECT_EQ(counts.firstFailure, S_OK);
+  EXPECT_EQ(RefreshExitCode(hr, counts), ExitCode::kOk);
+}
+
+TEST(RefreshFiles, ASmallerSizeRefusedAfterTheStoreFails) {
+  // 96 asked about again is refused: it cannot be told, so it fails with the cache's answer and
+  // is not asked for again; 16 is still that store's.
+  FakeCache cache;
+  cache.cached[L"C:\\a\\1.pdf"] = {16, 96, 256};
+  cache.onGet = [&cache](const FakeCache::Call& call) {
+    if (call.flags == kRefreshExtractFlags) cache.refusedSizes.insert(96);
+  };
+  const std::vector<path> files = {L"C:\\a\\1.pdf"};
+  FakeNotifier notifier;
+  RefreshCounts counts;
+  ASSERT_EQ(RunRefresh(files, Options(&cache), &cache, &notifier, &counts), S_OK);
+  EXPECT_EQ(cache.GetsWith(kRefreshExtractFlags), (Entries{{L"C:\\a\\1.pdf", 256}}));
+  EXPECT_EQ(counts.refreshed, 2u);
   EXPECT_EQ(counts.failed, 1u);
-  EXPECT_EQ(counts.firstFailure, E_UNEXPECTED);
-  EXPECT_EQ(RefreshExitCode(hr, counts), ExitCode::kProblems);
+  EXPECT_EQ(counts.firstFailure, E_INVALIDARG);
+  EXPECT_EQ(counts.superseded, 0u);
+  EXPECT_EQ(counts.sizesDropped, std::vector<UINT>{96});
+}
+
+TEST(RefreshCacheAnswer, TheShapeOfAStoredBitmap) {
+  EXPECT_TRUE(HasShapeOf({181, 256}, {181, 256}));
+  EXPECT_TRUE(HasShapeOf({68, 96}, {181, 256}));  // 67.9
+  EXPECT_TRUE(HasShapeOf({11, 16}, {181, 256}));  // 11.3
+  EXPECT_TRUE(HasShapeOf({16, 16}, {2560, 2560}));
+  EXPECT_FALSE(HasShapeOf({11, 16}, {256, 256}));  // the old crop against the new one
+  EXPECT_FALSE(HasShapeOf({96, 96}, {181, 256}));
+  EXPECT_FALSE(HasShapeOf({16, 11}, {181, 256}));  // turned
+  EXPECT_FALSE(HasShapeOf({96, 96}, {0, 0}));
+  EXPECT_FALSE(HasShapeOf({0, 0}, {256, 256}));
 }
 
 TEST(RefreshFiles, AFileTheCacheDropsIsNotMadeAgainAndFailsNothing) {
@@ -818,7 +910,8 @@ TEST(RefreshFiles, StopsBetweenSizes) {
   cache.cached[L"C:\\a\\1.pdf"] = {16, 96, 256};
   cache.cached[L"C:\\a\\2.pdf"] = {16, 96, 256};
   std::stop_source source;
-  // Stop while the largest size's extraction is under way: it finishes, nothing follows.
+  // Stop while the largest size's extraction is under way: it finishes, and nothing more is
+  // made; the smaller sizes are still asked about, so the counts say what that store made.
   cache.onGet = [&source](const FakeCache::Call& call) {
     if (call.size == 256 && call.flags == kRefreshExtractFlags) source.request_stop();
   };
@@ -828,10 +921,11 @@ TEST(RefreshFiles, StopsBetweenSizes) {
   EXPECT_EQ(RunRefresh(files, Options(&cache), &cache, &notifier, &counts, source.get_token()),
             HRESULT_FROM_WIN32(ERROR_CANCELLED));
   EXPECT_EQ(cache.GetsWith(kRefreshExtractFlags), (Entries{{L"C:\\a\\1.pdf", 256}}));
-  EXPECT_EQ(cache.calls.back(), (FakeCache::Call{L"C:\\a\\1.pdf", 256, kRefreshExtractFlags}));
+  EXPECT_EQ(cache.calls.back(), (FakeCache::Call{L"C:\\a\\1.pdf", 16, kRefreshProbeFlags}));
   EXPECT_TRUE(counts.stopped);
   EXPECT_EQ(counts.files, 1u);
-  EXPECT_EQ(counts.refreshed, 1u);
+  EXPECT_EQ(counts.refreshed, 3u);
+  EXPECT_EQ(counts.extracted, 1u);
   EXPECT_EQ(counts.notCached, 0u);
   // What was refreshed is still told.
   EXPECT_EQ(notifier.events, (std::vector<std::wstring>{L"item C:\\a\\1.pdf"}));

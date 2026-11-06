@@ -161,6 +161,11 @@ UINT CacheSizeOf(UINT size) noexcept;
 // names the file it came from.
 CacheHit ClassifyCacheAnswer(UINT size, HRESULT hr, const CacheAnswer& answer) noexcept;
 
+// Whether a bitmap of |dims| has the shape of one of |stored| (pure): |stored| scaled to the
+// longer edge of |dims| is within 1 px of it on each side. A thumbnail of the same page at
+// another zoom has another crop, so another shape. False when either is empty.
+bool HasShapeOf(SIZE dims, SIZE stored) noexcept;
+
 // The thumbnail cache as the refresh uses it: the real one (MakeThumbnailCacheOps) and the tests'
 // fake.
 class ThumbnailCacheOps {
@@ -225,6 +230,9 @@ struct RefreshCounts {
   size_t otherSize = 0;      // answers from another size's thumbnail: not made again
   size_t entriesCached = 0;  // thumbnails the cache held (each file and size once)
   size_t refreshed = 0;      // ... made again (also by a larger size's store)
+  size_t extracted = 0;      // ... of them, by an extraction of their own
+  // ... not held any more after a larger size's store: nothing old is left of them
+  size_t superseded = 0;
   // ... that could not be made again; also each file the shell could not open (other than gone)
   size_t failed = 0;
   HRESULT firstFailure = S_OK;     // the first of those failures
@@ -255,15 +263,17 @@ struct RefreshCounts {
 // thumbnail the size's own file holds is made again (ClassifyCacheAnswer: kHeld); an answer from
 // another size's is counted and left alone. Each file is asked about at every size first; then
 // its largest size held is made again, and since that store replaces the file's record with it
-// and every smaller size, a smaller size held before is asked about again: held, it counts as
-// refreshed without an extraction of its own; not held, as failed. An extraction that fails
-// leaves the next smaller size held to be made again. A size the cache refuses with E_INVALIDARG
-// is not asked for again. Fills the refreshing fields of *counts (from |files| to |stopped|) and
-// the probe, extract and notify times, and leaves the others as they are. S_OK when every file was
-// checked; HRESULT_FROM_WIN32(ERROR_CANCELLED) when stopped;
-// HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) when the cache refused every size, so the files after
-// that were not asked about (what was refreshed until then is still told); E_INVALIDARG for no
-// sizes or flags AreSafeRefreshFlags refuses, before any call.
+// and every smaller size, a smaller size held before is asked about again: held with the stored
+// bitmap's shape (HasShapeOf), it counts as refreshed without an extraction of its own; held with
+// another shape (the old one), it is made again; not held, as superseded; refused, as failed.
+// An extraction that fails leaves the next smaller size held to be made again. After a stop
+// nothing more is made, but a file's smaller sizes are still asked about once a larger one was
+// stored. A size the cache refuses with E_INVALIDARG is not asked for again. Fills the refreshing
+// fields of *counts (from |files| to |stopped|) and the probe, extract and notify times, and leaves
+// the others as they are. S_OK when every file was checked; HRESULT_FROM_WIN32(ERROR_CANCELLED)
+// when stopped; HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) when the cache refused every size, so the
+// files after that were not asked about (what was refreshed until then is still told); E_INVALIDARG
+// for no sizes or flags AreSafeRefreshFlags refuses, before any call.
 [[nodiscard]] HRESULT RefreshFiles(std::span<const std::filesystem::path> files,
                                    const RefreshFilesOptions& options, ThumbnailCacheOps& cache,
                                    ShellNotifier& notifier, const RefreshProgressFn& progress,
