@@ -3417,18 +3417,14 @@ class Experiment {
                untouched_.size()));
     } else if (options_.interactive && lost > 0) {
       // The stores the timing part would make: the fill at kTimingSize, then each file made
-      // again at the sizes its entry answers as held (those at and below kTimingSize's file),
-      // the first ones once more in a thumbnail process of their own.
+      // again once, at its largest size held (the smaller ones come with that store), the first
+      // ones once more in a thumbnail process of their own.
       const size_t files = static_cast<size_t>(options_.timingFiles);
-      const size_t sizes =
-          static_cast<size_t>(std::count_if(sizes_.begin(), sizes_.end(), [](UINT size) {
-            return pdft::CacheSizeOf(size) <= pdft::CacheSizeOf(kTimingSize);
-          }));
       const size_t instance = std::min(files, static_cast<size_t>(options_.instanceFiles));
       Say(Text(
           "Timing: left out (the cache dropped %zu of the %zu thumbnails stored once and never "
           "touched, so %zu more stores would push out more of yours)",
-          lost, Watched(), files + (files + instance) * sizes));
+          lost, Watched(), files + files + instance));
     } else {
       Phase("the timing fill");
       if (!FillTiming() || (best_ && !TimeRefresh())) return false;

@@ -301,14 +301,28 @@ std::vector<FolderVerdict> Judge(std::span<const CacheRecord> before,
     return std::find(rules.sizes.begin(), rules.sizes.end(), size) != rules.sizes.end();
   };
 
-  // The refresh's last extraction answer per entry, the files it reached and their folders.
+  // The refresh's last extraction answer per entry, every one per file in order, the files it
+  // reached and their folders.
   std::map<std::pair<std::wstring, UINT>, const CacheRecord*> lastMade;
+  std::map<std::wstring, std::vector<const CacheRecord*>> madeOf;
   std::set<std::wstring> reached, refreshed;
   for (const CacheRecord& made : rules.made) {
     lastMade[{made.key, made.size}] = &made;
+    madeOf[made.key].push_back(&made);
     reached.insert(made.key);
     refreshed.insert(made.label);
   }
+  // The answer an entry is judged by: its own last one; without one, its file's last at a larger
+  // size, since a store replaces the file's record with that size and every smaller one.
+  const auto madeFor = [&](const std::pair<std::wstring, UINT>& entry) -> const CacheRecord* {
+    if (const auto found = lastMade.find(entry); found != lastMade.end()) return found->second;
+    const auto file = madeOf.find(entry.first);
+    if (file == madeOf.end()) return nullptr;
+    for (auto it = file->second.rbegin(); it != file->second.rend(); ++it) {
+      if ((*it)->size > entry.second) return *it;
+    }
+    return nullptr;
+  };
 
   // The records of |after| per entry, in their order; each goes with one record of |before|.
   std::map<std::pair<std::wstring, UINT>, std::vector<size_t>> afterOf;
@@ -389,8 +403,7 @@ std::vector<FolderVerdict> Judge(std::span<const CacheRecord> before,
     for (const Judged& judged : file.entries) {
       if (side) judgedAt[file.verdict][judged.entry.second][*side].insert(file.key);
       const bool held = judged.now && judged.now->cached;
-      const auto found = lastMade.find(judged.entry);
-      const CacheRecord* made = found == lastMade.end() ? nullptr : found->second;
+      const CacheRecord* made = madeFor(judged.entry);
       const bool madeNew =
           made && made->hr == S_OK && made->w > 0 && made->h > 0 &&
           ClassifyCrop(file.key, made->w, made->h, zoomBefore, zoomAfter) == Crop::kNew;

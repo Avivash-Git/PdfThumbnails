@@ -134,15 +134,17 @@ struct JudgeRules {
 // held before with the old crop; one not held before is counted in notHeldBefore. In a folder
 // refreshed in this process, the refresh reached a file with at least one |made| record; each
 // judged entry of such a file must have its own last record (the last call counts) S_OK with a
-// bitmap of the new crop, and an entry held afterwards in a file it did not reach is made wrong
-// too. Afterwards each judged entry is made wrong; held (new, old or neither); dropped: not held,
-// its file holds none of its judged entries any more, and, for a refreshed folder, its own
-// extraction answered WTS_CACHED or its file was not reached (in this process), or the refresh
-// was clean (in another); or gone. The outcome: kInvalid without enough files judged before, or
-// with an entry new or neither before; kFail for an entry gone, neither, made wrong, or old (new,
-// for a control), and for a refreshed folder whose refresh was not clean or whose files reached
-// (every judged file, in another process; at least one) hold nothing afterwards; kPass with
-// enough files shown afterwards; kUndecided otherwise. May throw std::bad_alloc.
+// bitmap of the new crop, or, without a record of its own, its file's last record at a larger
+// size must (a store replaces the file's record with that size and every smaller one), and an
+// entry held afterwards in a file it did not reach is made wrong too. Afterwards each judged entry
+// is made wrong; held (new, old or neither); dropped: not held, its file holds none of its judged
+// entries any more, and, for a refreshed folder, its own extraction answered WTS_CACHED or its file
+// was not reached (in this process), or the refresh was clean (in another); or gone. The outcome:
+// kInvalid without enough files judged before, or with an entry new or neither before; kFail for an
+// entry gone, neither, made wrong, or old (new, for a control), and for a refreshed folder whose
+// refresh was not clean or whose files reached (every judged file, in another process; at least
+// one) hold nothing afterwards; kPass with enough files shown afterwards; kUndecided otherwise. May
+// throw std::bad_alloc.
 std::vector<FolderVerdict> Judge(std::span<const CacheRecord> before,
                                  std::span<const CacheRecord> after, int zoomBefore, int zoomAfter,
                                  std::span<const std::wstring> controls, const JudgeRules& rules);

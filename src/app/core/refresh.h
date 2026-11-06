@@ -224,7 +224,7 @@ struct RefreshCounts {
   size_t notCached = 0;      // the cache answered and held no thumbnail of them
   size_t otherSize = 0;      // answers from another size's thumbnail: not made again
   size_t entriesCached = 0;  // thumbnails the cache held (each file and size once)
-  size_t refreshed = 0;      // ... made again
+  size_t refreshed = 0;      // ... made again (also by a larger size's store)
   // ... that could not be made again; also each file the shell could not open (other than gone)
   size_t failed = 0;
   HRESULT firstFailure = S_OK;     // the first of those failures
@@ -253,9 +253,13 @@ struct RefreshCounts {
 // (GroupByFolder), so each folder is told once. The stop is honoured between files and between
 // sizes; a request already running finishes first (the handler's own limits bound it). Only a
 // thumbnail the size's own file holds is made again (ClassifyCacheAnswer: kHeld); an answer from
-// another size's is counted and left alone. A size the cache refuses with E_INVALIDARG is not
-// asked for again. Fills the refreshing fields of *counts (from |files| to |stopped|) and the
-// probe, extract and notify times, and leaves the others as they are. S_OK when every file was
+// another size's is counted and left alone. Each file is asked about at every size first; then
+// its largest size held is made again, and since that store replaces the file's record with it
+// and every smaller size, a smaller size held before is asked about again: held, it counts as
+// refreshed without an extraction of its own; not held, as failed. An extraction that fails
+// leaves the next smaller size held to be made again. A size the cache refuses with E_INVALIDARG
+// is not asked for again. Fills the refreshing fields of *counts (from |files| to |stopped|) and
+// the probe, extract and notify times, and leaves the others as they are. S_OK when every file was
 // checked; HRESULT_FROM_WIN32(ERROR_CANCELLED) when stopped;
 // HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) when the cache refused every size, so the files after
 // that were not asked about (what was refreshed until then is still told); E_INVALIDARG for no

@@ -646,6 +646,16 @@ HRESULT RefreshFiles(std::span<const std::filesystem::path> files,
     --sizesLeft;
     counts->sizesDropped.push_back(options.sizes[index]);
   };
+  // The question at |size| (WTS_INCACHEONLY), timed; its HRESULT in *hr when given.
+  const auto ask = [&](UINT size, CacheAnswer* answer, HRESULT* hr = nullptr) noexcept {
+    const ULONGLONG probeStart = now();
+    const HRESULT probe = cache.Get(size, options.probeFlags, answer);
+    counts->probeMs += Elapsed(probeStart, now());
+    if (hr) *hr = probe;
+    return ClassifyCacheAnswer(size, probe, *answer);
+  };
+  std::vector<size_t> held;  // per file: the indices of the sizes held
+  held.reserve(options.sizes.size());
 
   // The folders whose files had a thumbnail refreshed, for the views refreshed at the end.
   std::vector<std::filesystem::path> viewFolders;
@@ -680,7 +690,9 @@ HRESULT RefreshFiles(std::span<const std::filesystem::path> files,
       failedWith(selected);
     } else {
       bool answered = false;  // the cache answered a question about this file
-      bool cached = false;
+      // Every size is asked about before anything is made: a store changes what the others
+      // answer.
+      held.clear();
       for (size_t s = 0; s < options.sizes.size(); ++s) {
         if (dropped[s]) continue;
         if (stop.stop_requested()) {
@@ -689,10 +701,7 @@ HRESULT RefreshFiles(std::span<const std::filesystem::path> files,
         }
         const UINT size = options.sizes[s];
         CacheAnswer answer;
-        const ULONGLONG probeStart = now();
-        const HRESULT probe = cache.Get(size, options.probeFlags, &answer);
-        counts->probeMs += Elapsed(probeStart, now());
-        const CacheHit hit = ClassifyCacheAnswer(size, probe, answer);
+        const CacheHit hit = ask(size, &answer);
         if (hit == CacheHit::kRefused) {
           drop(s);
           continue;
@@ -704,8 +713,37 @@ HRESULT RefreshFiles(std::span<const std::filesystem::path> files,
           continue;
         }
         if (hit != CacheHit::kHeld) continue;
-        cached = true;
         ++counts->entriesCached;
+        held.push_back(s);
+      }
+      // The largest first. A store at one size replaces the file's whole record in the cache with
+      // that size and every smaller one (build 26100), so a smaller size made after a larger one
+      // would take the larger one away. Once one size is stored, a smaller one held again is that
+      // store's, at the new zoom, and is not made again; one not held any more could only be
+      // made again by giving up the larger one, and counts as failed.
+      std::sort(held.begin(), held.end(),
+                [&options](size_t a, size_t b) { return options.sizes[a] > options.sizes[b]; });
+      bool storedLarger = false;  // a larger size of this file was made again and stored
+      for (const size_t s : held) {
+        if (stopped) break;
+        if (stop.stop_requested()) {
+          stopped = true;
+          break;
+        }
+        const UINT size = options.sizes[s];
+        CacheAnswer answer;
+        if (storedLarger) {
+          HRESULT probe = S_OK;
+          const CacheHit hit = ask(size, &answer, &probe);
+          if (hit == CacheHit::kHeld) {
+            ++counts->refreshed;
+            ++fileRefreshed;
+            continue;
+          }
+          if (hit == CacheHit::kRefused) drop(s);
+          failedWith(FAILED(probe) ? probe : E_UNEXPECTED);
+          continue;
+        }
         const ULONGLONG extractStart = now();
         HRESULT made = cache.Get(size, options.extractFlags, &answer);
         if (SUCCEEDED(made) && options.storeFlags) {
@@ -717,12 +755,13 @@ HRESULT RefreshFiles(std::span<const std::filesystem::path> files,
         if (SUCCEEDED(made)) {
           ++counts->refreshed;
           ++fileRefreshed;
+          storedLarger = true;
         } else {
           failedWith(made);
           if (made == E_INVALIDARG) drop(s);
         }
       }
-      if (answered && !cached && !stopped) ++counts->notCached;
+      if (answered && held.empty() && !stopped) ++counts->notCached;
     }
 
     const ULONGLONG notifyStart = now();

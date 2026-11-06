@@ -534,11 +534,13 @@ TEST(RefreshJudgeRules, AnEntryHeldNeedsItsOwnExtractionAtTheNewZoom) {
     int zoom;  // -1: no record at that size
   };
   for (const Row& row : {Row{"its extraction failed", 0}, Row{"made at the old zoom", 100},
-                         Row{"never made, in a file made at other sizes", -1}}) {
+                         Row{"never made, in a file made at smaller sizes only", -1}}) {
     SCOPED_TRACE(row.what);
+    // The largest size, which no larger size's store makes, when it is never made.
+    const UINT size = row.zoom >= 0 ? 96 : 256;
     Refreshed r = Variant();
-    r.made = Without(r.made, L"portrait-001.pdf", 96);
-    if (row.zoom >= 0) r.made.push_back(Made(L"P-product", L"portrait-001.pdf", 96, row.zoom));
+    r.made = Without(r.made, L"portrait-001.pdf", size);
+    if (row.zoom >= 0) r.made.push_back(Made(L"P-product", L"portrait-001.pdf", size, row.zoom));
     const FolderVerdict v = JudgeRefreshed(r);
     EXPECT_EQ(v.outcome, FolderOutcome::kFail);
     EXPECT_EQ(v.madeWrong, 1u);
@@ -554,6 +556,35 @@ TEST(RefreshJudgeRules, AnEntryHeldNeedsItsOwnExtractionAtTheNewZoom) {
   EXPECT_EQ(v.outcome, FolderOutcome::kPass);
   EXPECT_EQ(v.newAfter, 12u);
   EXPECT_EQ(v.heldNewCached, 9u);
+}
+
+TEST(RefreshJudgeRules, AStoreAtALargerSizeMakesTheSmallerOnes) {
+  // Each file made again at its largest size only: the cache holds the smaller sizes from that
+  // store, at the new zoom.
+  Refreshed r = Variant();
+  r.made.clear();
+  for (const std::wstring& file : kFourFiles) r.made.push_back(Made(L"P-product", file, 256, 142));
+  FolderVerdict v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kPass);
+  EXPECT_EQ(v.newAfter, 12u);
+  EXPECT_EQ(v.heldNewCached, 12u);
+  EXPECT_EQ(v.madeWrong, 0u);
+
+  // A file whose largest size failed and whose next was made: that one's store makes 16.
+  r.made = Without(r.made, L"portrait-001.pdf");
+  r.made.push_back(Made(L"P-product", L"portrait-001.pdf", 256, 0));
+  r.made.push_back(Made(L"P-product", L"portrait-001.pdf", 96, 142));
+  v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kFail);
+  EXPECT_EQ(v.madeWrong, 1u);  // 256 only
+  EXPECT_EQ(v.newAfter, 11u);
+
+  // Its largest size failed and nothing else was made: no size of it was made again.
+  r.made = Without(r.made, L"portrait-001.pdf", 96);
+  v = JudgeRefreshed(r);
+  EXPECT_EQ(v.outcome, FolderOutcome::kFail);
+  EXPECT_EQ(v.madeWrong, 3u);
+  EXPECT_EQ(v.newAfter, 9u);
 }
 
 TEST(RefreshJudgeRules, AnEntryHeldInAFileTheRefreshDidNotReachFails) {
