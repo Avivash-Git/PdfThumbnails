@@ -29,6 +29,10 @@ bool IEquals(std::wstring_view a, std::wstring_view b) noexcept;
 // |text| starts with |prefix|, ignoring case like IEquals.
 bool IStartsWith(std::wstring_view text, std::wstring_view prefix) noexcept;
 
+// |text| with Windows line ends ("\n" becomes "\r\n"), for the clipboard and files. May throw
+// std::bad_alloc.
+std::wstring ToCrLf(std::wstring_view text);
+
 // "0x80070005": how HRESULTs appear in messages and the log. May throw std::bad_alloc.
 std::wstring HResultText(HRESULT hr);
 

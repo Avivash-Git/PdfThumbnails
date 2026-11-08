@@ -75,6 +75,17 @@ std::vector<std::wstring> LastLines(std::wstring_view text, size_t maxLines, boo
 [[nodiscard]] HRESULT GetRedactContext(const ProcessContext& context,
                                        RedactContext* redact) noexcept;
 
+// The masked report for a process in |context|: reads the state (never starting a thumbnail
+// process: it shows the last recorded Explorer test), the findings and DiagnosticsLogTail. Lines
+// are separated by "\n" (ToCrLf for the clipboard). What --diagnostics and the settings window's
+// Copy diagnostics give. Fails when the state cannot be read.
+[[nodiscard]] HRESULT MakeDiagnosticsReport(const ProcessContext& context,
+                                            std::wstring* report) noexcept;
+
+// Puts |text| on the clipboard as CF_UNICODETEXT; waits up to a second for another program that
+// has the clipboard open.
+[[nodiscard]] HRESULT CopyTextToClipboard(std::wstring_view text) noexcept;
+
 // The last |maxLines| lines of the app's log, from the rotated file too when the current one is
 // shorter. A log that does not exist gives no lines; S_OK then.
 [[nodiscard]] HRESULT ReadLogTail(size_t maxLines, std::vector<std::wstring>* lines) noexcept;

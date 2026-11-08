@@ -39,6 +39,7 @@
 #include "uninstall.h"
 #include "window_messages.h"
 #include "zoom.h"
+#include "zoom_change.h"
 
 namespace pdft {
 namespace {
@@ -179,17 +180,6 @@ bool AskYesNo(Output& out, const std::wstring& question) {
     return false;
   }
   return IsYesAnswer(std::wstring_view(answer, read));
-}
-
-// The report's text with Windows line ends, for the clipboard and files.
-std::wstring WithCrLf(std::wstring_view text) {
-  std::wstring result;
-  result.reserve(text.size() + text.size() / 32);
-  for (wchar_t c : text) {
-    if (c == L'\n') result += L'\r';
-    result += c;
-  }
-  return result;
 }
 
 // Prints |text| (UTF-8 JSON) as one line, exactly as the JSON writer made it.
@@ -847,53 +837,24 @@ RefreshProgressFn RefreshProgressPrinter(Output& out) {
   };
 }
 
-// --zoom <n> once the zoom is saved, where kPdfRefreshDefault is on: the PDF thumbnails File
-// Explorer already made are refreshed in the default places, under the lock the caller holds.
-int RefreshAfterZoom(const CliArgs& args, const ProcessContext& context, bool changed,
-                     Output& out) {
-  const int zoom = *args.zoom;
-  if (args.noRefresh) {
-    out.Line(ZoomSavedText(zoom, true));
-    return Code(ExitCode::kOk);
-  }
-  if (!changed) {
-    out.Line(ZoomUnchangedText(zoom));
-    return Code(ExitCode::kOk);
-  }
-  RefreshConditions conditions;
-  const HRESULT read =
-      ReadRefreshConditions(context, RegistryRoots{}, SystemAssociationQueries(), &conditions);
-  const RefreshRefusal refusal =
-      FAILED(read) ? RefreshRefusal::kVirtualized : DecideRefreshRefusal(conditions);
-  if (refusal != RefreshRefusal::kNone) {
-    Log(LogLevel::kInfo, L"zoom",
-        std::wstring(L"zoom refresh=skipped refused=") + RefreshRefusalToken(refusal));
-    out.Line(ZoomSavedText(zoom, true));
-    return Code(ExitCode::kOk);
-  }
-
-  std::stop_source stop;
-  wil::unique_event_nothrow done;
-  (void)done.create(wil::EventOptions::ManualReset);
-  ConsoleStop consoleStop(&stop, done.get());
-  RefreshCounts counts;
-  const HRESULT hr = RefreshPdfThumbnails(PdfRefreshOptions{}, RefreshProgressPrinter(out),
-                                          stop.get_token(), &counts);
-  const ExitCode code = RefreshExitCode(hr, counts);
+// What --zoom <n> says after a refresh of the PDF thumbnails File Explorer already made.
+int ReportZoomRefresh(int zoom, const ZoomChangeResult& result, Output& out) {
+  const ExitCode code = RefreshExitCode(result.refreshResult, result.counts);
   switch (code) {
     case ExitCode::kOk:
-      out.Line(ZoomRefreshedText(zoom, counts.refreshed, counts.filesRefreshed));
+      out.Line(ZoomRefreshedText(zoom, result.counts.refreshed, result.counts.filesRefreshed));
       break;
     case ExitCode::kCancelled:
-      out.Line(ZoomRefreshStoppedText(zoom, counts.refreshed));
+      out.Line(ZoomRefreshStoppedText(zoom, result.counts.refreshed));
       break;
     case ExitCode::kFailed:
       out.Line(ZoomSavedText(zoom, true));
-      out.Error(RefreshFailureText(hr));
+      out.Error(RefreshFailureText(result.refreshResult));
       break;
     default:
       out.Line(L"Zoom set to " + std::to_wstring(ClampZoom(zoom)) + L" %.");
-      for (const std::wstring& line : RefreshReport(hr, counts, counts.files, true)) {
+      for (const std::wstring& line :
+           RefreshReport(result.refreshResult, result.counts, result.counts.files, true)) {
         out.Line(line);
       }
       break;
@@ -921,35 +882,48 @@ int RunZoomCommandWith(const CliArgs& args, const ProcessContext& context, bool 
         L"administrator) prompt.");
     return Code(ExitCode::kWrongContext);
   }
-  std::optional<OperationLock> lock;
-  const HRESULT locked = OperationLock::Acquire(kCheckLockWaitMs, &lock);
-  if (locked == OperationLock::kBusy || locked == OperationLock::kTakenByLowerIntegrity) {
-    out.Error(kBusyMessage);
-    return Code(ExitCode::kBusy);
-  }
-  if (locked == kNamedObjectsRefusedHr) {
-    Log(LogLevel::kWarning, L"zoom",
-        L"zoom result=failed named-objects-refused hr=" + HResultText(kNamedObjectsRefusedHr));
-    out.Error(NamedObjectsRefusedMessage());
-    return Code(ExitCode::kFailed);
-  }
-  if (FAILED(locked)) {
-    out.Error(L"Cannot save the zoom: " + HResultText(locked));
-    return Code(ExitCode::kFailed);
-  }
-  if (lock->sessionOnly()) Log(LogLevel::kWarning, L"zoom", L"zoom lock=session-only");
-  bool changed = true;
-  if (Settings before; SUCCEEDED(LoadSettings(RegistryRoots{}, &before))) {
-    changed = before.zoom != ClampZoom(*args.zoom);
-  }
-  if (const HRESULT hr = SaveZoom(RegistryRoots{}, *args.zoom); FAILED(hr)) {
+  const int zoom = *args.zoom;
+  // Ctrl+C only asks to stop once the refresh is about to start: until then it ends the command.
+  std::stop_source stop;
+  wil::unique_event_nothrow done;
+  std::optional<ConsoleStop> consoleStop;
+  ZoomChangeOptions options;
+  options.zoom = zoom;
+  options.context = context;
+  options.refresh = refreshDefault && !args.noRefresh;
+  options.beforeRefresh = [&stop, &done, &consoleStop] {
+    (void)done.create(wil::EventOptions::ManualReset);
+    consoleStop.emplace(&stop, done.get());
+  };
+  options.progress = RefreshProgressPrinter(out);
+  options.stop = stop.get_token();
+  ZoomChangeResult result;
+  if (const HRESULT hr = ChangeZoom(options, RegistryRoots{}, RealZoomRefreshSteps(), &result);
+      FAILED(hr)) {
     out.Error(L"Cannot save the zoom: " + HResultText(hr));
     return Code(ExitCode::kFailed);
   }
-  (void)NotifyAssocChanged(RegistryRoots{});
-  Log(LogLevel::kInfo, L"zoom", L"zoom saved=" + std::to_wstring(*args.zoom));
-  if (refreshDefault) return RefreshAfterZoom(args, context, changed, out);
-  out.Line(ZoomSavedText(*args.zoom, false));
+  if (result.busy) {
+    out.Error(kBusyMessage);
+    return Code(ExitCode::kBusy);
+  }
+  if (result.namedObjectsRefused) {
+    out.Error(NamedObjectsRefusedMessage());
+    return Code(ExitCode::kFailed);
+  }
+  if (FAILED(result.lockError) || FAILED(result.saveError)) {
+    out.Error(L"Cannot save the zoom: " +
+              HResultText(FAILED(result.lockError) ? result.lockError : result.saveError));
+    return Code(ExitCode::kFailed);
+  }
+  if (!refreshDefault) {
+    out.Line(ZoomSavedText(zoom, false));
+    return Code(ExitCode::kOk);
+  }
+  if (result.refreshRan) return ReportZoomRefresh(zoom, result, out);
+  // Not asked for, or refused: the zoom is saved and the thumbnails keep the old one.
+  out.Line(!args.noRefresh && !result.changed ? ZoomUnchangedText(zoom)
+                                              : ZoomSavedText(zoom, true));
   return Code(ExitCode::kOk);
 }
 
@@ -1158,29 +1132,6 @@ int RunRefreshCommand(const CliArgs& args, const ProcessContext& context, Output
   return RunRefreshFoldersCommand(args, context, out);
 }
 
-HRESULT CopyToClipboard(std::wstring_view text) noexcept {
-  // Another program may hold the clipboard for a moment.
-  bool opened = false;
-  for (int attempt = 0; attempt < 10 && !opened; ++attempt) {
-    opened = OpenClipboard(nullptr) != FALSE;
-    if (!opened) Sleep(100);
-  }
-  RETURN_LAST_ERROR_IF(!opened);
-  auto close = wil::scope_exit([] { CloseClipboard(); });
-  RETURN_IF_WIN32_BOOL_FALSE(EmptyClipboard());
-  const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
-  wil::unique_hglobal memory(GlobalAlloc(GMEM_MOVEABLE, bytes));
-  RETURN_LAST_ERROR_IF_NULL(memory);
-  auto* buffer = static_cast<wchar_t*>(GlobalLock(memory.get()));
-  RETURN_LAST_ERROR_IF_NULL(buffer);
-  memcpy(buffer, text.data(), text.size() * sizeof(wchar_t));
-  buffer[text.size()] = L'\0';
-  GlobalUnlock(memory.get());
-  RETURN_LAST_ERROR_IF_NULL(SetClipboardData(CF_UNICODETEXT, memory.get()));
-  memory.release();  // the clipboard owns it now
-  return S_OK;
-}
-
 // Writes |text| to |path| as UTF-8 with a byte order mark. *refused when the path is not a file
 // the report may go to (a folder, a link, a device): a usage error rather than a failure.
 HRESULT WriteReportFile(const std::wstring& path, std::wstring_view text, bool* refused) noexcept
@@ -1229,24 +1180,14 @@ int RunDiagnostics(const CliArgs& args, const ProcessContext& context, Output& o
     out.Error(DiagnosticsOutElevatedRefusalMessage());
     return Code(ExitCode::kWrongContext);
   }
-  // The report never starts a thumbnail process; it shows the last recorded Explorer test.
-  GatherOptions options;
-  options.liveTest = false;
-  options.context = context;
-  Snapshot snapshot;
-  if (const HRESULT hr = GatherSnapshot(RegistryRoots{}, options, RealSystemProbes(), &snapshot);
-      FAILED(hr)) {
+  std::wstring report;
+  if (const HRESULT hr = MakeDiagnosticsReport(context, &report); FAILED(hr)) {
     out.Error(L"Cannot read the state of the installation: " + HResultText(hr));
     return Code(ExitCode::kFailed);
   }
-  const std::vector<Finding> findings = Evaluate(snapshot);
-  const std::vector<std::wstring> tail = DiagnosticsLogTail(context);
-  RedactContext redact;
-  (void)GetRedactContext(context, &redact);
-  const std::wstring report = BuildDiagnostics(snapshot, findings, tail, redact);
 
   if (args.copy) {
-    if (const HRESULT hr = CopyToClipboard(WithCrLf(report)); FAILED(hr)) {
+    if (const HRESULT hr = CopyTextToClipboard(ToCrLf(report)); FAILED(hr)) {
       out.Error(L"Cannot put the report on the clipboard: " + HResultText(hr));
       return Code(ExitCode::kFailed);
     }
@@ -1255,7 +1196,7 @@ int RunDiagnostics(const CliArgs& args, const ProcessContext& context, Output& o
   }
   if (args.out) {
     bool refused = false;
-    if (const HRESULT hr = WriteReportFile(*args.out, WithCrLf(report), &refused); FAILED(hr)) {
+    if (const HRESULT hr = WriteReportFile(*args.out, ToCrLf(report), &refused); FAILED(hr)) {
       if (refused) {
         out.Error(L"--out must name a file, not a folder, a link or a device: " + *args.out);
         return Code(ExitCode::kUsage);

@@ -16,6 +16,7 @@
 #include "registration.h"
 #include "status_format.h"
 #include "strings.h"
+#include "system_probes.h"
 
 namespace pdft {
 namespace {
@@ -570,6 +571,44 @@ std::wstring BuildDiagnostics(const Snapshot& s, std::span<const Finding> findin
     text += line;
   }
   return Redact(text, redact);
+}
+
+HRESULT MakeDiagnosticsReport(const ProcessContext& context, std::wstring* report) noexcept try {
+  GatherOptions options;
+  options.liveTest = false;
+  options.context = context;
+  Snapshot snapshot;
+  RETURN_IF_FAILED(GatherSnapshot(RegistryRoots{}, options, RealSystemProbes(), &snapshot));
+  const std::vector<Finding> findings = Evaluate(snapshot);
+  const std::vector<std::wstring> tail = DiagnosticsLogTail(context);
+  RedactContext redact;
+  (void)GetRedactContext(context, &redact);
+  *report = BuildDiagnostics(snapshot, findings, tail, redact);
+  return S_OK;
+}
+CATCH_RETURN();
+
+HRESULT CopyTextToClipboard(std::wstring_view text) noexcept {
+  // Another program may hold the clipboard for a moment.
+  bool opened = false;
+  for (int attempt = 0; attempt < 10 && !opened; ++attempt) {
+    opened = OpenClipboard(nullptr) != FALSE;
+    if (!opened) Sleep(100);
+  }
+  RETURN_LAST_ERROR_IF(!opened);
+  auto close = wil::scope_exit([] { CloseClipboard(); });
+  RETURN_IF_WIN32_BOOL_FALSE(EmptyClipboard());
+  const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+  wil::unique_hglobal memory(GlobalAlloc(GMEM_MOVEABLE, bytes));
+  RETURN_LAST_ERROR_IF_NULL(memory);
+  auto* buffer = static_cast<wchar_t*>(GlobalLock(memory.get()));
+  RETURN_LAST_ERROR_IF_NULL(buffer);
+  memcpy(buffer, text.data(), text.size() * sizeof(wchar_t));
+  buffer[text.size()] = L'\0';
+  GlobalUnlock(memory.get());
+  RETURN_LAST_ERROR_IF_NULL(SetClipboardData(CF_UNICODETEXT, memory.get()));
+  memory.release();  // the clipboard owns it now
+  return S_OK;
 }
 
 }  // namespace pdft

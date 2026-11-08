@@ -82,6 +82,7 @@ add_library(pdft_appcore STATIC
   core/uninstall.cpp core/uninstall.h
   core/window_messages.cpp core/window_messages.h
   core/wmi_registry.cpp core/wmi_registry.h
+  core/zoom_change.cpp core/zoom_change.h
   res/resource_ids.h)
 target_include_directories(pdft_appcore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/core"
                                                "${CMAKE_CURRENT_SOURCE_DIR}/res")

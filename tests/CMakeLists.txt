@@ -342,7 +342,8 @@ if(TARGET pdft_appcore)
     integration/setup_test.cpp
     integration/shell_windows_test.cpp
     integration/tasks_test.cpp
-    integration/window_messages_test.cpp)
+    integration/window_messages_test.cpp
+    integration/zoom_change_test.cpp)
   pdft_harden(pdft_integration_tests TEST)
   target_link_libraries(pdft_integration_tests PRIVATE pdft_appcore pdft_testsupport GTest::gtest
                                                        ole32 oleaut32 advapi32 user32)

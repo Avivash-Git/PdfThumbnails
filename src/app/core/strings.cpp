@@ -88,4 +88,14 @@ std::wstring HResultText(HRESULT hr) {
   return text;
 }
 
+std::wstring ToCrLf(std::wstring_view text) {
+  std::wstring result;
+  result.reserve(text.size() + text.size() / 32);
+  for (wchar_t c : text) {
+    if (c == L'\n') result += L'\r';
+    result += c;
+  }
+  return result;
+}
+
 }  // namespace pdft
