@@ -209,3 +209,41 @@ starts it. CI's `system-x64` job runs it as the system tests' throw-away test ac
 install for all users (with `--timing-files 200 --instance-files 40`): its verdict is in that
 job's log, on the lines that start with `[ system ] refresh experiment`, and its whole report on
 the lines that start with `[ system ] report.txt`.
+
+### Results (8 November 2026, Windows 11 build 26300.9818)
+
+Three runs at the PC, on synthetic PDFs only; zoom 100 % then 142 %, put back to the saved zoom
+each time. One run was closed before its end and has no report.
+
+| | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| File Explorer processes at the start | 1 | 2 | 1 |
+| Pass A: thumbnails made again at the new zoom (5 ways) | 162 of 162 | 180 of 180 | 180 of 180 |
+| Control folder changed | no (72 entries) | no (72 entries) | no (72 entries) |
+| Untouched thumbnails kept | 20 of 20 | 20 of 20 | 20 of 20 |
+| No notification | not square in 10 s | not square in 10 s | not square in 10 s |
+| `SHCNE_UPDATEITEM` per file | square after 2.2 s | not square in 10 s | square after 1.4 s |
+| `SHCNE_UPDATEDIR` per folder | square after 1.0 s | not square in 10 s | not valid |
+| Desktop | square after 4.2 s | not comparable | square after 2.6 s |
+| Another program's File Open dialog | square after 0.6 s | not comparable | square after 1.2 s |
+| 2,000 files cached at 256 | 24.0 s | 21.9 s | 22.3 s |
+| Other thumbnail requests during it, against idle | 0.9 times | 0.8 times | 0.8 times |
+| A stop asked 1 s into a refresh | 266 ms | 260 ms | 276 ms |
+
+Answers and notes:
+- The product's own extraction flags (`WTS_FORCEEXTRACTION | WTS_REQUIRESURROGATE`) passed first
+  each time, and `SHCNE_UPDATEITEM` per file is the notification chosen.
+- The cache's question must be `WTS_INCACHEONLY` alone: with `WTS_IDEALCACHESIZEONLY` it refuses
+  with `E_INVALIDARG`.
+- Run 2 had a second File Explorer process, left from a time File Explorer had stopped, and the
+  folder windows did not pick up the notifications. `IShellView::Refresh` did turn them square, but
+  it lost the selection and the scroll position, which was not acceptable. With one process again
+  (run 3), the notification worked. The second process being the cause is likely, not proven.
+- `--refresh --folder` from a Windows Terminal tab: exit 0, 93 thumbnails in 20 files of 44
+  checked, none failed. Those thumbnails were already at the current zoom, so this shows the
+  command runs there; the old-to-new change is what Pass A shows.
+- `--refresh --full` from a Windows Terminal tab: File Explorer was back after 109 ms, by itself,
+  and its one folder window was reopened. This needed the holders to end with exit code -1: with
+  exit code 1, Windows did not start File Explorer again.
+- With a copy paused, File Explorer shows a visible window of class `OperationStatusWindow`, the
+  one `--refresh --full` looks for; a copy that has finished shows none.
