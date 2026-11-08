@@ -100,7 +100,9 @@ pdft_delay_load(pdft_appcore bcrypt.dll wevtapi.dll msi.dll rstrtmgr.dll userenv
 
 # The settings window's parts that need no window of their own, so tests link them too.
 add_library(pdft_windowcore STATIC gui/program_run.cpp gui/program_run.h
-                                   gui/preview_protocol.cpp gui/preview_protocol.h)
+                                   gui/preview_protocol.cpp gui/preview_protocol.h
+                                   gui/status_panel.cpp gui/status_panel.h
+                                   gui/window_model.cpp gui/window_model.h)
 target_include_directories(pdft_windowcore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/gui")
 pdft_harden(pdft_windowcore LIB)
 target_link_libraries(pdft_windowcore PUBLIC pdft_appcore)

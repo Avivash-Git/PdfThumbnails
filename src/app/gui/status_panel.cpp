@@ -1,0 +1,95 @@
+#include "status_panel.h"
+
+#include <algorithm>
+#include <memory>
+
+#include "commands.h"
+#include "project_config.h"
+#include "status_format.h"
+
+namespace pdft {
+namespace {
+
+constexpr wchar_t kSeparator[] = L" · ";
+
+bool IsSacFinding(FindingId id) noexcept {
+  return id == FindingId::kSacBlocked || id == FindingId::kSacEvaluation ||
+         id == FindingId::kSacOn || id == FindingId::kSacUnknown;
+}
+
+// A finding about this process, which the window's banner already says.
+bool IsAboutThisProcess(FindingId id) noexcept {
+  return id == FindingId::kElevated || id == FindingId::kDifferentUser ||
+         id == FindingId::kVirtualized;
+}
+
+StatusPanelLine ThumbnailsLine(const Snapshot& snapshot, const Finding* problem) {
+  if (problem) return {StatusGlyph::kProblem, FindingText(snapshot, *problem)};
+  return {StatusGlyph::kOk, std::wstring(L"PDF thumbnails are working (") +
+                                (snapshot.scope == Scope::kUser ? L"installed for this user"
+                                                                : L"installed for all users") +
+                                L")"};
+}
+
+StatusPanelLine LastCheckLine(const Snapshot& snapshot) {
+  StatusPanelLine line;
+  if (snapshot.last) {
+    line.glyph = snapshot.last->result == ExitCode::kOk ? StatusGlyph::kOk : StatusGlyph::kWarning;
+    line.text = L"Last check: " + LocalTimeText(snapshot.last->time);
+    if (!snapshot.last->summary.empty()) line.text += L", " + snapshot.last->summary;
+  } else {
+    line.text = L"No check has run yet";
+  }
+  if (snapshot.pdfcraft.installed && !snapshot.pdfcraft.version.empty()) {
+    line.text += kSeparator + std::wstring(kPdfCraftProductName) + L" " + snapshot.pdfcraft.version;
+  }
+  return line;
+}
+
+StatusPanelLine VersionLine(const Snapshot& snapshot, std::span<const Finding> findings) {
+  StatusPanelLine line;
+  const auto sac = std::find_if(findings.begin(), findings.end(),
+                                [](const Finding& f) { return IsSacFinding(f.id); });
+  if (sac != findings.end()) {
+    line.text = FindingText(snapshot, *sac) + kSeparator;
+    line.glyph = sac->severity == Severity::kError     ? StatusGlyph::kProblem
+                 : sac->severity == Severity::kWarning ? StatusGlyph::kWarning
+                                                       : StatusGlyph::kNone;
+  }
+  line.text += VersionText();
+  return line;
+}
+
+FixLink ChooseFixLink(std::span<const Finding> findings) noexcept {
+  bool automatic = false;
+  bool takeBack = false;
+  for (const Finding& finding : findings) {
+    if (finding.severity == Severity::kInfo || IsAboutThisProcess(finding.id)) continue;
+    if (finding.fix == FixKind::kNeedsAdmin) return FixLink::kFixNeedsAdmin;
+    automatic = automatic || finding.fix == FixKind::kAuto;
+    takeBack = takeBack || finding.fix == FixKind::kTakeBack;
+  }
+  if (automatic) return FixLink::kFix;
+  return takeBack ? FixLink::kTakeBack : FixLink::kNone;
+}
+
+}  // namespace
+
+StatusPanel BuildStatusPanel(const Snapshot& snapshot, std::span<const Finding> findings) {
+  const auto first = std::find_if(findings.begin(), findings.end(), [](const Finding& f) {
+    return f.breaksThumbnails && !IsAboutThisProcess(f.id);
+  });
+  const Finding* problem = first != findings.end() ? std::addressof(*first) : nullptr;
+
+  StatusPanel panel;
+  panel.lines[0] = ThumbnailsLine(snapshot, problem);
+  panel.lines[1] = LastCheckLine(snapshot);
+  panel.lines[2] = VersionLine(snapshot, findings);
+  panel.fix = ChooseFixLink(findings);
+  if (problem && (problem->fix == FixKind::kUserAction || problem->fix == FixKind::kNone)) {
+    panel.hint = FindingHint(snapshot, *problem);
+  }
+  return panel;
+}
+
+}  // namespace pdft

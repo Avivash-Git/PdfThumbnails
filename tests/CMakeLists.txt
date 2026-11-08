@@ -231,9 +231,11 @@ if(TARGET pdft_appcore)
     unit/snapshot_fixtures.h
     unit/startup_test.cpp
     unit/status_format_test.cpp
+    unit/status_panel_test.cpp
     unit/strings_test.cpp
     unit/system_account_test.cpp
     unit/tasks_test.cpp
+    unit/window_model_test.cpp
     # The pure rules of the system tests' accounts (when they may be made, their names and
     # passwords, how the standard account's run of the task tests is judged).
     system/account_rules.cpp system/account_rules.h)
