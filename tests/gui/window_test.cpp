@@ -64,13 +64,22 @@ class SettingsWindow : public ::testing::Test {
   HWND dialog_ = nullptr;
 };
 
+// Set where the product was installed first (the system job's runner).
+bool Installed() {
+  wchar_t value[8] = {};
+  return GetEnvironmentVariableW(L"PDFT_GUI_INSTALLED", value, ARRAYSIZE(value)) == 1 &&
+         value[0] == L'1';
+}
+
 TEST_F(SettingsWindow, ShowsItsTitleAndAFirstReading) {
   wchar_t title[128] = {};
   GetWindowTextW(dialog_, title, ARRAYSIZE(title));
   EXPECT_EQ(std::wstring(title), std::wstring(kProductName) + L" Settings");
-  // Nothing is installed on this runner, and its registry is real.
-  EXPECT_EQ(ControlText(dialog_, IDC_BANNER), L"Not installed.");
-  EXPECT_TRUE(IsWindowVisible(GetDlgItem(dialog_, IDC_BANNER)));
+  // On the runner where nothing is installed; its registry is real either way.
+  if (!Installed()) {
+    EXPECT_EQ(ControlText(dialog_, IDC_BANNER), L"Not installed.");
+    EXPECT_TRUE(IsWindowVisible(GetDlgItem(dialog_, IDC_BANNER)));
+  }
   EXPECT_FALSE(IsWindowVisible(GetDlgItem(dialog_, IDC_BANNER_LINK)));
   EXPECT_FALSE(ControlText(dialog_, IDC_STATUS_LINE3).empty());
 }

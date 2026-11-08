@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -134,6 +135,70 @@ std::wstring ControlText(HWND dialog, int id) {
   const LRESULT length = SendMessageW(GetDlgItem(dialog, id), WM_GETTEXT, ARRAYSIZE(text),
                                       reinterpret_cast<LPARAM>(text));
   return std::wstring(text, static_cast<size_t>(length));
+}
+
+namespace {
+
+// The window's pixels, top-down 32-bit; empty when they cannot be read.
+std::vector<uint32_t> CapturePixels(HWND window, int* width, int* height) {
+  RECT bounds = {};
+  if (!GetWindowRect(window, &bounds)) return {};
+  *width = bounds.right - bounds.left;
+  *height = bounds.bottom - bounds.top;
+  BITMAPINFO format = {};
+  format.bmiHeader.biSize = sizeof(format.bmiHeader);
+  format.bmiHeader.biWidth = *width;
+  format.bmiHeader.biHeight = -*height;
+  format.bmiHeader.biPlanes = 1;
+  format.bmiHeader.biBitCount = 32;
+  format.bmiHeader.biCompression = BI_RGB;
+  wil::unique_hdc memory(CreateCompatibleDC(nullptr));
+  void* bits = nullptr;
+  wil::unique_hbitmap bitmap(
+      CreateDIBSection(memory.get(), &format, DIB_RGB_COLORS, &bits, nullptr, 0));
+  if (!bitmap) return {};
+  const HGDIOBJ old = SelectObject(memory.get(), bitmap.get());
+  const BOOL painted = PrintWindow(window, memory.get(), PW_RENDERFULLCONTENT);
+  SelectObject(memory.get(), old);
+  if (!painted) return {};
+  const auto* first = static_cast<const uint32_t*>(bits);
+  return std::vector<uint32_t>(first, first + size_t{static_cast<UINT>(*width)} * *height);
+}
+
+// The pixels of |control|, from the window's own picture.
+std::vector<uint32_t> ControlPixels(HWND window, HWND control) {
+  int width = 0;
+  int height = 0;
+  const std::vector<uint32_t> all = CapturePixels(window, &width, &height);
+  RECT windowBox = {};
+  RECT box = {};
+  if (all.empty() || !GetWindowRect(window, &windowBox) || !GetWindowRect(control, &box)) return {};
+  std::vector<uint32_t> part;
+  for (LONG y = box.top + 1; y < box.bottom - 1; ++y) {
+    for (LONG x = box.left + 1; x < box.right - 1; ++x) {
+      const LONG cx = x - windowBox.left;
+      const LONG cy = y - windowBox.top;
+      if (cx >= 0 && cy >= 0 && cx < width && cy < height) {
+        part.push_back(all[size_t{static_cast<ULONG>(cy)} * width + cx] & 0xFFFFFFu);
+      }
+    }
+  }
+  return part;
+}
+
+}  // namespace
+
+size_t ColoursIn(HWND window, HWND control) {
+  const std::vector<uint32_t> pixels = ControlPixels(window, control);
+  return std::set<uint32_t>(pixels.begin(), pixels.end()).size();
+}
+
+uint64_t PictureOf(HWND window, HWND control) {
+  uint64_t hash = 14695981039346656037ull;
+  for (const uint32_t pixel : ControlPixels(window, control)) {
+    hash = (hash ^ pixel) * 1099511628211ull;
+  }
+  return hash;
 }
 
 bool SaveWindowPicture(HWND window, const std::wstring& file) {

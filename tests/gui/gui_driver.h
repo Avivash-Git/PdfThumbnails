@@ -7,6 +7,7 @@
 
 #include <wil/resource.h>
 
+#include <cstdint>
 #include <functional>
 #include <string>
 
@@ -40,6 +41,12 @@ class Program {
 
 // The text of a control of another process.
 std::wstring ControlText(HWND dialog, int id);
+
+// How many different colours the part of |window| showing |control| has; 0 when it cannot be read.
+size_t ColoursIn(HWND window, HWND control);
+
+// A number for what |control| shows inside |window|; 0 when it cannot be read.
+uint64_t PictureOf(HWND window, HWND control);
 
 // Saves the whole window as a PNG. True when it was written.
 bool SaveWindowPicture(HWND window, const std::wstring& file);

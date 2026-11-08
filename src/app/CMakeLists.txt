@@ -127,6 +127,7 @@ pdft_add_app_exe(PdfThumbnailsSettings WIN32 "${PDFT_SETTINGS_EXE}" settings
                  "${PDFT_PRODUCT_NAME} settings" main_gui.cpp
                  gui/main_window.cpp gui/main_window.h
                  gui/preview_child.cpp gui/preview_child.h
+                 gui/preview_renderer.cpp gui/preview_renderer.h
                  gui/theme.cpp gui/theme.h
                  gui/window_jobs.cpp gui/window_jobs.h res/settings.rc)
 # The preview samples and the icon are embedded; the resource compiler does not report them as

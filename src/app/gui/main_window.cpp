@@ -3,14 +3,21 @@
 #include <commctrl.h>
 
 #include <array>
+#include <cstdint>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
+#include "cli_args.h"
 #include "commands.h"
+#include "crop_math.h"
 #include "instance.h"
 #include "log.h"
+#include "preview_protocol.h"
+#include "preview_renderer.h"
 #include "project_config.h"
 #include "resource_ids.h"
 #include "status_panel.h"
@@ -29,6 +36,10 @@ constexpr UINT_PTR kStateChangedTimer = 2;
 constexpr UINT kShowAfterMs = 1500;
 // Several commands that end close together cause one reading.
 constexpr UINT kStateChangedDelayMs = 500;
+
+constexpr std::array<int, 2> kPreviewTiles = {IDC_PREVIEW_DOC, IDC_PREVIEW_SLIDE};
+// The page shapes of the samples, for the drawing that stands in when no preview can be made.
+constexpr std::array<std::array<double, 2>, 2> kSamplePagePoints = {{{595, 842}, {960, 540}}};
 
 constexpr std::array<int, 3> kHeadings = {IDC_HEAD_ZOOM, IDC_HEAD_CHECKS, IDC_HEAD_STATUS};
 constexpr std::array<int, 3> kGlyphControls = {IDC_STATUS_GLYPH1, IDC_STATUS_GLYPH2,
@@ -70,6 +81,16 @@ class MainWindow {
   void OnInitDialog();
   void ApplyFonts() noexcept;
   void SetUpZoomControls() noexcept;
+  void SetEnabled(int id, bool enabled) noexcept;
+  void ShowZoom(int zoom) noexcept;
+  void ZoomChanged(int zoom);
+  void OnSlider();
+  void OnZoomBoxChanged();
+  void OnZoomBoxLeft();
+  std::wstring ZoomBoxText() const;
+  void RequestPreview();
+  void OnPreviewReady();
+  void DrawTile(const DRAWITEMSTRUCT& item, size_t index) const noexcept;
   void ShowOnce() noexcept;
   void OnJobDone();
   void ApplyReading(const StateReading& reading);
@@ -84,11 +105,22 @@ class MainWindow {
   WindowStart start_;
   HWND dialog_ = nullptr;
   std::optional<WindowJobs> jobs_;
+  std::optional<PreviewRenderer> preview_;
   WindowTheme theme_;
   UINT stateChanged_ = 0;
   WindowState state_;
   ProcessContext context_;
   StatusPanel panel_;
+  WindowEdits saved_;
+  WindowEdits edits_;
+  bool updatingZoom_ = false;  // the window itself is setting the zoom controls
+  std::optional<std::pair<int, int>> previewAsked_;  // zoom and edge
+  struct Tile {
+    wil::unique_hbitmap bitmap;
+    int width = 0;
+    int height = 0;
+  };
+  std::array<Tile, kPreviewTiles.size()> tiles_;
   bool shown_ = false;
   bool closePending_ = false;
   bool readAgain_ = false;
@@ -131,11 +163,29 @@ INT_PTR MainWindow::Handle(UINT message, WPARAM w, LPARAM l) try {
         RequestClose();
         return TRUE;
       }
+      if (LOWORD(w) == IDC_ZOOM_EDIT && HIWORD(w) == EN_CHANGE) {
+        OnZoomBoxChanged();
+        return TRUE;
+      }
+      if (LOWORD(w) == IDC_ZOOM_EDIT && HIWORD(w) == EN_KILLFOCUS) {
+        OnZoomBoxLeft();
+        return TRUE;
+      }
       return FALSE;
+    case WM_HSCROLL:
+      if (reinterpret_cast<HWND>(l) == Item(IDC_ZOOM_SLIDER)) {
+        OnSlider();
+        return TRUE;
+      }
+      return FALSE;
+    case kPreviewReadyMessage:
+      OnPreviewReady();
+      return TRUE;
     case WM_CLOSE:
       RequestClose();
       return TRUE;
     case WM_DESTROY:
+      preview_.reset();
       PostQuitMessage(0);
       return TRUE;
     case WM_NOTIFY: {
@@ -164,6 +214,7 @@ INT_PTR MainWindow::Handle(UINT message, WPARAM w, LPARAM l) try {
     case WM_DPICHANGED:
       theme_.Rebuild(HIWORD(w));
       ApplyFonts();
+      RequestPreview();
       return FALSE;  // the dialog manager scales the window and its controls
     case WM_SYSCOLORCHANGE:
     case WM_THEMECHANGED:
@@ -187,6 +238,7 @@ void MainWindow::OnInitDialog() {
   SetUpZoomControls();
   stateChanged_ = StateChangedMessage();
   SetText(IDC_STATUS_LINE1, Text(IDS_READING_STATE));
+  preview_.emplace(dialog_);
   jobs_.emplace(dialog_);
   jobs_->StartFirstReading(start_.relaunched);
   state_.activity = WindowActivity::kGathering;
@@ -210,6 +262,125 @@ void MainWindow::SetUpZoomControls() noexcept {
   SendDlgItemMessageW(dialog_, IDC_ZOOM_SPIN, UDM_SETRANGE32, 100, 200);
 }
 
+void MainWindow::SetEnabled(int id, bool enabled) noexcept {
+  const HWND control = Item(id);
+  // A control that goes off must not keep the keyboard focus.
+  if (!enabled && GetFocus() == control) SendMessageW(dialog_, WM_NEXTDLGCTL, 0, FALSE);
+  EnableWindow(control, enabled);
+}
+
+void MainWindow::ShowZoom(int zoom) noexcept {
+  updatingZoom_ = true;
+  SendDlgItemMessageW(dialog_, IDC_ZOOM_SLIDER, TBM_SETPOS, TRUE, zoom);
+  SetDlgItemInt(dialog_, IDC_ZOOM_EDIT, static_cast<UINT>(zoom), FALSE);
+  updatingZoom_ = false;
+}
+
+void MainWindow::ZoomChanged(int zoom) {
+  if (edits_.zoom == zoom) return;
+  edits_.zoom = zoom;
+  state_.dirty = edits_ != saved_;
+  RequestPreview();
+}
+
+void MainWindow::OnSlider() {
+  const int zoom =
+      static_cast<int>(SendDlgItemMessageW(dialog_, IDC_ZOOM_SLIDER, TBM_GETPOS, 0, 0));
+  updatingZoom_ = true;
+  SetDlgItemInt(dialog_, IDC_ZOOM_EDIT, static_cast<UINT>(zoom), FALSE);
+  updatingZoom_ = false;
+  ZoomChanged(zoom);
+}
+
+std::wstring MainWindow::ZoomBoxText() const {
+  wchar_t text[16] = {};
+  const UINT length = GetDlgItemTextW(dialog_, IDC_ZOOM_EDIT, text, ARRAYSIZE(text));
+  return std::wstring(text, length);
+}
+
+void MainWindow::OnZoomBoxChanged() {
+  if (updatingZoom_) return;
+  // While someone types, only a whole valid number counts; leaving the box settles the rest.
+  const std::optional<int> zoom = ParseZoomValue(ZoomBoxText());
+  if (!zoom) return;
+  updatingZoom_ = true;
+  SendDlgItemMessageW(dialog_, IDC_ZOOM_SLIDER, TBM_SETPOS, TRUE, *zoom);
+  updatingZoom_ = false;
+  ZoomChanged(*zoom);
+}
+
+void MainWindow::OnZoomBoxLeft() {
+  const int zoom = ZoomFromBox(ZoomBoxText(), edits_.zoom);
+  ShowZoom(zoom);
+  ZoomChanged(zoom);
+}
+
+void MainWindow::RequestPreview() {
+  if (state_.context == WindowContext::kStarting || state_.context == WindowContext::kSandboxed) {
+    return;
+  }
+  const std::pair<int, int> asked{edits_.zoom, PreviewEdgeForDpi(GetDpiForWindow(dialog_))};
+  if (previewAsked_ == asked) return;
+  previewAsked_ = asked;
+  preview_->Request(asked.first, asked.second);
+}
+
+void MainWindow::OnPreviewReady() {
+  std::optional<PreviewResult> result = preview_->Take();
+  if (!result) return;
+  for (size_t i = 0; i < tiles_.size(); ++i) {
+    tiles_[i] = Tile{};
+    if (result->ok && result->frames[i].hr == S_OK) {
+      const PreviewFrame& frame = result->frames[i];
+      BITMAPINFO format = {};
+      format.bmiHeader.biSize = sizeof(format.bmiHeader);
+      format.bmiHeader.biWidth = static_cast<LONG>(frame.width);
+      format.bmiHeader.biHeight = -static_cast<LONG>(frame.height);
+      format.bmiHeader.biPlanes = 1;
+      format.bmiHeader.biBitCount = 32;
+      format.bmiHeader.biCompression = BI_RGB;
+      void* bits = nullptr;
+      wil::unique_hbitmap bitmap(
+          CreateDIBSection(nullptr, &format, DIB_RGB_COLORS, &bits, nullptr, 0));
+      if (bitmap && bits) {
+        memcpy(bits, frame.pixels.data(), frame.pixels.size() * sizeof(uint32_t));
+        tiles_[i].bitmap = std::move(bitmap);
+        tiles_[i].width = static_cast<int>(frame.width);
+        tiles_[i].height = static_cast<int>(frame.height);
+      }
+    }
+    InvalidateRect(Item(kPreviewTiles[i]), nullptr, FALSE);
+  }
+}
+
+void MainWindow::DrawTile(const DRAWITEMSTRUCT& item, size_t index) const noexcept {
+  FillRect(item.hDC, &item.rcItem, theme_.content());
+  const int areaW = item.rcItem.right - item.rcItem.left;
+  const int areaH = item.rcItem.bottom - item.rcItem.top;
+  const Tile& tile = tiles_[index];
+  if (tile.bitmap) {
+    wil::unique_hdc memory(CreateCompatibleDC(item.hDC));
+    if (memory) {
+      const auto selected = wil::SelectObject(memory.get(), tile.bitmap.get());
+      BitBlt(item.hDC, item.rcItem.left + (areaW - tile.width) / 2,
+             item.rcItem.top + (areaH - tile.height) / 2, tile.width, tile.height, memory.get(), 0,
+             0, SRCCOPY);
+    }
+  } else if (state_.context != WindowContext::kStarting) {
+    // No preview: the shape a thumbnail of this zoom has.
+    const CropGeometry shape = ComputeCrop(
+        kSamplePagePoints[index][0], kSamplePagePoints[index][1],
+        static_cast<unsigned>(PreviewEdgeForDpi(GetDpiForWindow(dialog_))), edits_.zoom);
+    RECT page = {item.rcItem.left + (areaW - shape.bmpW) / 2,
+                 item.rcItem.top + (areaH - shape.bmpH) / 2, 0, 0};
+    page.right = page.left + shape.bmpW;
+    page.bottom = page.top + shape.bmpH;
+    FillRect(item.hDC, &page, GetSysColorBrush(COLOR_BTNFACE));
+    FrameRect(item.hDC, &page, GetSysColorBrush(COLOR_GRAYTEXT));
+  }
+  FrameRect(item.hDC, &item.rcItem, GetSysColorBrush(COLOR_GRAYTEXT));
+}
+
 void MainWindow::ShowOnce() noexcept {
   if (shown_) return;
   shown_ = true;
@@ -227,6 +398,7 @@ void MainWindow::OnJobDone() {
   }
   if (reading) ApplyReading(*reading);
   ApplyState();
+  RequestPreview();
   ShowOnce();
   if (closePending_) {
     DestroyWindow(dialog_);
@@ -255,8 +427,15 @@ void MainWindow::ApplyReading(const StateReading& reading) {
   state_.context = ClassifyWindowContext(RefusesWrites(context_.virtualization),
                                          reading.snapshot.scope != Scope::kNone);
   panel_ = BuildStatusPanel(reading.snapshot, reading.findings);
-  SendDlgItemMessageW(dialog_, IDC_ZOOM_SLIDER, TBM_SETPOS, TRUE, reading.snapshot.settings.zoom);
-  SetDlgItemInt(dialog_, IDC_ZOOM_EDIT, static_cast<UINT>(reading.snapshot.settings.zoom), FALSE);
+  // Someone's unsaved edits stay; only what they are compared with moves.
+  saved_ = {reading.snapshot.settings.zoom, reading.snapshot.task.afterPdfCraft,
+            reading.snapshot.task.atSignIn};
+  if (state_.dirty) {
+    state_.dirty = edits_ != saved_;
+    return;
+  }
+  edits_ = saved_;
+  ShowZoom(edits_.zoom);
   CheckDlgButton(dialog_, IDC_CHECK_PDFCRAFT,
                  reading.snapshot.task.afterPdfCraft ? BST_CHECKED : BST_UNCHECKED);
   CheckDlgButton(dialog_, IDC_CHECK_SIGNIN,
@@ -264,6 +443,11 @@ void MainWindow::ApplyReading(const StateReading& reading) {
 }
 
 void MainWindow::ApplyState() {
+  const ControlStates controls = DecideControls(state_);
+  for (const int id : {IDC_ZOOM_SLIDER, IDC_ZOOM_EDIT, IDC_ZOOM_SPIN}) {
+    SetEnabled(id, controls.zoomAndChecks);
+  }
+
   for (size_t i = 0; i < panel_.lines.size(); ++i) {
     SetText(kLineControls[i], panel_.lines[i].text);
     InvalidateRect(Item(kGlyphControls[i]), nullptr, TRUE);
@@ -332,9 +516,9 @@ void MainWindow::OnDrawItem(const DRAWITEMSTRUCT& item) noexcept {
       return;
     }
   }
-  // A preview tile: an empty frame until it has something to show.
-  FillRect(item.hDC, &item.rcItem, theme_.content());
-  FrameRect(item.hDC, &item.rcItem, GetSysColorBrush(COLOR_GRAYTEXT));
+  for (size_t i = 0; i < kPreviewTiles.size(); ++i) {
+    if (static_cast<int>(item.CtlID) == kPreviewTiles[i]) DrawTile(item, i);
+  }
 }
 
 void MainWindow::PaintBackground(HDC dc) const noexcept {
