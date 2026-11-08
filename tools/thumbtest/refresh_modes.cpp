@@ -41,6 +41,13 @@
 //       --after-explorer-test first runs the app's Explorer test in this process (a probe PDF in
 //       %TEMP%, extracted without caching), as the settings window does, so that the last answer
 //       shows whether that test leaves a process holding the cache.
+//   thumbtest cachehold <folder>
+//       Whether using the thumbnail cache in this process leaves its files open here: after the
+//       Explorer test, then on a worker thread while a cache object is in use, after it is
+//       released, after a refresh of <folder> (it makes those thumbnails again), after
+//       CoFreeUnusedLibraries and after the thread ended. A rebuild started from a child process
+//       leaves such a process's files alone, so a settings window that used the cache needs to
+//       know. Reports only: exit 0 whatever it finds. For synthetic PDFs only.
 //   thumbtest opendialog <folder>
 //       Shows the File Open dialog at <folder> in this process, another process than File
 //       Explorer with thumbnails of its own, until it is closed.
@@ -1128,6 +1135,99 @@ int RunShellInfo(const std::vector<std::wstring>& args) {
   return result;
 }
 
+// ---- cachehold --------------------------------------------------------------------------------
+
+// One line: whether this process has a thumbnail cache file open now, as Restart Manager sees it.
+void PrintCacheHold(const char* when) {
+  const pdft::RebuildSystem& system = pdft::RealRebuildSystem();
+  std::vector<std::filesystem::path> files;
+  HRESULT hr = system.CacheFiles(&files);
+  if (FAILED(hr)) {
+    std::printf("cachehold: %s: cache files unreadable (0x%08lX)\n", when,
+                static_cast<unsigned long>(hr));
+    return;
+  }
+  if (files.empty()) {
+    std::printf("cachehold: %s: no cache files\n", when);
+    return;
+  }
+  std::vector<pdft::Holder> found;
+  hr = pdft::FindHolders(files, &found);
+  if (FAILED(hr)) {
+    std::printf("cachehold: %s: holders unreadable (0x%08lX)\n", when,
+                static_cast<unsigned long>(hr));
+    return;
+  }
+  const DWORD self = GetCurrentProcessId();
+  const bool held = std::any_of(found.begin(), found.end(),
+                                [self](const pdft::Holder& h) { return h.pid == self; });
+  std::printf("cachehold: %s: %s (%zu cache files, %zu processes hold one)\n", when,
+              held ? "HELD" : "not held", files.size(), found.size());
+}
+
+// The in-process cache use of a settings window's worker thread, in a thread of its own.
+void CacheHoldWorker(const std::filesystem::path& folder) {
+  const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+  if (FAILED(com)) {
+    std::printf("cachehold: COM not set up on the worker (0x%08lX)\n",
+                static_cast<unsigned long>(com));
+    return;
+  }
+  const std::vector<std::filesystem::path> folders{folder};
+  {
+    std::vector<std::filesystem::path> files;
+    pdft::RefreshCounts found;
+    (void)pdft::FindPdfsInFolders(folders, pdft::WalkLimits{}, std::stop_token{}, &files, &found);
+    std::unique_ptr<pdft::ThumbnailCacheOps> cache;
+    HRESULT hr = pdft::MakeThumbnailCacheOps(&cache);
+    if (SUCCEEDED(hr) && !files.empty()) hr = cache->Select(files.front());
+    pdft::CacheAnswer answer;
+    if (SUCCEEDED(hr) && !files.empty()) hr = cache->Get(256, pdft::kRefreshProbeFlags, &answer);
+    std::printf("cachehold: asked the cache about %zu of %zu files: 0x%08lX, bitmap %s\n",
+                files.empty() ? size_t{0} : size_t{1}, files.size(), static_cast<unsigned long>(hr),
+                answer.bitmap ? "yes" : "no");
+    PrintCacheHold("while the cache object is in use");
+  }
+  PrintCacheHold("after the cache object was released");
+
+  pdft::PdfRefreshOptions options;
+  options.folders = folders;
+  pdft::RefreshCounts counts;
+  const HRESULT refreshed = pdft::RefreshPdfThumbnails(
+      options, [](const pdft::RefreshProgress&) {}, std::stop_token{}, &counts);
+  std::printf("cachehold: refresh: 0x%08lX, files %zu, cached %zu, refreshed %zu, failed %zu\n",
+              static_cast<unsigned long>(refreshed), counts.files, counts.entriesCached,
+              counts.refreshed, counts.failed);
+  PrintCacheHold("after the refresh returned");
+  CoFreeUnusedLibrariesEx(0, 0);
+  PrintCacheHold("after CoFreeUnusedLibraries");
+  CoUninitialize();
+}
+
+int RunCacheHold(const std::vector<std::wstring>& args) {
+  if (args.size() != 1 || args[0].starts_with(L"--")) return BadUsage();
+  pdft::ProcessContext context;
+  if (const std::optional<int> refused = Refusal(&context)) return *refused;
+  std::filesystem::path folder;
+  pdft::FolderProblem problem = pdft::FolderProblem::kNone;
+  if (FAILED(pdft::ValidateRefreshFolder(args[0], &folder, &problem))) {
+    std::printf("cachehold: not a usable folder\n");
+    return 2;
+  }
+  PrintCacheHold("before any use");
+  pdft::LiveTest live;
+  const HRESULT started =
+      pdft::RunLiveTest(pdft::kProbeThumbnailSize, nullptr, pdft::kLiveTestTimeoutMs, &live);
+  std::printf("cachehold: Explorer test: started 0x%08lX, result 0x%08lX\n",
+              static_cast<unsigned long>(started), static_cast<unsigned long>(live.hr));
+  PrintCacheHold("after the Explorer test");
+  {
+    std::jthread worker(CacheHoldWorker, folder);
+  }
+  PrintCacheHold("after the worker thread ended");
+  return 0;
+}
+
 // ---- opendialog -------------------------------------------------------------------------------
 
 int RunOpenDialog(const std::vector<std::wstring>& args) {
@@ -1238,7 +1338,7 @@ int RunDiscover(const std::vector<std::wstring>& args) {
 bool IsRefreshMode(const std::wstring& mode) {
   return mode == L"incache" || mode == L"refresh" || mode == L"judge" || mode == L"cachefiles" ||
          mode == L"shellinfo" || mode == L"opendialog" || mode == L"experiment" ||
-         mode == L"discover";
+         mode == L"discover" || mode == L"cachehold";
 }
 
 int RunRefreshMode(int argc, wchar_t** argv) {
@@ -1266,6 +1366,8 @@ int RunRefreshMode(int argc, wchar_t** argv) {
     result = RunCacheFiles(args);
   } else if (mode == L"shellinfo") {
     result = RunShellInfo(args);
+  } else if (mode == L"cachehold") {
+    result = RunCacheHold(args);
   } else if (mode == L"opendialog") {
     result = RunOpenDialog(args);
   } else if (mode == L"experiment") {
@@ -1289,6 +1391,7 @@ void PrintRefreshUsage() {
       "                  [--control <label>]...\n"
       "  thumbtest cachefiles [--record <tsv>] [--diff <tsv>]\n"
       "  thumbtest shellinfo [--windows] [--holders [--after-explorer-test]]\n"
+      "  thumbtest cachehold <folder>\n"
       "  thumbtest opendialog <folder>\n"
       "  thumbtest discover --index [--under <folder>] [--cap <n>] | --defaults\n");
   PrintExperimentUsage();

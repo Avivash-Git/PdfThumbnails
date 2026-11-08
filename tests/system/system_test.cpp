@@ -1434,6 +1434,19 @@ TEST_F(System, ThumbnailRefreshAndRebuildAsTheUser) {
                 cached, std::size(kEvictionFiles), kEvictionSize);
   }
 
+  // Printed, not judged: whether using the cache in a process leaves its files open there. In a
+  // folder of its own, so that this refresh does not touch the eviction files' thumbnails.
+  const path hold = scratch_ / L"cache-hold";
+  ASSERT_TRUE(MakeDirs(hold));
+  for (const test::GeneratedFile& file : test::MakeTestPdfs()) {
+    if (file.name == kEvictionFiles[0]) {
+      ASSERT_TRUE(WriteFileText(hold / file.name, file.bytes)) << Text(file.name);
+    }
+  }
+  (void)User(thumbtest, L"cache " + std::to_wstring(kEvictionSize) + L" - " +
+                            test::QuoteArgument(hold.native()));
+  (void)User(thumbtest, L"cachehold " + test::QuoteArgument(hold.native()));
+
   const Outcome uninstall = User(InstalledCli(), L"--uninstall --yes");
   EXPECT_EQ(uninstall.exitCode, 0u);
   const std::vector<test::CacheRecord> unregistered =

@@ -310,8 +310,9 @@ In `out\build\<preset>\bin\`:
   ask; an answer counts as held only when its bitmap's size shows that it came from the size's
   own cache file), `refresh` makes them again with the experiment's flags, `judge` decides
   from two `incache` records whether they now show the new zoom, `cachefiles` lists the cache
-  files' sizes and times, `shellinfo` shows what the cache rebuild would find, and `opendialog`
-  shows a File Open dialog. All but `judge`, which only reads its two files, work on your real
+  files' sizes and times, `shellinfo` shows what the cache rebuild would find, `cachehold` shows
+  whether using the cache in a process leaves its files open there, and `opendialog` shows a File
+  Open dialog. All but `judge`, which only reads its two files, work on your real
   thumbnail cache and File Explorer: use them on synthetic PDFs only (`makepdfs`). `incache` and
   `refresh` refuse the files the refresh leaves alone (online-only, on the network, and so on).
   The modes refuse from an administrator prompt, below an app package (a Windows Terminal tab,
