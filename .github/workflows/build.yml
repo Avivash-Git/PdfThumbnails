@@ -120,25 +120,6 @@ jobs:
           set "PDFT_VERSION_SUFFIX=-ci+g%GITHUB_SHA:~0,8%"
           call scripts\build.cmd %PRESET% || exit /b 1
 
-      # The real settings window, driven from outside: only x64, because the ARM64 runners have no
-      # desktop the shell can reach. It changes nothing yet that outlives the runner.
-      - name: Drive the settings window (runners GitHub hosts only)
-        if: ${{ matrix.preset == 'ci-x64' && runner.environment == 'github-hosted' }}
-        timeout-minutes: 10
-        env:
-          PDFT_GUI_TESTS: '1'
-          PDFT_GUI_SHOTS: ${{ github.workspace }}\out\window-shots
-        run: ctest --test-dir out\build\ci-x64 -L gui -V --no-tests=error
-
-      - name: Upload the pictures of the settings window
-        if: ${{ !cancelled() && matrix.preset == 'ci-x64' && runner.environment == 'github-hosted' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: window-shots
-          path: out/window-shots/
-          if-no-files-found: warn
-          retention-days: 7
-
       # The runner is elevated (High integrity): the handler tests must have relaunched
       # themselves at Medium, the elevated-refusal test must have run, not skipped (its copy at
       # Medium with Administrators still enabled refused too), and gate.planting must have run the
@@ -227,6 +208,26 @@ jobs:
           # Workflow commands need %, CR and LF escaped.
           $title = if ($found.Count -eq 1) { '1 skipped test' } else { "$($found.Count) skipped tests" }
           '::notice title=' + $title + '::' + ($found -join "`n").Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+
+      # The real settings window, driven from outside: only x64, because the ARM64 runners have no
+      # desktop the shell can reach. It changes nothing yet that outlives the runner. After the
+      # steps above, which read the main test run's logs: this ctest run replaces them.
+      - name: Drive the settings window (runners GitHub hosts only)
+        if: ${{ matrix.preset == 'ci-x64' && runner.environment == 'github-hosted' }}
+        timeout-minutes: 10
+        env:
+          PDFT_GUI_TESTS: '1'
+          PDFT_GUI_SHOTS: ${{ github.workspace }}\out\window-shots
+        run: ctest --test-dir out\build\ci-x64 -L gui -V --no-tests=error
+
+      - name: Upload the pictures of the settings window
+        if: ${{ !cancelled() && matrix.preset == 'ci-x64' && runner.environment == 'github-hosted' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: window-shots
+          path: out/window-shots/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Stage runtime, symbols and tests
         if: startsWith(matrix.preset, 'ci-')
