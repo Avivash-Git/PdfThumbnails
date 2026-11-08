@@ -98,6 +98,12 @@ target_link_libraries(pdft_appcore PUBLIC pdft_config pdft_common pdft_wil
 # before the first call (delay_load.h), so a missing one is an answer, not a crash.
 pdft_delay_load(pdft_appcore bcrypt.dll wevtapi.dll msi.dll rstrtmgr.dll userenv.dll)
 
+# The settings window's parts that need no window of their own, so tests link them too.
+add_library(pdft_windowcore STATIC gui/program_run.cpp gui/program_run.h)
+target_include_directories(pdft_windowcore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/gui")
+pdft_harden(pdft_windowcore LIB)
+target_link_libraries(pdft_windowcore PUBLIC pdft_appcore)
+
 # pdft_add_app_exe(<target> <WIN32|CONSOLE> <file name> <manifest template> <description>
 #                  <source>...)
 function(pdft_add_app_exe target subsystem file_name manifest description)
@@ -117,6 +123,6 @@ endfunction()
 pdft_add_app_exe(PdfThumbnailsSettings WIN32 "${PDFT_SETTINGS_EXE}" settings
                  "${PDFT_PRODUCT_NAME} settings" main_gui.cpp res/settings.rc)
 # Common Controls v6 (TaskDialog), bound through the manifest; the settings executable only.
-target_link_libraries(PdfThumbnailsSettings PRIVATE comctl32)
+target_link_libraries(PdfThumbnailsSettings PRIVATE comctl32 pdft_windowcore)
 pdft_add_app_exe(PdfThumbnailsCli CONSOLE "${PDFT_CLI_EXE}" cli
                  "${PDFT_PRODUCT_NAME} command line" main_cli.cpp res/cli.rc)

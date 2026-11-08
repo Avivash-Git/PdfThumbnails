@@ -430,6 +430,10 @@ int wmain(int argc, wchar_t** argv) {
       return static_cast<int>(wcstoul(argv[4], nullptr, 10));
     }
     if (mode == L"own-job" && argc == 3) return OwnJob();
+    if (mode == L"write-output" && argc == 5) {
+      for (int i = 0; i < _wtoi(argv[3]); ++i) std::printf("line %d\n", i);
+      return _wtoi(argv[4]);
+    }
     if (mode == L"job-escape" && argc == 4) return JobEscapeOf(argv[3]);
     if (mode == L"start-outside" && argc == 4) return StartOutside(argv[3]);
     if (mode == L"breakaway-flag" && argc == 4) return BreakawayFlag(argv[3]);

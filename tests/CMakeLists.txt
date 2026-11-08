@@ -218,6 +218,7 @@ if(TARGET pdft_appcore)
     unit/output_test.cpp
     unit/paths_test.cpp
     unit/pe_info_test.cpp
+    unit/program_output_test.cpp
     unit/rebuild_test.cpp
     unit/refresh_test.cpp
     unit/registration_test.cpp
@@ -236,7 +237,7 @@ if(TARGET pdft_appcore)
     # passwords, how the standard account's run of the task tests is judged).
     system/account_rules.cpp system/account_rules.h)
   target_include_directories(pdft_unit_tests PRIVATE system)
-  target_link_libraries(pdft_unit_tests PRIVATE pdft_appcore)
+  target_link_libraries(pdft_unit_tests PRIVATE pdft_appcore pdft_windowcore)
   # main.cpp's start-up hardening child needs the app's start-up code (startup.h).
   target_compile_definitions(pdft_unit_tests PRIVATE PDFT_UNIT_TESTS_WITH_APP=1)
   # The string-table test reads the executables next to the test program, and the hardening
@@ -334,6 +335,7 @@ if(TARGET pdft_appcore)
     integration/fake_rebuild.h
     integration/probes_test.cpp
     integration/processes_test.cpp
+    integration/program_run_test.cpp
     integration/rebuild_test.cpp
     integration/refresh_test.cpp
     integration/registration_test.cpp
@@ -345,7 +347,8 @@ if(TARGET pdft_appcore)
     integration/window_messages_test.cpp
     integration/zoom_change_test.cpp)
   pdft_harden(pdft_integration_tests TEST)
-  target_link_libraries(pdft_integration_tests PRIVATE pdft_appcore pdft_testsupport GTest::gtest
+  target_link_libraries(pdft_integration_tests PRIVATE pdft_appcore pdft_windowcore
+                                                       pdft_testsupport GTest::gtest
                                                        ole32 oleaut32 advapi32 user32)
   # The handler and PDFium next to it are read (headers, version, build id), never loaded.
   add_dependencies(pdft_integration_tests PdfThumbnailsCli PdfThumbnailsSettings pdft_handler
