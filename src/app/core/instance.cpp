@@ -259,6 +259,14 @@ std::wstring AppMutexName(bool global) {
   return std::wstring(global ? L"Global\\" : L"") + kObjectPrefix + L"AppMutex" + NameSuffix();
 }
 
+std::wstring SettingsWindowClassName() {
+  return std::wstring(kObjectPrefix) + L".SettingsWindow" + NameSuffix();
+}
+
+std::wstring StateChangedMessageName() {
+  return std::wstring(kObjectPrefix) + L".StateChanged" + NameSuffix();
+}
+
 RefusedMutex ClassifyRefusedMutex(DWORD openError, std::optional<HRESULT> probe) noexcept {
   if (openError == ERROR_SUCCESS) return RefusedMutex::kExists;
   if (openError != ERROR_FILE_NOT_FOUND && openError != ERROR_ACCESS_DENIED) {

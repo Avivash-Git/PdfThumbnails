@@ -17,9 +17,6 @@
 // own sign-in; so may a program at low integrity, in a sandbox or with a restricted token. No
 // other instance has anything then, and waiting changes nothing, so CreateNamedMutex tells the
 // two apart (ClassifyRefusedMutex) and returns kNamedObjectsRefusedHr for the second.
-//
-// Not here yet, because they need the settings window: bringing the running window to the
-// front when a second instance starts, and telling it that a check changed the state.
 
 #pragma once
 
@@ -59,6 +56,8 @@ std::wstring OperationLockName(std::wstring_view userSid);  // Global\<prefix>.O
 std::wstring OperationSessionLockName(std::wstring_view userSid);  // Local\<prefix>.Operation.<SID>
 std::wstring LogMutexName(std::wstring_view userSid);              // Local\<prefix>.Log.<SID>
 std::wstring AppMutexName(bool global);                            // <prefix>AppMutex, Global\...
+std::wstring SettingsWindowClassName();                            // <prefix>.SettingsWindow
+std::wstring StateChangedMessageName();                            // <prefix>.StateChanged
 
 // For tests: appends |suffix| to each of the names above (empty: the real names again), so a
 // test run never takes, or waits for, the objects of a running app or of another test run.

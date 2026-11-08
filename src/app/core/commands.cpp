@@ -37,6 +37,7 @@
 #include "strings.h"
 #include "system_probes.h"
 #include "uninstall.h"
+#include "window_messages.h"
 #include "zoom.h"
 
 namespace pdft {
@@ -148,8 +149,10 @@ int OpenSettingsWindow(const ProcessContext& context, bool relaunched, OpenWindo
     }
     return Code(ExitCode::kFailed);
   }
-  // Another window is open. Bringing it to the front comes with the window itself.
-  if (!first) return Code(ExitCode::kOk);
+  if (!first) {
+    (void)ActivateExistingWindow();
+    return Code(ExitCode::kOk);
+  }
   return openWindow ? openWindow(WindowStart{context, relaunched}) : Code(ExitCode::kOk);
 }
 
@@ -1840,6 +1843,8 @@ int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWin
       break;
   }
   Log(LogLevel::kInfo, component, L"end exit=" + std::to_wstring(code));
+  // An elevated process could not post to the user's window anyway, and changes nothing it shows.
+  if (args.writes && !context.elevated) NotifyStateChanged();
   return code;
 }
 

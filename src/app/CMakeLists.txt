@@ -80,6 +80,7 @@ add_library(pdft_appcore STATIC
   core/system_probes.cpp core/system_probes.h
   core/tasks.cpp core/tasks.h
   core/uninstall.cpp core/uninstall.h
+  core/window_messages.cpp core/window_messages.h
   core/wmi_registry.cpp core/wmi_registry.h
   res/resource_ids.h)
 target_include_directories(pdft_appcore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/core"
