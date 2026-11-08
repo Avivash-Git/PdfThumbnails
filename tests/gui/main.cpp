@@ -43,9 +43,10 @@ bool ElevatedStartIsRefused() {
     return false;
   }
   // Asked again until it ends: a box that is still being made does not act on the first request.
+  // The one button of an OK box answers to IDCANCEL, as Esc does.
   DWORD code = 0xFFFFFFFFu;
   for (int attempt = 0; attempt < 30 && code == 0xFFFFFFFFu; ++attempt) {
-    PostMessageW(box, WM_COMMAND, IDOK, 0);
+    PostMessageW(box, WM_COMMAND, IDCANCEL, 0);
     code = program.WaitForExit(1000);
   }
   std::printf("[ gui ] an elevated start: message shown, exit %lu, message still there: %s\n", code,
