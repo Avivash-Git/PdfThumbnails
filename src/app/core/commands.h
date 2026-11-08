@@ -20,9 +20,17 @@
 
 namespace pdft {
 
+// What the settings window starts from: this process (never elevated: an administrator process
+// is refused before the window is asked for; no registry check has run), and whether this start
+// already went through File Explorer (--relaunched).
+struct WindowStart {
+  ProcessContext context;
+  bool relaunched = false;
+};
+
 // Opens the settings window and returns the process exit code when it closes. The settings
 // executable passes one in (main_gui.cpp); the command-line executable has no window.
-using OpenWindowFn = int (*)() noexcept;
+using OpenWindowFn = int (*)(const WindowStart& start) noexcept;
 
 // Runs |args| (parsed for |mode|) and returns the process exit code: an ExitCode, or for
 // --elevated the HRESULT of the elevated step. In order:
@@ -176,6 +184,11 @@ std::wstring ReportChannelTakenMessage();
 // it (kNamedObjectsRefusedHr; exit 5), instead of the line for a lock another check or change
 // keeps (exit 4): nothing is running, and trying again later does not help (pure).
 std::wstring NamedObjectsRefusedMessage();
+
+// Why the settings window does not open in an elevated process (pure): what it shows and changes
+// are the signed-in user's own. The settings executable says it on screen too and exits 8. Starts
+// like CannotRunHereMessage ("Cannot run here: ").
+std::wstring WindowElevatedRefusalMessage();
 
 // What the settings executable says, on screen too, when kNamedObjectsRefusedHr keeps it from
 // taking its single-instance mutex, so it opens no window (exit 5) (pure).

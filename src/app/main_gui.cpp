@@ -27,7 +27,7 @@ std::wstring LoadResourceString(UINT id) {
 }
 
 // Until the settings window exists: says so and points to the command line.
-int ShowPlaceholderWindow() noexcept {
+int ShowPlaceholderWindow(const pdft::WindowStart&) noexcept {
   try {
     const std::wstring title = LoadResourceString(IDS_WINDOW_NOT_READY);
     std::wstring text = LoadResourceString(IDS_WINDOW_USE_CLI);

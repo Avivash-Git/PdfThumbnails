@@ -123,8 +123,16 @@ HRESULT StartSettingsExecutable() noexcept try {
 }
 CATCH_RETURN();
 
-// The settings executable without a command: one window per user.
-int OpenSettingsWindow(const ProcessContext& context, OpenWindowFn openWindow, Output& out) {
+// The settings executable without a command: one window per user, and never an elevated one.
+int OpenSettingsWindow(const ProcessContext& context, bool relaunched, OpenWindowFn openWindow,
+                       Output& out) {
+  if (context.elevated) {
+    // Someone asked for the window: say on screen why none opens. An elevated process logs nothing.
+    const std::wstring message = WindowElevatedRefusalMessage();
+    out.Error(message);
+    MessageBoxW(nullptr, message.c_str(), kProductName, MB_OK | MB_ICONERROR);
+    return Code(ExitCode::kWrongContext);
+  }
   wil::unique_handle instance;
   bool first = false;
   if (const HRESULT hr = TakeSingleInstance(context.userSid, std::addressof(instance), &first);
@@ -142,7 +150,7 @@ int OpenSettingsWindow(const ProcessContext& context, OpenWindowFn openWindow, O
   }
   // Another window is open. Bringing it to the front comes with the window itself.
   if (!first) return Code(ExitCode::kOk);
-  return openWindow ? openWindow() : Code(ExitCode::kOk);
+  return openWindow ? openWindow(WindowStart{context, relaunched}) : Code(ExitCode::kOk);
 }
 
 // ---- The check engine's commands --------------------------------------------------------------
@@ -1429,6 +1437,12 @@ std::wstring NamedObjectsRefusedMessage() {
          kNamedObjectsRefusedCauses;
 }
 
+std::wstring WindowElevatedRefusalMessage() {
+  return std::wstring(L"Cannot run here: running as administrator. ") + kProductName +
+         L" Settings shows and changes the signed-in user's own settings, which an administrator "
+         L"process does not write. Open it normally (not as administrator).";
+}
+
 std::wstring WindowNamedObjectsRefusedMessage() {
   return std::wstring(
              L"Windows does not let this program create named objects here, so it "
@@ -1780,7 +1794,7 @@ int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWin
   int code = Code(ExitCode::kFailed);
   switch (args.verb) {
     case Verb::kNone:
-      code = OpenSettingsWindow(context, openWindow, out);
+      code = OpenSettingsWindow(context, args.relaunched, openWindow, out);
       break;
     case Verb::kStatus:
       code = RunStatus(args, context, out);

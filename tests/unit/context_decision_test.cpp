@@ -208,6 +208,15 @@ TEST(Commands, CannotRunHereWhenElevated) {
   EXPECT_NE(message.find(L"normal (not administrator) prompt"), std::wstring::npos) << message;
 }
 
+// The settings window never opens elevated, and says how to open it instead.
+TEST(Commands, WindowCannotOpenElevated) {
+  const std::wstring message = WindowElevatedRefusalMessage();
+  EXPECT_EQ(message.rfind(L"Cannot run here: running as administrator", 0), 0u) << message;
+  EXPECT_NE(message.find(L"signed-in user's own settings"), std::wstring::npos) << message;
+  EXPECT_NE(message.find(L"Open it normally (not as administrator)"), std::wstring::npos)
+      << message;
+}
+
 // --checks refuses an elevated process too, saying why for the task.
 TEST(Commands, ChecksCannotRunElevated) {
   const std::wstring message = ChecksElevatedRefusalMessage();
