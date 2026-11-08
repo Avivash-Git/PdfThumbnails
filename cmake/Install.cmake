@@ -62,7 +62,8 @@ endforeach()
 # Test programs and tools in the bundle, if they are built. The integration tests start the
 # app's executables, which come with the runtime below.
 set(PDFT_TEST_BUNDLE_PROGRAMS thumbtest pdft_run_medium pdft_unit_tests pdft_handler_tests
-                              pdft_refuses_elevated pdft_integration_tests pdft_system_tests)
+                              pdft_refuses_elevated pdft_integration_tests pdft_system_tests
+                              pdft_gui_tests)
 set(_pdft_test_programs "")
 foreach(_pdft_target IN LISTS PDFT_TEST_BUNDLE_PROGRAMS)
   if(TARGET ${_pdft_target})

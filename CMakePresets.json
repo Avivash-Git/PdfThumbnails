@@ -83,7 +83,7 @@
       "name": "x64-native",
       "hidden": true,
       "inherits": [ "test-base" ],
-      "filter": { "exclude": { "label": "system|e2e" } }
+      "filter": { "exclude": { "label": "system|e2e|gui" } }
     },
     {
       "name": "arm64-cross",
@@ -102,7 +102,7 @@
       "description": "Every program imports the AddressSanitizer runtime from outside System32, so the import, hardening and planting gates do not apply.",
       "inherits": [ "test-base" ],
       "filter": {
-        "exclude": { "label": "system|e2e", "name": "^gate\\.((imports|hardening)\\.(handler|settings|cli)|planting)$" }
+        "exclude": { "label": "system|e2e|gui", "name": "^gate\\.((imports|hardening)\\.(handler|settings|cli)|planting)$" }
       }
     },
     { "name": "ci-x64", "configurePreset": "ci-x64", "inherits": [ "x64-native" ] },

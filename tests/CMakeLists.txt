@@ -413,6 +413,24 @@ if(TARGET pdft_appcore)
                         SKIP_RETURN_CODE 77 TIMEOUT 2400)
 endif()
 
+# ---- gui -----------------------------------------------------------------------------------
+# Starts the real settings window and drives it from outside. The window reads and changes the
+# signed-in user's real settings, so the program refuses to run unless PDFT_GUI_TESTS=1 on a
+# runner GitHub hosts, and the test presets leave the label out.
+if(TARGET PdfThumbnailsSettings)
+  add_executable(pdft_gui_tests
+    gui/main.cpp
+    gui/gui_driver.cpp gui/gui_driver.h
+    gui/window_test.cpp)
+  target_include_directories(pdft_gui_tests PRIVATE integration)
+  pdft_harden(pdft_gui_tests TEST)
+  target_link_libraries(pdft_gui_tests PRIVATE pdft_appcore pdft_testsupport GTest::gtest
+                                               ole32 oleaut32 user32 gdi32)
+  add_dependencies(pdft_gui_tests PdfThumbnailsSettings pdft_handler pdft_pdfium_runtime)
+  pdft_add_program_test(gui.tests pdft_gui_tests LABELS gui RUN_SERIAL TRUE
+                        SKIP_RETURN_CODE 77 TIMEOUT 600)
+endif()
+
 # ---- DLL planting (gate.planting, registered in cmake/Gates.cmake) --------------------------
 # The canary DLL and the program that plants it next to copies of the app's executables. Built
 # for both architectures; the gate runs only where the executables can (native builds).
