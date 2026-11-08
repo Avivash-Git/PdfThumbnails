@@ -9,6 +9,7 @@
 // nothing is started. Only on a runner GitHub hosts is it tried for real, from copies of this test
 // program put in jobs this test makes, with this test program as the image (never explorer.exe):
 // what is started is created suspended, never runs, and is ended by the copy at once.
+// StartThroughWmi is tried on rundll32.exe without arguments, which shows nothing and ends at once.
 
 #include <windows.h>
 
@@ -108,7 +109,7 @@ TEST(Holders, FindsAndEndsOnlyItsOwnChild) {
 
   // With its image allowed, it is ended, and the file is free.
   EXPECT_EQ(TerminateOwnSessionHolder(holder, ownImage), S_OK);
-  EXPECT_EQ(child.Wait(5000), 1u);
+  EXPECT_EQ(child.Wait(5000), 0xFFFFFFFFu);
   ASSERT_EQ(FindHolders(files, &holders), S_OK);
   EXPECT_EQ(FindPid(holders, holder.pid), nullptr);
   EXPECT_EQ(TerminateOwnSessionHolder(holder, ownImage), S_FALSE);  // gone already
@@ -384,6 +385,24 @@ TEST_F(NestedJobs, TheBreakawayFlagIsRecorded) {
     RecordProperty("breakaway-flag-silent", run.out);
     std::printf("breakaway flag in a silent-breakaway job: %s", run.out.c_str());
   }
+}
+
+TEST(StartThroughWmi, StartsAProgramAndGivesItsId) {
+  wchar_t system[MAX_PATH] = {};
+  ASSERT_GT(GetSystemDirectoryW(system, ARRAYSIZE(system)), 0u);
+  const std::filesystem::path folder(system);
+  DWORD pid = 0;
+  ASSERT_HRESULT_SUCCEEDED(StartThroughWmi(folder / L"rundll32.exe", folder, 60000, &pid));
+  EXPECT_NE(pid, 0u);
+}
+
+TEST(StartThroughWmi, AProgramThatDoesNotExist) {
+  wchar_t system[MAX_PATH] = {};
+  ASSERT_GT(GetSystemDirectoryW(system, ARRAYSIZE(system)), 0u);
+  const std::filesystem::path folder(system);
+  DWORD pid = 0;
+  EXPECT_HRESULT_FAILED(StartThroughWmi(folder / L"pdft-does-not-exist.exe", folder, 60000, &pid));
+  EXPECT_EQ(pid, 0u);
 }
 
 }  // namespace

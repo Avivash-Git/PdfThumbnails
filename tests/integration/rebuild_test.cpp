@@ -361,10 +361,32 @@ TEST(RebuildFake, StartedButNeverBack) {
   EXPECT_EQ(RebuildExitCode(result), ExitCode::kProblems);
 }
 
-TEST(RebuildFake, BelowAPackageItDoesNotStartFileExplorer) {
+TEST(RebuildFake, BelowAPackageItStartsFileExplorerFromOutsideThePackage) {
   FakeRebuildSystem fake;
   ShellHoldsTheCache(&fake);
   fake.shellBackByItself = false;
+  fake.shellBackAfterStart = true;
+  fake.shellBackAfterStartMs = 100;
+  fake.Prime();
+  ProcessContext context = CleanContext();
+  context.packagedAncestor = L"Some.Terminal_8wekyb3d8bbwe";
+
+  RebuildResult result;
+  ASSERT_HRESULT_SUCCEEDED(RunRebuild(fake, Options(context), &result));
+  EXPECT_EQ(fake.packagePrepareCalls, 1);
+  EXPECT_EQ(fake.prepareCalls, 0);
+  EXPECT_EQ(fake.startCalls, 1);
+  EXPECT_TRUE(result.startReady);
+  EXPECT_EQ(result.shell, ShellOutcome::kStarted);
+  EXPECT_EQ(result.start, ShellStart::kStarted);
+  EXPECT_EQ(RebuildExitCode(result), ExitCode::kOk);
+}
+
+TEST(RebuildFake, BelowAPackageAStartThatFails) {
+  FakeRebuildSystem fake;
+  ShellHoldsTheCache(&fake);
+  fake.shellBackByItself = false;
+  fake.startHr = E_ACCESSDENIED;
   fake.Prime();
   ProcessContext context = CleanContext();
   context.packagedAncestor = L"Some.Terminal_8wekyb3d8bbwe";
@@ -373,9 +395,31 @@ TEST(RebuildFake, BelowAPackageItDoesNotStartFileExplorer) {
 
   RebuildResult result;
   ASSERT_HRESULT_SUCCEEDED(RunRebuild(fake, options, &result));
+  EXPECT_EQ(fake.startCalls, 1);
+  EXPECT_EQ(result.shell, ShellOutcome::kNotBack);
+  EXPECT_EQ(result.start, ShellStart::kFailed);
+  EXPECT_EQ(result.startError, E_ACCESSDENIED);
+  EXPECT_EQ(RebuildExitCode(result), ExitCode::kProblems);
+}
+
+TEST(RebuildFake, BelowAPackageAStartThatCouldNotBeMadeReady) {
+  FakeRebuildSystem fake;
+  ShellHoldsTheCache(&fake);
+  fake.shellBackByItself = false;
+  fake.packagePrepareHr = E_FAIL;
+  fake.Prime();
+  ProcessContext context = CleanContext();
+  context.packagedAncestor = L"Some.Terminal_8wekyb3d8bbwe";
+  RebuildOptions options = Options(context);
+  options.shellWaitMs = 300;
+
+  RebuildResult result;
+  ASSERT_HRESULT_SUCCEEDED(RunRebuild(fake, options, &result));
+  EXPECT_FALSE(result.startReady);
   EXPECT_EQ(fake.startCalls, 0);
   EXPECT_EQ(result.shell, ShellOutcome::kNotBack);
-  EXPECT_EQ(result.start, ShellStart::kBelowPackage);
+  EXPECT_EQ(result.start, ShellStart::kFailed);
+  EXPECT_EQ(result.startError, E_FAIL);
   EXPECT_EQ(RebuildExitCode(result), ExitCode::kProblems);
 }
 
@@ -526,8 +570,9 @@ TEST(RebuildFake, ReadyFailsWithAutoRestartOn) {
   EXPECT_EQ(RebuildExitCode(result), ExitCode::kProblems);
 }
 
-// Below a package this program never starts File Explorer, so nothing is made ready.
-TEST(RebuildFake, BelowPackageNeverPrepares) {
+// Below a package only the start from outside it is made ready, where nothing was refused, and
+// nothing is tried before the rebuild.
+TEST(RebuildFake, BelowPackageMakesReadyOnlyItsOwnStart) {
   for (const bool autoRestart : {true, false}) {
     FakeRebuildSystem fake;
     ShellHoldsTheCache(&fake);
@@ -540,8 +585,9 @@ TEST(RebuildFake, BelowPackageNeverPrepares) {
     EXPECT_EQ(result.refusal,
               autoRestart ? RebuildRefusal::kNone : RebuildRefusal::kNoRestartBelowPackage);
     EXPECT_EQ(fake.prepareCalls, 0);
+    EXPECT_EQ(fake.packagePrepareCalls, autoRestart ? 1 : 0);
     EXPECT_EQ(fake.trialCalls, 0);
-    EXPECT_FALSE(result.startReady);
+    EXPECT_EQ(result.startReady, autoRestart);
   }
 }
 

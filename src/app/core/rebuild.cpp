@@ -55,8 +55,6 @@ const wchar_t* StartToken(ShellStart start) noexcept {
       return L"not-tried";
     case ShellStart::kStarted:
       return L"started";
-    case ShellStart::kBelowPackage:
-      return L"package";
     case ShellStart::kJobForbids:
       return L"job";
     case ShellStart::kFailed:
@@ -140,8 +138,7 @@ void LogResult(const RebuildResult& r, ExitCode code) noexcept try {
     Log(level, kLogComponent, L"refresh full failed hr=" + HResultText(r.failure));
     return;
   }
-  // Below a package this program never starts File Explorer, so no start is made ready there.
-  const wchar_t* startReady = r.belowPackage ? L"not-needed" : r.startReady ? L"yes" : L"no";
+  const wchar_t* startReady = r.startReady ? L"yes" : L"no";
   Log(level, kLogComponent,
       L"refresh full plan files=" + Count(r.cacheFiles) + L" holders=" + Count(r.holders) +
           L" to-end=" + Count(r.toEnd) + L" shell=" + (r.shellFound ? L"1" : L"0") + L" windows=" +
@@ -291,7 +288,6 @@ ShellStep NextShellStep(const ShellWaitState& s) noexcept {
   if (s.autoRestart && s.newExplorerRunning) {
     return s.extended ? ShellStep::kGiveUp : ShellStep::kExtend;
   }
-  if (s.belowPackage) return ShellStep::kGiveUp;
   return ShellStep::kStart;
 }
 
@@ -411,11 +407,7 @@ std::vector<std::wstring> RebuildReport(const RebuildResult& r) {
       std::wstring line =
           L"File Explorer did not start again. Start it from Task Manager: Run new task, "
           L"explorer.exe.";
-      if (r.start == ShellStart::kBelowPackage) {
-        line +=
-            L" This program does not start it from inside an app package (the terminal it "
-            L"runs in).";
-      } else if (r.start == ShellStart::kJobForbids) {
+      if (r.start == ShellStart::kJobForbids) {
         line +=
             L" This program did not start it: from here it would have stayed inside a job of "
             L"the program this runs in.";
@@ -695,7 +687,6 @@ void WaitForShell(const RebuildOptions& options, const RebuildSystem& system,
                   const Ending& ending, RebuildResult* result) noexcept {
   ShellWaitState state;
   state.autoRestart = result->autoRestartShell;
-  state.belowPackage = result->belowPackage;
   state.limitMs = options.shellWaitMs;
   ULONGLONG phaseStart = ending.t0;
   for (;;) {
@@ -712,10 +703,6 @@ void WaitForShell(const RebuildOptions& options, const RebuildSystem& system,
         return;
       case ShellStep::kGiveUp:
         result->shell = ShellOutcome::kNotBack;
-        // Not started: below a package, or because the one Windows started is still coming up.
-        if (!state.startTried && state.belowPackage && !state.newExplorerRunning) {
-          result->start = ShellStart::kBelowPackage;
-        }
         result->shellMs = system.NowMs() - ending.t0;
         return;
       case ShellStep::kWait:
@@ -831,6 +818,30 @@ class RealPreparedExplorerStart final : public PreparedExplorerStart {
   std::unique_ptr<ProgramStart> start_;
 };
 
+// The start from inside an app package, through WMI.
+class WmiPreparedExplorerStart final : public PreparedExplorerStart {
+ public:
+  explicit WmiPreparedExplorerStart(std::filesystem::path image) noexcept
+      : image_(std::move(image)) {}
+  const JobFacts& Job() const noexcept override { return job_; }
+  HRESULT Trial(JobEscape* escape) noexcept override {
+    *escape = JobEscape::kForbidden;
+    return E_NOTIMPL;
+  }
+  HRESULT Start(bool* jobForbids) noexcept override try {
+    *jobForbids = false;
+    DWORD pid = 0;
+    return StartThroughWmi(image_, image_.parent_path(), kWmiStartWaitMs, &pid);
+  }
+  CATCH_RETURN();
+
+ private:
+  // A hung WMI service is given this long, with the desktop empty until it answers.
+  static constexpr DWORD kWmiStartWaitMs = 15000;
+  std::filesystem::path image_;
+  JobFacts job_;
+};
+
 // The real answers from Windows.
 class RealRebuildSystemImpl final : public RebuildSystem {
  public:
@@ -909,6 +920,15 @@ class RealRebuildSystemImpl final : public RebuildSystem {
     return S_OK;
   }
   CATCH_RETURN();
+  HRESULT PrepareExplorerStartFromPackage(
+      std::unique_ptr<PreparedExplorerStart>* start) const noexcept override try {
+    start->reset();
+    RebuildImages images;
+    RETURN_IF_FAILED(GetRebuildImages(&images));
+    *start = std::make_unique<WmiPreparedExplorerStart>(std::move(images.explorer));
+    return S_OK;
+  }
+  CATCH_RETURN();
   HRESULT OpenFolderWindows(std::span<const FolderWindow> windows, DWORD timeoutMs, size_t* opened,
                             size_t* failed) const noexcept override {
     return pdft::OpenFolderWindows(windows, timeoutMs, opened, failed);
@@ -942,9 +962,19 @@ HRESULT PrecheckRebuild(const ProcessContext& context, const RebuildSystem& syst
     return S_OK;
   }
   check->conditions.autoRestartShell = autoRestart;
-  // This program never starts File Explorer below a package, so nothing is made ready there.
+  // Below a package a start would stay in the package, so it goes through WMI. Where Windows does
+  // not restart File Explorer the refusal stands: nothing has shown that WMI can start it here.
   if (check->conditions.belowPackage) {
     check->refusal = DecideRebuildRefusal(check->conditions);
+    if (keep && check->refusal == RebuildRefusal::kNone) {
+      std::unique_ptr<PreparedExplorerStart> start;
+      const HRESULT hr = system.PrepareExplorerStartFromPackage(&start);
+      if (SUCCEEDED(hr) && start) {
+        *keep = std::move(start);
+      } else {
+        check->startError = FAILED(hr) ? hr : E_UNEXPECTED;
+      }
+    }
     return S_OK;
   }
 

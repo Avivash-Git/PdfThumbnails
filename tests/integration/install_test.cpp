@@ -1720,6 +1720,7 @@ TEST_F(Install, UninstallFailsWhenTheRebuildLeavesNoFileExplorerOrACacheFile) {
     test::FakeRebuildSystem fake;
     ShellAndSurrogateHoldTheCache(&fake);
     fake.shellBackByItself = false;
+    fake.startHr = E_ACCESSDENIED;
     fake.Prime();
     ASSERT_HRESULT_SUCCEEDED(WriteSlots(roots_, SlotWrite::kTakeBack));
     UninstallOptions options = MakeUninstallOptions();
@@ -1730,10 +1731,10 @@ TEST_F(Install, UninstallFailsWhenTheRebuildLeavesNoFileExplorerOrACacheFile) {
     ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
     ASSERT_TRUE(result.rebuild);
     EXPECT_EQ(result.rebuild->shell, ShellOutcome::kNotBack);
-    EXPECT_EQ(result.rebuild->start, ShellStart::kBelowPackage);
-    EXPECT_EQ(fake.startCalls, 0);
-    // Not started, so the wait's own failure.
-    const std::wstring notBack = L"rebuild: " + HResultText(HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+    EXPECT_EQ(result.rebuild->start, ShellStart::kFailed);
+    EXPECT_EQ(fake.startCalls, 1);
+    // Why the start failed.
+    const std::wstring notBack = L"rebuild: " + HResultText(E_ACCESSDENIED);
     EXPECT_EQ(result.failures, std::vector<std::wstring>{notBack});
     EXPECT_EQ(result.code, ExitCode::kFailed);
     SlotValues slots;

@@ -91,6 +91,9 @@ class FakeRebuildSystem final : public RebuildSystem {
   HRESULT trialHr = S_OK;
   int trialFailsFrom = 0;
   mutable int prepareCalls = 0;
+  // The same, from inside an app package.
+  HRESULT packagePrepareHr = S_OK;
+  mutable int packagePrepareCalls = 0;
   mutable int trialCalls = 0;
 
   // Starting File Explorer (by the start made ready).
@@ -285,6 +288,15 @@ class FakeRebuildSystem final : public RebuildSystem {
     ++prepareCalls;
     start->reset();
     if (FAILED(prepareHr)) return prepareHr;
+    *start = std::make_unique<FakeStart>(this);
+    return S_OK;
+  }
+  HRESULT PrepareExplorerStartFromPackage(
+      std::unique_ptr<PreparedExplorerStart>* start) const noexcept override {
+    ++calls_;
+    ++packagePrepareCalls;
+    start->reset();
+    if (FAILED(packagePrepareHr)) return packagePrepareHr;
     *start = std::make_unique<FakeStart>(this);
     return S_OK;
   }

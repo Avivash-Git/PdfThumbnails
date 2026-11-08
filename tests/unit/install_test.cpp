@@ -397,7 +397,7 @@ TEST(UninstallTexts, TheThumbnailRebuild) {
 
   // Not back: the rebuild's line says what to do; the failure it is listed as keeps the last line.
   result.rebuild->shell = ShellOutcome::kNotBack;
-  result.rebuild->start = ShellStart::kBelowPackage;
+  result.rebuild->start = ShellStart::kFailed;
   result.failures = {L"rebuild: 0x800705B4"};
   lines = UninstallReport(result);
   ASSERT_EQ(lines.size(), RebuildReport(*result.rebuild).size());

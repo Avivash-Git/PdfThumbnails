@@ -326,9 +326,6 @@ TEST(NextShellStep, TheWholeWalk) {
   // The one Windows started went away meanwhile: start it.
   deadline.newExplorerRunning = false;
   EXPECT_EQ(NextShellStep(deadline), ShellStep::kStart);
-  // ... except below a package.
-  deadline.belowPackage = true;
-  EXPECT_EQ(NextShellStep(deadline), ShellStep::kGiveUp);
 
   // At the deadline, nothing coming: start it.
   ShellWaitState timedOut = Waiting();
@@ -339,12 +336,6 @@ TEST(NextShellStep, TheWholeWalk) {
   ShellWaitState off = Waiting();
   off.autoRestart = false;
   EXPECT_EQ(NextShellStep(off), ShellStep::kStart);
-
-  // Below a package: give up instead of starting.
-  ShellWaitState package = Waiting();
-  package.autoRestart = false;
-  package.belowPackage = true;
-  EXPECT_EQ(NextShellStep(package), ShellStep::kGiveUp);
 
   // Started, still waiting, then back.
   ShellWaitState started = Waiting();
@@ -625,22 +616,21 @@ TEST(RebuildReport, NothingToReopen) {
 }
 
 TEST(RebuildReport, ShellDidNotComeBackAndListingFailed) {
-  RebuildResult belowPackage;
-  belowPackage.cacheFiles = 1;
-  belowPackage.deleted = 1;
-  belowPackage.shell = ShellOutcome::kNotBack;
-  belowPackage.start = ShellStart::kBelowPackage;
-  belowPackage.listing = WindowListing::kUnanswered;
-  const std::vector<std::wstring> lines = RebuildReport(belowPackage);
+  RebuildResult notBack;
+  notBack.cacheFiles = 1;
+  notBack.deleted = 1;
+  notBack.shell = ShellOutcome::kNotBack;
+  notBack.start = ShellStart::kFailed;
+  notBack.listing = WindowListing::kUnanswered;
+  const std::vector<std::wstring> lines = RebuildReport(notBack);
   EXPECT_TRUE(HasLine(lines,
                       L"File Explorer did not start again. Start it from Task Manager: Run new "
-                      L"task, explorer.exe. This program does not start it from inside an app "
-                      L"package (the terminal it runs in)."));
+                      L"task, explorer.exe."));
   EXPECT_TRUE(HasLine(lines,
                       L"The open folder windows could not be listed (File Explorer did not "
                       L"answer), so they were not reopened."));
 
-  RebuildResult jobForbids = belowPackage;
+  RebuildResult jobForbids = notBack;
   jobForbids.start = ShellStart::kJobForbids;
   jobForbids.listing = WindowListing::kNotNeeded;
   const std::vector<std::wstring> jobLines = RebuildReport(jobForbids);

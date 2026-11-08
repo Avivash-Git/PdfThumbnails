@@ -1,8 +1,12 @@
 #include "processes.h"
 
-// userenv.h before (another inclusion of) wil/resource.h enables WIL's environment block wrapper.
+// userenv.h and oleauto.h before (another inclusion of) wil/resource.h enable WIL's environment
+// block, BSTR and VARIANT wrappers.
+#include <oleauto.h>
 #include <tlhelp32.h>
 #include <userenv.h>
+#include <wbemidl.h>
+#include <wil/com.h>
 #include <wil/resource.h>
 #include <wil/result_macros.h>
 
@@ -20,8 +24,9 @@ namespace {
 // ended process to go.
 constexpr DWORD kTerminateWaitMs = 5000;
 
-// The exit code an ended holder gets.
-constexpr UINT kTerminatedExitCode = 1;
+// The exit code an ended holder gets: -1, the one Stop-Process gives. Windows did not start File
+// Explorer again after exit code 1 (seen on build 26300).
+constexpr UINT kTerminatedExitCode = static_cast<UINT>(-1);
 
 // The exit code a process ProgramStart started suspended and ended gets.
 constexpr UINT kTrialExitCode = ERROR_CANCELLED;
@@ -473,6 +478,113 @@ HRESULT OpenParentProcess(DWORD* parentId, wil::unique_handle* parent) noexcept 
   *parentId = candidate;
   *parent = std::move(process);
   return S_OK;
+}
+CATCH_RETURN();
+
+namespace {
+
+// What StartThroughWmi and its thread share: each holds a reference, so it lives until the later
+// of the two lets go, also after a timeout. The caller reads |hr| and |pid| only after |finished|.
+struct WmiStart {
+  std::wstring commandLine;
+  std::wstring folder;
+  HRESULT hr = E_PENDING;
+  DWORD pid = 0;
+  wil::unique_event_nothrow finished;
+};
+
+// Win32_Process.Create, in this thread's apartment.
+HRESULT CreateThroughWmi(const std::wstring& commandLine, const std::wstring& folder,
+                         DWORD* pid) noexcept try {
+  *pid = 0;
+  wil::com_ptr_nothrow<IWbemLocator> locator;
+  RETURN_IF_FAILED(CoCreateInstance(__uuidof(WbemLocator), nullptr, CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARGS(locator.put())));
+  wil::com_ptr_nothrow<IWbemServices> services;
+  const wil::unique_bstr scope(SysAllocString(L"ROOT\\CIMV2"));
+  RETURN_IF_NULL_ALLOC(scope);
+  RETURN_IF_FAILED(locator->ConnectServer(scope.get(), nullptr, nullptr, nullptr, 0, nullptr,
+                                          nullptr, services.put()));
+  RETURN_IF_FAILED(CoSetProxyBlanket(services.get(), RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr,
+                                     RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr,
+                                     EOAC_NONE));
+
+  const wil::unique_bstr className(SysAllocString(L"Win32_Process"));
+  const wil::unique_bstr methodName(SysAllocString(L"Create"));
+  RETURN_IF_NULL_ALLOC(className);
+  RETURN_IF_NULL_ALLOC(methodName);
+  wil::com_ptr_nothrow<IWbemClassObject> processClass;
+  RETURN_IF_FAILED(services->GetObject(className.get(), 0, nullptr, processClass.put(), nullptr));
+  wil::com_ptr_nothrow<IWbemClassObject> parameters;
+  RETURN_IF_FAILED(processClass->GetMethod(methodName.get(), 0, parameters.put(), nullptr));
+  wil::com_ptr_nothrow<IWbemClassObject> in;
+  RETURN_IF_FAILED(parameters->SpawnInstance(0, in.put()));
+
+  const auto put = [&in](const wchar_t* name, const std::wstring& text) noexcept {
+    wil::unique_variant value;
+    value.vt = VT_BSTR;
+    value.bstrVal = SysAllocString(text.c_str());
+    RETURN_IF_NULL_ALLOC(value.bstrVal);
+    return in->Put(name, 0, &value, 0);
+  };
+  RETURN_IF_FAILED(put(L"CommandLine", commandLine));
+  RETURN_IF_FAILED(put(L"CurrentDirectory", folder));
+
+  wil::com_ptr_nothrow<IWbemClassObject> out;
+  RETURN_IF_FAILED(services->ExecMethod(className.get(), methodName.get(), 0, nullptr, in.get(),
+                                        out.put(), nullptr));
+  wil::unique_variant answer;
+  RETURN_IF_FAILED(out->Get(L"ReturnValue", 0, &answer, nullptr, nullptr));
+  RETURN_HR_IF(E_UNEXPECTED, answer.vt != VT_I4);
+  // The method's own codes (2 access denied, 9 path not found, ...), which are no Windows errors.
+  if (answer.lVal != 0) {
+    return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, static_cast<WORD>(answer.lVal));
+  }
+  answer.reset();
+  RETURN_IF_FAILED(out->Get(L"ProcessId", 0, &answer, nullptr, nullptr));
+  RETURN_HR_IF(E_UNEXPECTED, answer.vt != VT_I4);
+  *pid = static_cast<DWORD>(answer.lVal);
+  return S_OK;
+}
+CATCH_RETURN();
+
+DWORD WINAPI WmiStartThread(void* parameter) noexcept {
+  std::shared_ptr<WmiStart> start;
+  {
+    // StartThroughWmi handed over a reference of its own on the heap; it is the thread's now.
+    std::unique_ptr<std::shared_ptr<WmiStart>> handoff(
+        static_cast<std::shared_ptr<WmiStart>*>(parameter));
+    start = std::move(*handoff);
+  }
+  const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  if (SUCCEEDED(init)) {
+    start->hr = CreateThroughWmi(start->commandLine, start->folder, &start->pid);
+    CoUninitialize();
+  } else {
+    start->hr = init;
+  }
+  SetEvent(start->finished.get());
+  return 0;
+}
+
+}  // namespace
+
+HRESULT StartThroughWmi(const std::filesystem::path& image, const std::filesystem::path& folder,
+                        DWORD timeoutMs, DWORD* pid) noexcept try {
+  *pid = 0;
+  auto start = std::make_shared<WmiStart>();
+  start->commandLine = L"\"" + image.native() + L"\"";
+  start->folder = folder.native();
+  RETURN_IF_FAILED(start->finished.create(wil::EventOptions::ManualReset));
+  auto handoff = std::make_unique<std::shared_ptr<WmiStart>>(start);
+  wil::unique_handle thread(CreateThread(nullptr, 0, WmiStartThread, handoff.get(), 0, nullptr));
+  RETURN_LAST_ERROR_IF(!thread);
+  handoff.release();  // WmiStartThread deletes it
+  const DWORD wait = WaitForSingleObject(start->finished.get(), timeoutMs);
+  if (wait == WAIT_TIMEOUT) return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+  RETURN_LAST_ERROR_IF(wait != WAIT_OBJECT_0);
+  *pid = start->pid;
+  return start->hr;
 }
 CATCH_RETURN();
 

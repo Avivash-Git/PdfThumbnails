@@ -7,7 +7,7 @@
 // Refused (exit 8) elevated, where the registry may be virtualized, where File Explorer on this
 // desktop belongs to another account (the cache, the windows and the File Explorer that Windows
 // restarts are that account's), and below an app package where Windows does not restart File
-// Explorer by itself (this program never starts it from inside a package); and, where Windows
+// Explorer by itself (only then may it run from inside a package); and, where Windows
 // does not restart File Explorer by itself, where a File Explorer started from here would stay
 // inside a job (8) or cannot be started from here at all (5): checked by starting explorer.exe
 // suspended and ending it before it runs. A process that has the cache open itself cannot free it
@@ -142,15 +142,13 @@ enum class ShellOutcome {
 enum class ShellStart {
   kNotTried,
   kStarted,
-  kBelowPackage,  // not from inside an app package
-  kJobForbids,    // it would have stayed inside a job (this process's, or one above it): ended
-  kFailed,        // also: the start could not be made ready before anything changed
+  kJobForbids,  // it would have stayed inside a job (this process's, or one above it): ended
+  kFailed,      // also: the start could not be made ready before anything changed
 };
 
 // Where the wait for the shell stands.
 struct ShellWaitState {
-  bool autoRestart = true;  // Windows restarts File Explorer by itself
-  bool belowPackage = false;
+  bool autoRestart = true;       // Windows restarts File Explorer by itself
   DWORD limitMs = kShellWaitMs;  // one wait
   // Since the shell ended, since the wait was extended, or since this program started File
   // Explorer.
@@ -166,7 +164,7 @@ enum class ShellStep {
   kWait,    // look again shortly
   kExtend,  // a new File Explorer is still starting: wait once more, never start a second one
   kStart,   // start File Explorer
-  kGiveUp,  // no shell, and this program starts none (below a package, or one is still starting)
+  kGiveUp,  // no shell, and this program starts none (one is still starting, or it tried)
 };
 
 // The next step (pure).
@@ -337,6 +335,10 @@ class RebuildSystem {
   // ProgramStart::Prepare of <Windows>\explorer.exe (GetRebuildImages), without arguments.
   [[nodiscard]] virtual HRESULT PrepareExplorerStart(
       std::unique_ptr<PreparedExplorerStart>* start) const noexcept = 0;
+  // The start from inside an app package: <Windows>\\explorer.exe through StartThroughWmi, so that
+  // File Explorer does not run inside the package. No job to read and no trial.
+  [[nodiscard]] virtual HRESULT PrepareExplorerStartFromPackage(
+      std::unique_ptr<PreparedExplorerStart>* start) const noexcept = 0;
   // OpenFolderWindows.
   [[nodiscard]] virtual HRESULT OpenFolderWindows(std::span<const FolderWindow> windows,
                                                   DWORD timeoutMs, size_t* opened,
@@ -363,7 +365,8 @@ struct RebuildPrecheck {
 
 // The context's refusals (nothing is read for them); then AutoRestartShell; then, with no app
 // package above, the start is made ready where AutoRestartShell is 0 or |keep| is given, and
-// tried where it is 0. S_OK with *check whenever it got that far; fails only when out of memory.
+// tried where it is 0; below a package (PrepareExplorerStartFromPackage) only where |keep| is
+// given. S_OK with *check whenever it got that far; fails only when out of memory.
 // With |keep| and no refusal, the start made ready goes there.
 [[nodiscard]] HRESULT PrecheckRebuild(
     const ProcessContext& context, const RebuildSystem& system, RebuildPrecheck* check,

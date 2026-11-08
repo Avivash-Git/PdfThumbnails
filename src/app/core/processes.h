@@ -206,4 +206,14 @@ class ProgramStart {
 // whatever is checked against the id meanwhile is checked against this parent.
 [[nodiscard]] HRESULT OpenParentProcess(DWORD* parentId, wil::unique_handle* parent) noexcept;
 
+// ---- Starting a program from outside an app package ---------------------------------------
+
+// Starts |image| (a full path, no arguments) in |folder| through WMI (Win32_Process.Create): the
+// WMI service creates it as this user in this session, outside the app package and the jobs this
+// process runs in. Runs on a thread of its own and waits at most |timeoutMs|, so a hung WMI cannot
+// hang the caller. *pid: the new process.
+[[nodiscard]] HRESULT StartThroughWmi(const std::filesystem::path& image,
+                                      const std::filesystem::path& folder, DWORD timeoutMs,
+                                      DWORD* pid) noexcept;
+
 }  // namespace pdft
