@@ -28,9 +28,17 @@ struct WindowStart {
   bool relaunched = false;
 };
 
-// Opens the settings window and returns the process exit code when it closes. The settings
-// executable passes one in (main_gui.cpp); the command-line executable has no window.
-using OpenWindowFn = int (*)(const WindowStart& start) noexcept;
+// How the settings window ended: the exit code, or that it must start again through File Explorer
+// (it left the app package above it, or handed over to the signed-in user). The caller starts it
+// again once it has let go of the single-instance mutex.
+struct WindowExit {
+  int code = 0;
+  bool relaunch = false;
+};
+
+// Opens the settings window and returns when it closes. The settings executable passes one in
+// (main_gui.cpp); the command-line executable has no window.
+using OpenWindowFn = WindowExit (*)(const WindowStart& start) noexcept;
 
 // Renders the preview samples and writes them to standard output, returning the exit code: the
 // settings window's child (--render-preview).
@@ -200,6 +208,10 @@ std::wstring NamedObjectsRefusedMessage();
 // are the signed-in user's own. The settings executable says it on screen too and exits 8. Starts
 // like CannotRunHereMessage ("Cannot run here: ").
 std::wstring WindowElevatedRefusalMessage();
+
+// What the settings executable says, on screen too, when it cannot start again through File
+// Explorer (pure): how to open it instead.
+std::wstring WindowRelaunchFailedMessage();
 
 // What the settings executable says, on screen too, when kNamedObjectsRefusedHr keeps it from
 // taking its single-instance mutex, so it opens no window (exit 5) (pure).

@@ -14,6 +14,55 @@
 #define IDR_SAMPLE_DOCUMENT 301
 #define IDR_SAMPLE_SLIDE 302
 
+// The settings window.
+#define IDI_APP 1
+#define IDD_SETTINGS 1
+#define IDA_SETTINGS 1
+#define kFooterTopDlu 229  // where the footer band starts, in dialog units
+
+#define IDC_HEAD_ZOOM 1001
+#define IDC_ZOOM_LABEL 1002
+#define IDC_ZOOM_SLIDER 1003
+#define IDC_ZOOM_EDIT_NAME 1004
+#define IDC_ZOOM_EDIT 1005
+#define IDC_ZOOM_SPIN 1006
+#define IDC_ZOOM_PERCENT 1007
+#define IDC_ZOOM_HINT 1008
+#define IDC_PREVIEW_DOC 1009
+#define IDC_PREVIEW_SLIDE 1010
+#define IDC_PREVIEW_DOC_CAPTION 1011
+#define IDC_PREVIEW_SLIDE_CAPTION 1012
+#define IDC_HEAD_CHECKS 1013
+#define IDC_CHECK_PDFCRAFT 1014
+#define IDC_CHECK_SIGNIN 1015
+#define IDC_HEAD_STATUS 1016
+#define IDC_STATUS_GLYPH1 1017
+#define IDC_STATUS_LINE1 1018
+#define IDC_STATUS_GLYPH2 1019
+#define IDC_STATUS_LINE2 1020
+#define IDC_STATUS_GLYPH3 1021
+#define IDC_STATUS_LINE3 1022
+#define IDC_STATUS_FIX 1023
+#define IDC_STATUS_HINT 1024
+#define IDC_INSTALL_MACHINE 1025
+#define IDC_INSTALL_USER 1026
+#define IDC_BANNER 1027
+#define IDC_BANNER_LINK 1028
+#define IDC_PROGRESS 1029
+#define IDC_PROGRESS_CANCEL 1030
+#define IDC_CHECK_NOW 1031
+#define IDC_REBUILD 1032
+#define IDC_OPEN_LOG 1033
+#define IDC_COPY_DIAG 1034
+#define IDC_UNINSTALL 1035
+
+#define IDS_READING_STATE 301
+#define IDS_STATE_UNREADABLE 302   // {hr}
+#define IDS_BANNER_SANDBOXED 303   // {product}
+#define IDS_BANNER_OTHER_USER 304  // {account}
+#define IDS_BANNER_BUSY 305
+#define IDS_BANNER_NOT_INSTALLED 306
+
 // The settings executable's notice while the window is not built yet.
 #define IDS_WINDOW_NOT_READY 201
 #define IDS_WINDOW_USE_CLI 202  // {cli} is replaced with the command-line executable's name

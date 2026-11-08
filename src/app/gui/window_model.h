@@ -20,6 +20,9 @@ enum class WindowContext {
   kSandboxed,     // writes may not reach the real registry
 };
 
+// The context a finished reading shows (pure): writes that may not reach the registry count first.
+WindowContext ClassifyWindowContext(bool refusesWrites, bool installed) noexcept;
+
 // What the window is doing. One thing at a time.
 enum class WindowActivity {
   kIdle,

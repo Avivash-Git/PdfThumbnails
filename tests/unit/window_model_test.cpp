@@ -15,6 +15,13 @@ WindowState Ready(WindowActivity activity = WindowActivity::kIdle, bool dirty = 
   return state;
 }
 
+TEST(WindowContextRule, WritesThatGetLostComeFirst) {
+  EXPECT_EQ(ClassifyWindowContext(true, true), WindowContext::kSandboxed);
+  EXPECT_EQ(ClassifyWindowContext(true, false), WindowContext::kSandboxed);
+  EXPECT_EQ(ClassifyWindowContext(false, true), WindowContext::kReady);
+  EXPECT_EQ(ClassifyWindowContext(false, false), WindowContext::kNotInstalled);
+}
+
 TEST(WindowControls, ReadyAndIdleAllowsEverythingButACleanSave) {
   const ControlStates c = DecideControls(Ready());
   EXPECT_TRUE(c.zoomAndChecks);

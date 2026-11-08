@@ -125,10 +125,14 @@ endfunction()
 
 pdft_add_app_exe(PdfThumbnailsSettings WIN32 "${PDFT_SETTINGS_EXE}" settings
                  "${PDFT_PRODUCT_NAME} settings" main_gui.cpp
-                 gui/preview_child.cpp gui/preview_child.h res/settings.rc)
-# The preview samples are embedded; the resource compiler does not report them as dependencies.
+                 gui/main_window.cpp gui/main_window.h
+                 gui/preview_child.cpp gui/preview_child.h
+                 gui/theme.cpp gui/theme.h
+                 gui/window_jobs.cpp gui/window_jobs.h res/settings.rc)
+# The preview samples and the icon are embedded; the resource compiler does not report them as
+# dependencies.
 set_source_files_properties(res/settings.rc PROPERTIES OBJECT_DEPENDS
-  "${CMAKE_CURRENT_SOURCE_DIR}/res/sample-document.pdf;${CMAKE_CURRENT_SOURCE_DIR}/res/sample-slide.pdf")
+  "${CMAKE_CURRENT_SOURCE_DIR}/res/sample-document.pdf;${CMAKE_CURRENT_SOURCE_DIR}/res/sample-slide.pdf;${CMAKE_CURRENT_SOURCE_DIR}/res/app.ico")
 # Common Controls v6 (TaskDialog), bound through the manifest; the settings executable only.
 target_link_libraries(PdfThumbnailsSettings PRIVATE comctl32 gdi32 pdft_windowcore)
 pdft_add_app_exe(PdfThumbnailsCli CONSOLE "${PDFT_CLI_EXE}" cli

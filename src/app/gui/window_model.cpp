@@ -7,6 +7,11 @@
 
 namespace pdft {
 
+WindowContext ClassifyWindowContext(bool refusesWrites, bool installed) noexcept {
+  if (refusesWrites) return WindowContext::kSandboxed;
+  return installed ? WindowContext::kReady : WindowContext::kNotInstalled;
+}
+
 ControlStates DecideControls(const WindowState& state) noexcept {
   ControlStates controls;
   const bool ready = state.context == WindowContext::kReady;

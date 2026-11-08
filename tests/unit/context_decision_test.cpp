@@ -217,6 +217,12 @@ TEST(Commands, WindowCannotOpenElevated) {
       << message;
 }
 
+// When the window cannot start again through File Explorer, it says how to open it.
+TEST(Commands, WindowRelaunchFailureSaysHowToOpenIt) {
+  const std::wstring message = WindowRelaunchFailedMessage();
+  EXPECT_NE(message.find(L"File Explorer or a normal terminal"), std::wstring::npos) << message;
+}
+
 // --checks refuses an elevated process too, saying why for the task.
 TEST(Commands, ChecksCannotRunElevated) {
   const std::wstring message = ChecksElevatedRefusalMessage();

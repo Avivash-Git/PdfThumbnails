@@ -32,6 +32,7 @@
 #include "registry_roots.h"
 #include "settings.h"
 #include "setup.h"
+#include "shell_windows.h"
 #include "snapshot.h"
 #include "status_format.h"
 #include "strings.h"
@@ -125,6 +126,9 @@ HRESULT StartSettingsExecutable() noexcept try {
 }
 CATCH_RETURN();
 
+// How long File Explorer gets to take the request to start the window again.
+constexpr DWORD kRelaunchTimeoutMs = 10000;
+
 // The settings executable without a command: one window per user, and never an elevated one.
 int OpenSettingsWindow(const ProcessContext& context, bool relaunched, OpenWindowFn openWindow,
                        Output& out) {
@@ -154,7 +158,22 @@ int OpenSettingsWindow(const ProcessContext& context, bool relaunched, OpenWindo
     (void)ActivateExistingWindow();
     return Code(ExitCode::kOk);
   }
-  return openWindow ? openWindow(WindowStart{context, relaunched}) : Code(ExitCode::kOk);
+  if (!openWindow) return Code(ExitCode::kOk);
+  const WindowExit exit = openWindow(WindowStart{context, relaunched});
+  if (!exit.relaunch) return exit.code;
+  // Only now: the new window must find the mutex free.
+  instance.reset();
+  std::filesystem::path own;
+  HRESULT started = GetOwnExe(&own);
+  if (SUCCEEDED(started)) started = StartThroughShell(own, L"--relaunched", kRelaunchTimeoutMs);
+  Log(LogLevel::kInfo, L"window", L"window relaunch hr=" + HResultText(started));
+  if (FAILED(started)) {
+    const std::wstring message = WindowRelaunchFailedMessage();
+    out.Error(message);
+    MessageBoxW(nullptr, message.c_str(), kProductName, MB_OK | MB_ICONERROR);
+    return Code(ExitCode::kWrongContext);
+  }
+  return Code(ExitCode::kOk);
 }
 
 // ---- The check engine's commands --------------------------------------------------------------
@@ -1385,6 +1404,11 @@ std::wstring WindowElevatedRefusalMessage() {
   return std::wstring(L"Cannot run here: running as administrator. ") + kProductName +
          L" Settings shows and changes the signed-in user's own settings, which an administrator "
          L"process does not write. Open it normally (not as administrator).";
+}
+
+std::wstring WindowRelaunchFailedMessage() {
+  return std::wstring(L"Open ") + kProductName +
+         L" Settings from File Explorer or a normal terminal; it could not start again by itself.";
 }
 
 std::wstring WindowNamedObjectsRefusedMessage() {

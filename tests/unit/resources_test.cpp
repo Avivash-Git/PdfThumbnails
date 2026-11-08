@@ -64,6 +64,21 @@ TEST(Resources, SettingsCarriesThePreviewSamples) {
   FreeLibrary(module);
 }
 
+TEST(Resources, SettingsCarriesItsWindow) {
+  const std::wstring path = OwnFolder() + L"\\" + kSettingsExe;
+  HMODULE module = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_AS_DATAFILE);
+  if (!module && test::IsApplicationControlBlock(HRESULT_FROM_WIN32(GetLastError()))) {
+    GTEST_SKIP() << "Application Control blocked reading the settings executable";
+  }
+  ASSERT_NE(module, nullptr) << "error " << GetLastError();
+  EXPECT_NE(FindResourceW(module, MAKEINTRESOURCEW(IDD_SETTINGS), RT_DIALOG), nullptr);
+  EXPECT_NE(FindResourceW(module, MAKEINTRESOURCEW(IDI_APP), RT_GROUP_ICON), nullptr);
+  EXPECT_NE(FindResourceW(module, MAKEINTRESOURCEW(IDA_SETTINGS), RT_ACCELERATOR), nullptr);
+  EXPECT_FALSE(ResourceString(module, IDS_BANNER_OTHER_USER).empty());
+  EXPECT_NE(ResourceString(module, IDS_READING_STATE).find(L"\u2026"), std::wstring::npos);
+  FreeLibrary(module);
+}
+
 TEST(Resources, SettingsNoticeNamesTheCommandLineThroughAPlaceholder) {
   const std::wstring path = OwnFolder() + L"\\" + kSettingsExe;
   HMODULE module = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_AS_DATAFILE);
