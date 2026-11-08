@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include "child_process.h"
 #include "github_runner.h"
 #include "paths.h"
 #include "strings.h"
@@ -105,6 +106,17 @@ TEST(ShellWindows, NoViewShowsANewFolder) {
   ASSERT_EQ(ForEachViewShowing({}, false, kTimeoutMs, count, &found), S_OK);
   EXPECT_EQ(found, 0u);
   EXPECT_EQ(ForEachViewShowing(folders, false, kTimeoutMs, ViewAction(), &found), E_INVALIDARG);
+}
+
+// Starts a program of this build that ends at once, as a child of File Explorer.
+TEST(ShellWindows, StartsAProgramThroughTheShell) {
+  if (!test::OnGitHubHostedRunner()) {
+    GTEST_SKIP() << "starts a program through File Explorer: only on a runner GitHub hosts";
+  }
+  const path program = path(test::SelfFolder()) / L"pdft-run-medium.exe";
+  const HRESULT started = StartThroughShell(program, L"--exit 0", kTimeoutMs);
+  if (started == kNoShell) GTEST_SKIP() << "no desktop of File Explorer's can be reached here";
+  EXPECT_EQ(started, S_OK) << WideToUtf8Lossy(HResultText(started));
 }
 
 TEST(ShellWindows, OpensAFolderWindowThroughTheShell) {

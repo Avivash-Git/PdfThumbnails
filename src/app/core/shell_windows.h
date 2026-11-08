@@ -19,6 +19,7 @@
 #include <functional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace pdft {
@@ -41,6 +42,14 @@ struct FolderWindow {
 // desktop's folder view cannot be reached (nothing opened).
 [[nodiscard]] HRESULT OpenFolderWindows(std::span<const FolderWindow> windows, DWORD timeoutMs,
                                         size_t* opened, size_t* failed) noexcept;
+
+// Asks the running shell to start |program| (a full path) with |arguments|
+// (IShellDispatch2::ShellExecute on the desktop's folder view), so that it runs as a child of
+// explorer.exe: outside any app package above this process, and with File Explorer's token. Does
+// not wait for it. S_OK when the shell took the request; S_FALSE when it did not answer in time
+// (the program may still start); HRESULT_FROM_WIN32(ERROR_NOT_FOUND) when no shell can be reached.
+[[nodiscard]] HRESULT StartThroughShell(const std::filesystem::path& program,
+                                        std::wstring_view arguments, DWORD timeoutMs) noexcept;
 
 // Calls |action| for every view whose folder is one of |folders| (whole paths, ignoring case, as
 // SameImagePath compares them: pass them as Windows shows them, in Canonicalize's form, since a

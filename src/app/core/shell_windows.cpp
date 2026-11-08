@@ -13,6 +13,9 @@
 
 #include "processes.h"
 
+// shellapi.h's macro of this name would rename IShellDispatch2::ShellExecute below.
+#undef ShellExecute
+
 namespace pdft {
 namespace {
 
@@ -190,33 +193,65 @@ class ListJob final : public ShellJob {
   std::vector<FolderWindow> windows;
 };
 
+// The running shell's automation object, from the desktop view: it belongs to explorer.exe, and
+// so does what it opens or starts. kNoShell when no desktop can be reached. The shell may bring
+// what it opens to the front.
+HRESULT RunningShell(wil::com_ptr_nothrow<IShellDispatch2>* shell) noexcept {
+  wil::com_ptr_nothrow<IShellWindows> shellWindows;
+  RETURN_IF_FAILED(CreateShellWindows(std::addressof(shellWindows)));
+  wil::com_ptr_nothrow<IShellBrowser> browser;
+  wil::com_ptr_nothrow<IShellView> view;
+  const HRESULT reached =
+      DesktopView(shellWindows.get(), std::addressof(browser), std::addressof(view));
+  if (reached == kNoShell) return reached;
+  RETURN_IF_FAILED(reached);
+  wil::com_ptr_nothrow<IDispatch> background;
+  RETURN_IF_FAILED(view->GetItemObject(SVGIO_BACKGROUND, IID_PPV_ARGS(background.put())));
+  wil::com_ptr_nothrow<IShellFolderViewDual> folderView;
+  RETURN_IF_FAILED(background.query_to(folderView.put()));
+  wil::com_ptr_nothrow<IDispatch> application;
+  RETURN_IF_FAILED(folderView->get_Application(application.put()));
+  RETURN_HR_IF_NULL(E_NOINTERFACE, application);
+  RETURN_IF_FAILED(application.query_to(shell->put()));
+  DWORD shellPid = 0;
+  if (GetWindowThreadProcessId(GetShellWindow(), &shellPid) && shellPid) {
+    (void)AllowSetForegroundWindow(shellPid);
+  }
+  return S_OK;
+}
+
+class StartJob final : public ShellJob {
+ public:
+  HRESULT Run() noexcept override try {
+    wil::com_ptr_nothrow<IShellDispatch2> shell;
+    const HRESULT reached = RunningShell(std::addressof(shell));
+    if (reached == kNoShell) return reached;
+    RETURN_IF_FAILED(reached);
+    if (abandoned.load()) return S_OK;
+    wil::unique_bstr file(SysAllocString(program.c_str()));
+    RETURN_IF_NULL_ALLOC(file);
+    wil::unique_variant args = wil::make_variant_bstr_nothrow(arguments.c_str());
+    if (args.vt != VT_BSTR) return E_OUTOFMEMORY;
+    wil::unique_variant none;  // the shell's own folder, its default verb
+    wil::unique_variant show;
+    show.vt = VT_I4;
+    show.lVal = SW_SHOWNORMAL;
+    RETURN_IF_FAILED(shell->ShellExecute(file.get(), args, none, none, show));
+    return S_OK;
+  }
+  CATCH_RETURN();
+
+  std::wstring program;
+  std::wstring arguments;
+};
+
 class OpenJob final : public ShellJob {
  public:
   HRESULT Run() noexcept override try {
-    wil::com_ptr_nothrow<IShellWindows> shellWindows;
-    RETURN_IF_FAILED(CreateShellWindows(std::addressof(shellWindows)));
-    wil::com_ptr_nothrow<IShellBrowser> browser;
-    wil::com_ptr_nothrow<IShellView> view;
-    const HRESULT reached =
-        DesktopView(shellWindows.get(), std::addressof(browser), std::addressof(view));
+    wil::com_ptr_nothrow<IShellDispatch2> shell;
+    const HRESULT reached = RunningShell(std::addressof(shell));
     if (reached == kNoShell) return reached;
     RETURN_IF_FAILED(reached);
-    // The desktop view's automation object belongs to explorer.exe, and so does what it opens.
-    wil::com_ptr_nothrow<IDispatch> background;
-    RETURN_IF_FAILED(view->GetItemObject(SVGIO_BACKGROUND, IID_PPV_ARGS(background.put())));
-    wil::com_ptr_nothrow<IShellFolderViewDual> folderView;
-    RETURN_IF_FAILED(background.query_to(folderView.put()));
-    wil::com_ptr_nothrow<IDispatch> application;
-    RETURN_IF_FAILED(folderView->get_Application(application.put()));
-    RETURN_HR_IF_NULL(E_NOINTERFACE, application);
-    wil::com_ptr_nothrow<IShellDispatch2> shell;
-    RETURN_IF_FAILED(application.query_to(shell.put()));
-
-    // File Explorer opens the windows, so it may bring them to the front.
-    DWORD shellPid = 0;
-    if (GetWindowThreadProcessId(GetShellWindow(), &shellPid) && shellPid) {
-      (void)AllowSetForegroundWindow(shellPid);
-    }
     for (const FolderWindow& window : windows) {
       if (abandoned.load()) break;
       if (window.parsingName.empty()) continue;
@@ -311,6 +346,18 @@ HRESULT OpenFolderWindows(std::span<const FolderWindow> windows, DWORD timeoutMs
   RETURN_IF_FAILED(ran);
   *opened = job->opened.load();
   *failed = windows.size() - *opened;
+  return ran == S_FALSE ? S_FALSE : job->hr;
+}
+CATCH_RETURN();
+
+HRESULT StartThroughShell(const std::filesystem::path& program, std::wstring_view arguments,
+                          DWORD timeoutMs) noexcept try {
+  if (!GetShellWindow()) return kNoShell;
+  auto job = std::make_shared<StartJob>();
+  job->program = program.native();
+  job->arguments = arguments;
+  const HRESULT ran = RunShellJob(job, timeoutMs);
+  RETURN_IF_FAILED(ran);
   return ran == S_FALSE ? S_FALSE : job->hr;
 }
 CATCH_RETURN();
