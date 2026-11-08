@@ -583,10 +583,9 @@ TEST(ZoomTexts, OriginAndSaved) {
   EXPECT_EQ(ZoomText(decision), L"Zoom: 100 % (default)");
   const std::wstring saved = ZoomSavedText(150);
   EXPECT_EQ(saved.rfind(L"Zoom set to 150 %.", 0), 0u) << saved;
-  // The full rebuild, with what it costs, and the refresh of the PDF thumbnails in a folder
-  // and its subfolders.
-  EXPECT_NE(saved.find(L"run --refresh --full (restarts File Explorer), or --refresh --folder "
-                       L"<folder> for the PDF thumbnails in a folder and its subfolders."),
+  // The full rebuild, with what it costs, and the refresh of the PDF thumbnails only.
+  EXPECT_NE(saved.find(L"run --refresh --full (restarts File Explorer), or --refresh for PDF "
+                       L"thumbnails only (folder windows open now may keep the old ones)."),
             std::wstring::npos)
       << WideToUtf8Lossy(saved);
 }

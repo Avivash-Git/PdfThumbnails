@@ -750,6 +750,21 @@ TEST_P(Exes, RefreshFolderIsRefusedElevated) {
   EXPECT_EQ(run.out, "");
 }
 
+// Elevated, --refresh without a folder stops at the same refusal, before it looks anywhere.
+TEST_P(Exes, RefreshDefaultPlacesAreRefusedElevated) {
+  ProcessContext context;
+  ASSERT_HRESULT_SUCCEEDED(GetProcessContext(ContextProbe::kWrite, &context));
+  if (const std::optional<std::string> why = WhyAnElevatedRefreshMayNotRunHere(context)) {
+    GTEST_SKIP() << *why;
+  }
+  test::CapturedRun run;
+  RUN_OR_SKIP(L"--refresh", run);
+  std::printf("%ls --refresh (elevated) -> exit %lu: %s", GetParam(), run.exitCode,
+              run.err.c_str());
+  EXPECT_EQ(run.exitCode, 8u);
+  EXPECT_EQ(run.out, "");
+}
+
 // --refresh --full restarts File Explorer: without --yes and without a console to ask on it is a
 // usage error before anything is read, and so are --folder with --full and --yes without --full.
 // Started only where the command would be refused anyway (WhyARefreshMayNotRunHere).

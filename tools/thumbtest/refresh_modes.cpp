@@ -44,6 +44,10 @@
 //   thumbtest opendialog <folder>
 //       Shows the File Open dialog at <folder> in this process, another process than File
 //       Explorer with thumbnails of its own, until it is closed.
+//   thumbtest discover --index [--under <folder>] [--cap <n>] | --defaults
+//       Read-only, counts only: how many PDFs Windows Search knows (under <folder>, and whether
+//       that folder is in its crawl scope), or what a --refresh without folders would look at,
+//       per source.
 //   thumbtest experiment ...
 //       The one-sitting refresh experiment, which uses the modes' parts (experiment.cpp).
 //
@@ -99,6 +103,7 @@
 #include "refresh.h"
 #include "refresh_judge.h"
 #include "registry_roots.h"
+#include "search_index.h"
 #include "shell_windows.h"
 #include "startup.h"
 #include "thumbtest.h"
@@ -1172,11 +1177,68 @@ int RunOpenDialog(const std::vector<std::wstring>& args) {
   return 0;
 }
 
+// ---- discover --------------------------------------------------------------------------------
+
+int RunDiscover(const std::vector<std::wstring>& args) {
+  bool index = false;
+  bool defaults = false;
+  std::optional<std::filesystem::path> under;
+  size_t cap = 20000;
+  for (size_t i = 0; i < args.size(); ++i) {
+    if (args[i] == L"--index") {
+      index = true;
+    } else if (args[i] == L"--defaults") {
+      defaults = true;
+    } else if (args[i] == L"--under" && i + 1 < args.size()) {
+      std::error_code error;
+      under = std::filesystem::absolute(args[++i], error);
+      if (error) return BadUsage();
+    } else if (args[i] == L"--cap" && i + 1 < args.size()) {
+      const std::wstring& text = args[++i];
+      if (text.empty() || text.find_first_not_of(L"0123456789") != std::wstring::npos ||
+          text.size() > 9) {
+        return BadUsage();
+      }
+      cap = static_cast<size_t>(_wtoi(text.c_str()));
+    } else {
+      return BadUsage();
+    }
+  }
+  if (index == defaults || (under && !index)) return BadUsage();
+  if (index) {
+    std::vector<std::filesystem::path> files;
+    bool available = false;
+    const HRESULT hr =
+        pdft::QueryIndexedPdfs(cap, under ? &*under : nullptr, {}, &files, &available);
+    std::printf("index: 0x%08lX, available: %s, PDF files: %zu\n", static_cast<unsigned long>(hr),
+                available ? "yes" : "no", files.size());
+    if (under) {
+      bool included = false;
+      const HRESULT scope = pdft::IsInIndexScope(*under, &included);
+      std::printf("in the index's scope: 0x%08lX, %s\n", static_cast<unsigned long>(scope),
+                  included ? "yes" : "no");
+    }
+    return FAILED(hr) ? 1 : 0;
+  }
+  std::vector<std::filesystem::path> files;
+  pdft::RefreshCounts counts;
+  const HRESULT hr =
+      pdft::FindDefaultPdfs(pdft::RealRefreshSources(), pdft::WalkLimits{}, {}, &files, &counts);
+  std::printf(
+      "defaults: 0x%08lX, PDF files: %zu; open windows %zu, desktops %zu, index %zu, walk %zu; "
+      "index used: %s, walk used: %s, capped: %s\n",
+      static_cast<unsigned long>(hr), files.size(), counts.fromWindows, counts.fromDesktops,
+      counts.fromIndex, counts.fromWalk, counts.indexUsed ? "yes" : "no",
+      counts.walkUsed ? "yes" : "no", counts.capped ? "yes" : "no");
+  return FAILED(hr) ? 1 : 0;
+}
+
 }  // namespace
 
 bool IsRefreshMode(const std::wstring& mode) {
   return mode == L"incache" || mode == L"refresh" || mode == L"judge" || mode == L"cachefiles" ||
-         mode == L"shellinfo" || mode == L"opendialog" || mode == L"experiment";
+         mode == L"shellinfo" || mode == L"opendialog" || mode == L"experiment" ||
+         mode == L"discover";
 }
 
 int RunRefreshMode(int argc, wchar_t** argv) {
@@ -1208,6 +1270,8 @@ int RunRefreshMode(int argc, wchar_t** argv) {
     result = RunOpenDialog(args);
   } else if (mode == L"experiment") {
     result = RunExperiment(args);
+  } else if (mode == L"discover") {
+    result = RunDiscover(args);
   }
   CoUninitialize();
   return result;
@@ -1225,7 +1289,8 @@ void PrintRefreshUsage() {
       "                  [--control <label>]...\n"
       "  thumbtest cachefiles [--record <tsv>] [--diff <tsv>]\n"
       "  thumbtest shellinfo [--windows] [--holders [--after-explorer-test]]\n"
-      "  thumbtest opendialog <folder>\n");
+      "  thumbtest opendialog <folder>\n"
+      "  thumbtest discover --index [--under <folder>] [--cap <n>] | --defaults\n");
   PrintExperimentUsage();
   std::printf(
       "The refresh modes use the signed-in user's own thumbnail cache and File Explorer (judge\n"

@@ -199,9 +199,8 @@ std::vector<std::wstring> UninstallCleanupErrors(HRESULT hr, const UninstallClea
 std::wstring ZoomText(const ZoomDecision& decision);
 
 // What --zoom <n> prints once it saved the zoom (pure): the thumbnails File Explorer already made
-// keep the old zoom until --refresh --full rebuilds them, or --refresh --folder refreshes the PDF
-// thumbnails in a folder and its subfolders. Names no command this build lacks. May throw
-// std::bad_alloc.
+// keep the old zoom until --refresh --full rebuilds them, or --refresh refreshes the PDF
+// thumbnails. May throw std::bad_alloc.
 std::wstring ZoomSavedText(int zoom);
 
 // --uninstall removes the product for all users, so it must be confirmed (pure): it needs --yes

@@ -65,6 +65,7 @@ add_library(pdft_appcore STATIC
   core/processes.cpp core/processes.h
   core/rebuild.cpp core/rebuild.h
   core/refresh.cpp core/refresh.h
+  core/search_index.cpp core/search_index.h
   core/registration.cpp core/registration.h
   core/registry_roots.cpp core/registry_roots.h
   core/repair.cpp core/repair.h

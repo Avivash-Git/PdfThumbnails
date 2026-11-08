@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cwctype>
 #include <map>
 #include <set>
 #include <string>
@@ -25,6 +26,7 @@
 #include "project_config.h"
 #include "registration.h"
 #include "registry_roots.h"
+#include "search_index.h"
 #include "settings.h"
 #include "shell_windows.h"
 #include "strings.h"
@@ -167,10 +169,10 @@ void ResetRefreshing(RefreshCounts* counts) noexcept {
   counts->notifyMs = 0;
 }
 
-// A folder and a size to refresh, and flags AreSafeRefreshFlags allows.
-bool AreUsableOptions(const PdfRefreshOptions& options) noexcept {
+// Somewhere to look, a size to refresh, and flags AreSafeRefreshFlags allows.
+bool AreUsableOptions(const PdfRefreshOptions& options, bool hasSources) noexcept {
   const RefreshFilesOptions& files = options.files;
-  return !options.folders.empty() && !files.sizes.empty() &&
+  return (!options.folders.empty() || hasSources) && !files.sizes.empty() &&
          AreSafeRefreshFlags(files.probeFlags, files.extractFlags, files.storeFlags.value_or(0));
 }
 
@@ -193,9 +195,9 @@ void LogStart(const PdfRefreshOptions& options) noexcept try {
   Settings settings;
   const bool read = SUCCEEDED(LoadSettings(RegistryRoots{}, &settings));
   Log(LogLevel::kInfo, kLogComponent,
-      L"refresh start source=folders zoom=" +
-          (read ? std::to_wstring(settings.zoom) : std::wstring(L"unknown")) + L" notify=" +
-          Count(options.files.notify));
+      std::wstring(L"refresh start source=") + (options.folders.empty() ? L"default" : L"folders") +
+          L" zoom=" + (read ? std::to_wstring(settings.zoom) : std::wstring(L"unknown")) +
+          L" notify=" + Count(options.files.notify));
 } catch (...) {
   // Logging is best effort.
 }
@@ -885,10 +887,171 @@ HRESULT FindPdfsInFolders(std::span<const std::filesystem::path> folders, const 
 }
 CATCH_RETURN();
 
+namespace {
+
+// How long the shell is given to list its folder windows.
+constexpr DWORD kWindowListWaitMs = 5000;
+
+// A path on a drive: "C:\..." (never a UNC, device or shell namespace name).
+bool IsDrivePath(const std::filesystem::path& path) noexcept {
+  const std::wstring& text = path.native();
+  return text.size() >= 3 &&
+         ((text[0] >= L'A' && text[0] <= L'Z') || (text[0] >= L'a' && text[0] <= L'z')) &&
+         text[1] == L':' && (text[2] == L'\\' || text[2] == L'/');
+}
+
+bool IsLocalDriveType(UINT driveType) noexcept {
+  return driveType != DRIVE_REMOTE && driveType != DRIVE_NO_ROOT_DIR && driveType != DRIVE_UNKNOWN;
+}
+
+void AppendKnownFolder(REFKNOWNFOLDERID id, std::vector<std::filesystem::path>* folders) {
+  wil::unique_cotaskmem_string path;
+  if (SUCCEEDED(SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY, nullptr, &path))) {
+    folders->emplace_back(path.get());
+  }
+}
+
+class RealRefreshSourcesImpl final : public RefreshSources {
+ public:
+  HRESULT OpenFolders(std::vector<std::filesystem::path>* folders) noexcept override try {
+    folders->clear();
+    std::vector<FolderWindow> windows;
+    // No shell, or none that answers: no windows to look at.
+    if (ListFolderWindows(kWindowListWaitMs, &windows) != S_OK) return S_OK;
+    for (const FolderWindow& window : windows) {
+      if (!window.parsingName.empty()) folders->emplace_back(window.parsingName);
+    }
+    return S_OK;
+  }
+  CATCH_RETURN();
+  HRESULT Desktops(std::vector<std::filesystem::path>* folders) noexcept override try {
+    folders->clear();
+    AppendKnownFolder(FOLDERID_Desktop, folders);
+    AppendKnownFolder(FOLDERID_PublicDesktop, folders);
+    return S_OK;
+  }
+  CATCH_RETURN();
+  HRESULT Indexed(size_t cap, std::stop_token stop, std::vector<std::filesystem::path>* files,
+                  bool* available) noexcept override {
+    return QueryIndexedPdfs(cap, nullptr, stop, files, available);
+  }
+  HRESULT WalkFolders(std::vector<std::filesystem::path>* folders) noexcept override try {
+    folders->clear();
+    AppendKnownFolder(FOLDERID_Desktop, folders);
+    AppendKnownFolder(FOLDERID_Documents, folders);
+    AppendKnownFolder(FOLDERID_Downloads, folders);
+    return S_OK;
+  }
+  CATCH_RETURN();
+};
+
+}  // namespace
+
+RefreshSources& RealRefreshSources() noexcept {
+  static RealRefreshSourcesImpl sources;
+  return sources;
+}
+
+HRESULT FindDefaultPdfs(RefreshSources& sources, const WalkLimits& limits, std::stop_token stop,
+                        std::vector<std::filesystem::path>* files, RefreshCounts* counts) noexcept
+    try {
+  files->clear();
+  if (stop.stop_requested()) return kCancelled;
+  std::set<std::wstring, IgnoreCaseLess> seen;
+  const auto add = [&](std::vector<std::filesystem::path>* found, size_t* from) {
+    for (std::filesystem::path& file : *found) {
+      if (files->size() >= limits.maxFiles) {
+        counts->capped = true;
+        return;
+      }
+      if (seen.insert(file.native()).second) {
+        files->push_back(std::move(file));
+        ++*from;
+      }
+    }
+  };
+  // The PDFs in |folders| on a local drive, within |walk|, go to |from| instead of fromWalk.
+  const auto look = [&](const std::vector<std::filesystem::path>& folders, const WalkLimits& walk,
+                        size_t* from) -> HRESULT {
+    std::vector<std::filesystem::path> local;
+    for (const std::filesystem::path& folder : folders) {
+      if (IsDrivePath(folder) && IsLocalDriveType(DriveTypeOf(folder))) local.push_back(folder);
+    }
+    if (local.empty()) return S_OK;
+    std::vector<std::filesystem::path> found;
+    const size_t fromWalk = counts->fromWalk;
+    const bool walkUsed = counts->walkUsed;
+    const HRESULT hr = FindPdfsInFolders(local, walk, stop, &found, counts);
+    counts->fromWalk = fromWalk;
+    counts->walkUsed = walkUsed;
+    add(&found, from);
+    return hr;
+  };
+
+  WalkLimits flat = limits;
+  flat.maxDepth = 0;
+  std::vector<std::filesystem::path> folders;
+  if (FAILED(sources.OpenFolders(&folders))) folders.clear();
+  RETURN_IF_FAILED_EXPECTED(look(folders, flat, &counts->fromWindows));
+  if (FAILED(sources.Desktops(&folders))) folders.clear();
+  RETURN_IF_FAILED_EXPECTED(look(folders, flat, &counts->fromDesktops));
+
+  std::vector<std::filesystem::path> indexed;
+  bool available = false;
+  const HRESULT queried = sources.Indexed(limits.maxFiles, stop, &indexed, &available);
+  if (queried == kCancelled) return kCancelled;
+  if (FAILED(queried)) available = false;
+  counts->indexUsed = available;
+  if (available) {
+    if (indexed.size() >= limits.maxFiles) counts->capped = true;
+    std::array<UINT, 26> driveTypes{};  // 0 is DRIVE_UNKNOWN: not asked yet, or unknown
+    std::vector<std::filesystem::path> usable;
+    usable.reserve(indexed.size());
+    for (std::filesystem::path& file : indexed) {
+      if (stop.stop_requested()) return kCancelled;
+      UINT driveType = DRIVE_REMOTE;
+      if (IsDrivePath(file)) {
+        const size_t letter = static_cast<size_t>(towupper(file.native()[0]) - L'A');
+        if (driveTypes[letter] == 0) {
+          const wchar_t root[] = {file.native()[0], L':', L'\\', L'\0'};
+          driveTypes[letter] = GetDriveTypeW(root);
+        }
+        driveType = driveTypes[letter];
+      } else if (!StartsWithTwoSeparators(file.native())) {
+        continue;  // no file-system path at all
+      }
+      // Nothing on another computer is touched.
+      WIN32_FILE_ATTRIBUTE_DATA data = {};
+      if (IsLocalDriveType(driveType)) {
+        if (!GetFileAttributesExW(file.c_str(), GetFileExInfoStandard, &data)) continue;  // gone
+        if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+      }
+      const ULONGLONG size = (static_cast<ULONGLONG>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+      const CandidateSkip skip =
+          ClassifyCandidate(file.native(), data.dwFileAttributes, size, driveType);
+      if (skip != CandidateSkip::kNone) {
+        ++counts->skipped[static_cast<size_t>(skip) - 1];
+      } else {
+        usable.push_back(std::move(file));
+      }
+    }
+    add(&usable, &counts->fromIndex);
+  } else if (files->size() < limits.maxFiles) {
+    if (FAILED(sources.WalkFolders(&folders))) folders.clear();
+    WalkLimits walk = limits;
+    walk.maxFiles = std::min(kFallbackWalkFiles, limits.maxFiles - files->size());
+    walk.maxMs = limits.maxMs == 0 ? kFallbackWalkMs : std::min(limits.maxMs, kFallbackWalkMs);
+    counts->walkUsed = true;
+    RETURN_IF_FAILED_EXPECTED(look(folders, walk, &counts->fromWalk));
+  }
+  return S_OK;
+}
+CATCH_RETURN();
+
 HRESULT RefreshPdfThumbnails(const PdfRefreshOptions& options, const RefreshProgressFn& progress,
                              std::stop_token stop, RefreshCounts* counts) noexcept {
   *counts = {};
-  RETURN_HR_IF(E_INVALIDARG, !AreUsableOptions(options));
+  RETURN_HR_IF(E_INVALIDARG, !AreUsableOptions(options, true));
   const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
   if (FAILED(init)) {
     LogFailure(init);
@@ -901,14 +1064,16 @@ HRESULT RefreshPdfThumbnails(const PdfRefreshOptions& options, const RefreshProg
     LogFailure(hr);
     return hr;
   }
-  return RefreshPdfThumbnails(options, *cache, RealShellNotifier(), progress, stop, counts);
+  return RefreshPdfThumbnails(options, *cache, RealShellNotifier(), progress, stop, counts,
+                              &RealRefreshSources());
 }
 
 HRESULT RefreshPdfThumbnails(const PdfRefreshOptions& options, ThumbnailCacheOps& cache,
                              ShellNotifier& notifier, const RefreshProgressFn& progress,
-                             std::stop_token stop, RefreshCounts* counts) noexcept try {
+                             std::stop_token stop, RefreshCounts* counts,
+                             RefreshSources* sources) noexcept try {
   *counts = {};
-  RETURN_HR_IF(E_INVALIDARG, !AreUsableOptions(options));
+  RETURN_HR_IF(E_INVALIDARG, !AreUsableOptions(options, sources != nullptr));
   const auto now = [&options]() { return Now(options.files.clock); };
   const ULONGLONG start = now();
   LogStart(options);
@@ -921,7 +1086,9 @@ HRESULT RefreshPdfThumbnails(const PdfRefreshOptions& options, ThumbnailCacheOps
     }
   }
   std::vector<std::filesystem::path> files;
-  HRESULT hr = FindPdfsInFolders(options.folders, options.limits, stop, &files, counts);
+  HRESULT hr = options.folders.empty()
+                   ? FindDefaultPdfs(*sources, options.limits, stop, &files, counts)
+                   : FindPdfsInFolders(options.folders, options.limits, stop, &files, counts);
   if (hr == S_OK) files = GroupByFolder(std::move(files));
   counts->findMs = Elapsed(start, now());
   if (hr == S_OK) {

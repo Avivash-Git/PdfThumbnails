@@ -39,9 +39,10 @@ constexpr VerbInfo kVerbs[] = {
     {Verb::kChecks, L"--checks", kRequired, L"<list>", Writes::kYes, false, false, false, false,
      L"Choose when the scheduled checks run: after {pdfcraft} updates, at sign-in, both or never."},
     {Verb::kRefresh, L"--refresh", kNone, L"", Writes::kYes, false, false, false, false,
-     L"Refresh the PDF thumbnails File Explorer already made in --folder folders and their "
-     L"subfolders. --full rebuilds the whole thumbnail cache instead, which restarts File "
-     L"Explorer (asks first, or --yes)."},
+     L"Refresh the PDF thumbnails File Explorer already made: in --folder folders and their "
+     L"subfolders, or in open folder windows, on the desktop and in the PDFs Windows Search "
+     L"knows. --full rebuilds the whole thumbnail cache instead, which restarts File Explorer "
+     L"(asks first, or --yes)."},
     {Verb::kInstall, L"--install", kNone, L"", Writes::kYes, false, false, true, false,
      L"Install {product} from this folder (developer builds)."},
     {Verb::kUninstall, L"--uninstall", kNone, L"", Writes::kYes, false, false, false, false,

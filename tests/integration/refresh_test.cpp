@@ -73,6 +73,134 @@ size_t Skipped(const RefreshCounts& counts, CandidateSkip skip) {
   return counts.skipped[static_cast<size_t>(skip) - 1];
 }
 
+// Where a refresh without folders looks, set by each test.
+class FakeSources final : public RefreshSources {
+ public:
+  std::vector<path> windows;
+  std::vector<path> desktops;
+  std::vector<path> indexed;
+  std::vector<path> walked;
+  bool available = true;
+  HRESULT indexHr = S_OK;
+  size_t askedCap = 0;
+
+  HRESULT OpenFolders(std::vector<path>* folders) noexcept override try {
+    *folders = windows;
+    return S_OK;
+  }
+  CATCH_RETURN();
+  HRESULT Desktops(std::vector<path>* folders) noexcept override try {
+    *folders = desktops;
+    return S_OK;
+  }
+  CATCH_RETURN();
+  HRESULT Indexed(size_t cap, std::stop_token, std::vector<path>* files,
+                  bool* isAvailable) noexcept override try {
+    askedCap = cap;
+    *isAvailable = available;
+    *files = indexed;
+    return indexHr;
+  }
+  CATCH_RETURN();
+  HRESULT WalkFolders(std::vector<path>* folders) noexcept override try {
+    *folders = walked;
+    return S_OK;
+  }
+  CATCH_RETURN();
+};
+
+// Open windows and desktops are looked in without their subfolders, the index adds what they did
+// not find, a file is found once whatever its case, and what the index names is checked first.
+TEST(RefreshDefaults, WindowsDesktopsThenTheIndex) {
+  test::TempDir dir(L"refresh-defaults");
+  ASSERT_TRUE(dir.ok());
+  const path root = dir.path();
+  ASSERT_TRUE(MakeDir(root / L"w"));
+  ASSERT_TRUE(MakeDir(root / L"w" / L"sub"));
+  ASSERT_TRUE(MakeDir(root / L"d"));
+  ASSERT_TRUE(MakeDir(root / L"i"));
+  ASSERT_TRUE(WriteFileText(root / L"w" / L"a.pdf"));
+  ASSERT_TRUE(WriteFileText(root / L"w" / L"sub" / L"deep.pdf"));
+  ASSERT_TRUE(WriteFileText(root / L"d" / L"b.pdf"));
+  ASSERT_TRUE(WriteFileText(root / L"i" / L"c.pdf"));
+  ASSERT_TRUE(WriteFileText(root / L"i" / L"notes.txt"));
+
+  FakeSources sources;
+  sources.windows = {root / L"w", path(L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"),
+                     path(L"\\\\pdft-no-such-server\\share")};
+  sources.desktops = {root / L"d"};
+  sources.indexed = {root / L"W" / L"A.PDF",
+                     root / L"i" / L"c.pdf",
+                     root / L"i" / L"gone.pdf",
+                     root / L"i" / L"notes.txt",
+                     path(L"\\\\pdft-no-such-server\\share\\x.pdf"),
+                     path(L"not-a-path.pdf")};
+  std::vector<path> files;
+  RefreshCounts counts;
+  ASSERT_HRESULT_SUCCEEDED(FindDefaultPdfs(sources, WalkLimits{}, {}, &files, &counts));
+  EXPECT_EQ(Relative(files, root),
+            (std::vector<std::wstring>{L"w\\a.pdf", L"d\\b.pdf", L"i\\c.pdf"}));
+  EXPECT_EQ(counts.fromWindows, 1u);
+  EXPECT_EQ(counts.fromDesktops, 1u);
+  EXPECT_EQ(counts.fromIndex, 1u);
+  EXPECT_EQ(counts.fromWalk, 0u);
+  EXPECT_TRUE(counts.indexUsed);
+  EXPECT_FALSE(counts.walkUsed);
+  EXPECT_FALSE(counts.capped);
+  EXPECT_EQ(Skipped(counts, CandidateSkip::kNetwork), 1u);
+  EXPECT_EQ(sources.askedCap, WalkLimits{}.maxFiles);
+}
+
+// Where Windows Search cannot be asked, the fallback folders are walked, with their subfolders.
+TEST(RefreshDefaults, WithoutTheIndexItWalks) {
+  test::TempDir dir(L"refresh-defaults");
+  ASSERT_TRUE(dir.ok());
+  const path root = dir.path();
+  ASSERT_TRUE(MakeDir(root / L"sub"));
+  ASSERT_TRUE(WriteFileText(root / L"a.pdf"));
+  ASSERT_TRUE(WriteFileText(root / L"sub" / L"b.pdf"));
+
+  for (const HRESULT indexHr : {S_OK, E_FAIL}) {
+    FakeSources sources;
+    sources.available = false;
+    sources.indexHr = indexHr;
+    sources.indexed = {root / L"not-used.pdf"};
+    sources.walked = {root};
+    std::vector<path> files;
+    RefreshCounts counts;
+    ASSERT_HRESULT_SUCCEEDED(FindDefaultPdfs(sources, WalkLimits{}, {}, &files, &counts));
+    EXPECT_EQ(Sorted(Relative(files, root)), (std::vector<std::wstring>{L"a.pdf", L"sub\\b.pdf"}));
+    EXPECT_EQ(counts.fromWalk, 2u);
+    EXPECT_EQ(counts.fromIndex, 0u);
+    EXPECT_FALSE(counts.indexUsed);
+    EXPECT_TRUE(counts.walkUsed);
+  }
+}
+
+TEST(RefreshDefaults, TheFileLimitAndTheStop) {
+  test::TempDir dir(L"refresh-defaults");
+  ASSERT_TRUE(dir.ok());
+  const path root = dir.path();
+  for (const wchar_t* name : {L"a.pdf", L"b.pdf", L"c.pdf"}) {
+    ASSERT_TRUE(WriteFileText(root / name));
+  }
+  FakeSources sources;
+  sources.indexed = {root / L"a.pdf", root / L"b.pdf", root / L"c.pdf"};
+  WalkLimits limits;
+  limits.maxFiles = 2;
+  std::vector<path> files;
+  RefreshCounts counts;
+  ASSERT_HRESULT_SUCCEEDED(FindDefaultPdfs(sources, limits, {}, &files, &counts));
+  EXPECT_EQ(files.size(), 2u);
+  EXPECT_TRUE(counts.capped);
+
+  std::stop_source source;
+  source.request_stop();
+  RefreshCounts stopped;
+  EXPECT_EQ(FindDefaultPdfs(sources, WalkLimits{}, source.get_token(), &files, &stopped),
+            HRESULT_FROM_WIN32(ERROR_CANCELLED));
+}
+
 // ---- FindPdfsInFolders ----
 
 TEST(RefreshWalk, FindsTheNestedPdfsOnly) {
@@ -495,8 +623,12 @@ TEST(RefreshFake, BadOptionsMakeNoCall) {
   FakeNotifier notifier;
   RefreshCounts counts;
 
-  PdfRefreshOptions none;  // no folder
+  PdfRefreshOptions none;  // no folder, no sources
   EXPECT_EQ(RefreshPdfThumbnails(none, cache, notifier, {}, {}, &counts), E_INVALIDARG);
+  FakeSources emptySources;
+  EXPECT_EQ(RefreshPdfThumbnails(none, cache, notifier, {}, {}, &counts, &emptySources), S_OK);
+  EXPECT_TRUE(cache.selected.empty());
+  EXPECT_EQ(counts.files, 0u);
   PdfRefreshOptions inProcess;
   inProcess.folders = {root};
   inProcess.files.extractFlags |= WTS_EXTRACTINPROC;

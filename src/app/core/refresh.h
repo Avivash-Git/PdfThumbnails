@@ -300,30 +300,71 @@ struct WalkLimits {
                                         std::vector<std::filesystem::path>* files,
                                         RefreshCounts* counts) noexcept;
 
+// Where a refresh without folders looks: the real one (RealRefreshSources) and the tests' fake.
+class RefreshSources {
+ public:
+  virtual ~RefreshSources() = default;
+  // The folders shown in open File Explorer windows, as the shell names them; none when it does
+  // not answer.
+  [[nodiscard]] virtual HRESULT OpenFolders(
+      std::vector<std::filesystem::path>* folders) noexcept = 0;
+  // The user's and the public desktop.
+  [[nodiscard]] virtual HRESULT Desktops(std::vector<std::filesystem::path>* folders) noexcept = 0;
+  // QueryIndexedPdfs: at most |cap| files; *available false when Windows Search cannot be asked.
+  [[nodiscard]] virtual HRESULT Indexed(size_t cap, std::stop_token stop,
+                                        std::vector<std::filesystem::path>* files,
+                                        bool* available) noexcept = 0;
+  // The folders walked where Windows Search cannot be asked: Desktop, Documents, Downloads.
+  [[nodiscard]] virtual HRESULT WalkFolders(
+      std::vector<std::filesystem::path>* folders) noexcept = 0;
+};
+
+RefreshSources& RealRefreshSources() noexcept;
+
+// The limits of the walk where Windows Search cannot be asked.
+inline constexpr size_t kFallbackWalkFiles = 5000;
+inline constexpr DWORD kFallbackWalkMs = 30000;
+
+// The PDFs a refresh without folders covers, each once (ignoring case), at most |limits|.maxFiles:
+// those directly in open folder windows, then directly on the desktops, then the ones Windows
+// Search knows; only where it cannot be asked, those in and below |sources|.WalkFolders, within
+// kFallbackWalkFiles and kFallbackWalkMs. Only folders on a local drive are looked in. A file from
+// the index is taken only with a path on a local drive and what ClassifyCandidate says (its
+// metadata is read, the file is not opened; a file that is gone is left out). Fills the finding
+// fields of *counts. S_OK; HRESULT_FROM_WIN32(ERROR_CANCELLED) when stopped (the files so far).
+[[nodiscard]] HRESULT FindDefaultPdfs(RefreshSources& sources, const WalkLimits& limits,
+                                      std::stop_token stop,
+                                      std::vector<std::filesystem::path>* files,
+                                      RefreshCounts* counts) noexcept;
+
 struct PdfRefreshOptions {
-  // The folders to refresh, with their subfolders (ValidateRefreshFolder's form); at least one.
+  // The folders to refresh, with their subfolders (ValidateRefreshFolder's form); none: the default
+  // places (FindDefaultPdfs).
   std::vector<std::filesystem::path> folders;
   RefreshFilesOptions files;
   WalkLimits limits;
 };
 
-// Refreshes the PDF thumbnails in |options|.folders: FindPdfsInFolders, GroupByFolder, then
-// RefreshFiles with the real thumbnail cache and RealShellNotifier. Runs on the calling thread,
+// Refreshes the PDF thumbnails in |options|.folders (FindPdfsInFolders) or, with none, in the
+// default places (FindDefaultPdfs): then GroupByFolder and RefreshFiles with the real thumbnail
+// cache and RealShellNotifier. Runs on the calling thread,
 // in a single-threaded apartment (it initialises COM itself and undoes that), and the caller
 // holds the operation lock. S_OK with *counts; HRESULT_FROM_WIN32(ERROR_CANCELLED) when stopped
 // and HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) when the cache refused every size (RefreshFiles;
-// the counts so far); otherwise a failure only when it could not start (E_INVALIDARG: no folder,
-// no size, or flags AreSafeRefreshFlags refuses). Logs its start and end (component "refresh";
+// the counts so far); otherwise a failure only when it could not start (E_INVALIDARG: no size, or
+// flags AreSafeRefreshFlags refuses). Logs its start and end (component "refresh";
 // counts only).
 [[nodiscard]] HRESULT RefreshPdfThumbnails(const PdfRefreshOptions& options,
                                            const RefreshProgressFn& progress, std::stop_token stop,
                                            RefreshCounts* counts) noexcept;
 
-// The same with |cache| and |notifier| (tests: fakes); COM is the caller's.
+// The same with |cache|, |notifier| and |sources| (tests: fakes); COM is the caller's. Without
+// folders and without |sources|: E_INVALIDARG.
 [[nodiscard]] HRESULT RefreshPdfThumbnails(const PdfRefreshOptions& options,
                                            ThumbnailCacheOps& cache, ShellNotifier& notifier,
                                            const RefreshProgressFn& progress, std::stop_token stop,
-                                           RefreshCounts* counts) noexcept;
+                                           RefreshCounts* counts,
+                                           RefreshSources* sources = nullptr) noexcept;
 
 // What is wrong with a --folder.
 enum class FolderProblem {

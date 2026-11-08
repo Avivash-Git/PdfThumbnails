@@ -337,6 +337,7 @@ if(TARGET pdft_appcore)
     integration/rebuild_test.cpp
     integration/refresh_test.cpp
     integration/registration_test.cpp
+    integration/search_index_test.cpp
     integration/settings_test.cpp
     integration/setup_test.cpp
     integration/shell_windows_test.cpp

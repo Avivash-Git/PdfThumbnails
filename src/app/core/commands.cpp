@@ -965,9 +965,10 @@ int RunRefreshFullCommand(const CliArgs& args, const ProcessContext& context, Ou
   return Code(RebuildExitCode(result));
 }
 
-// --refresh --folder: the refusals first (ReadRefreshConditions), then each folder checked, the
-// operation lock, the refusals again, and the refresh of the PDF thumbnails in those folders
-// (refresh.h), with a progress line at most every kRefreshProgressEveryMs.
+// --refresh, with or without --folder: the refusals first (ReadRefreshConditions), then each folder
+// checked, the operation lock, the refusals again, and the refresh of the PDF thumbnails in those
+// folders or, with none, in the default places (refresh.h), with a progress line at most every
+// kRefreshProgressEveryMs.
 int RunRefreshFoldersCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
   // From here Ctrl+C only asks to stop: before the refresh starts it ends the command, nothing
   // changed; during the refresh, the request under way finishes first.
@@ -1066,7 +1067,8 @@ int RunRefreshFoldersCommand(const CliArgs& args, const ProcessContext& context,
     return Code(code);
   }
   for (const std::wstring& line :
-       RefreshReport(hr, counts, options.limits.maxFiles, kPdfRefreshDefault)) {
+       RefreshReport(hr, counts, options.folders.empty() ? counts.files : options.limits.maxFiles,
+                     kPdfRefreshDefault)) {
     out.Line(line);
   }
   return Code(code);
@@ -1074,11 +1076,7 @@ int RunRefreshFoldersCommand(const CliArgs& args, const ProcessContext& context,
 
 int RunRefreshCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
   if (args.full) return RunRefreshFullCommand(args, context, out);
-  if (!args.folders.empty()) return RunRefreshFoldersCommand(args, context, out);
-  out.Error(
-      L"--refresh without --folder or --full is not available in this build yet; use --refresh "
-      L"--folder <folder>, or --refresh --full.");
-  return Code(ExitCode::kFailed);
+  return RunRefreshFoldersCommand(args, context, out);
 }
 
 HRESULT CopyToClipboard(std::wstring_view text) noexcept {
@@ -1543,8 +1541,8 @@ std::wstring ZoomText(const ZoomDecision& decision) {
 std::wstring ZoomSavedText(int zoom) {
   return L"Zoom set to " + std::to_wstring(ClampZoom(zoom)) +
          L" %. Thumbnails made from now on use it. To redo the ones File Explorer already made, "
-         L"run --refresh --full (restarts File Explorer), or --refresh --folder <folder> for the "
-         L"PDF thumbnails in a folder and its subfolders.";
+         L"run --refresh --full (restarts File Explorer), or --refresh for PDF thumbnails only "
+         L"(folder windows open now may keep the old ones).";
 }
 
 bool UninstallNeedsYes(const CliArgs& args, bool canAskOnConsole) noexcept {
