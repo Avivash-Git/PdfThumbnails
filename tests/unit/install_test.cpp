@@ -581,7 +581,17 @@ TEST(ZoomTexts, OriginAndSaved) {
   decision.zoom = 100;
   decision.origin = ZoomOrigin::kDefault;
   EXPECT_EQ(ZoomText(decision), L"Zoom: 100 % (default)");
-  const std::wstring saved = ZoomSavedText(150);
+  EXPECT_EQ(ZoomSavedText(150, true),
+            L"Zoom set to 150 %. Thumbnails File Explorer already made keep the old zoom; run "
+            L"--refresh to update them.");
+  EXPECT_EQ(ZoomRefreshedText(150, 12, 3),
+            L"Zoom set to 150 %. Refreshed 12 PDF thumbnails in 3 files.");
+  EXPECT_EQ(ZoomUnchangedText(150),
+            L"Zoom is already 150 %; nothing to refresh (run --refresh to redo the thumbnails).");
+  EXPECT_EQ(ZoomRefreshStoppedText(150, 7),
+            L"Zoom set to 150 %. The refresh stopped: 7 thumbnails refreshed, the rest keep the "
+            L"old zoom; run --refresh to finish.");
+  const std::wstring saved = ZoomSavedText(150, false);
   EXPECT_EQ(saved.rfind(L"Zoom set to 150 %.", 0), 0u) << saved;
   // The full rebuild, with what it costs, and the refresh of the PDF thumbnails only.
   EXPECT_NE(saved.find(L"run --refresh --full (restarts File Explorer), or --refresh for PDF "

@@ -821,7 +821,77 @@ int RunUninstallCleanupCommand(Output& out) {
   return Code(ExitCode::kOk);
 }
 
-int RunZoomCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
+// How often a refresh prints where it is, at most.
+constexpr ULONGLONG kRefreshProgressEveryMs = 5000;
+
+// A progress callback that prints RefreshProgressText at most every kRefreshProgressEveryMs.
+RefreshProgressFn RefreshProgressPrinter(Output& out) {
+  return [&out, lastLine = std::optional<ULONGLONG>()](const RefreshProgress& p) mutable {
+    const ULONGLONG now = GetTickCount64();
+    if (lastLine && now - *lastLine < kRefreshProgressEveryMs) return;
+    const std::wstring line = RefreshProgressText(p);
+    if (line.empty()) return;
+    out.Line(line);
+    lastLine = now;
+  };
+}
+
+// --zoom <n> once the zoom is saved, where kPdfRefreshDefault is on: the PDF thumbnails File
+// Explorer already made are refreshed in the default places, under the lock the caller holds.
+int RefreshAfterZoom(const CliArgs& args, const ProcessContext& context, bool changed,
+                     Output& out) {
+  const int zoom = *args.zoom;
+  if (args.noRefresh) {
+    out.Line(ZoomSavedText(zoom, true));
+    return Code(ExitCode::kOk);
+  }
+  if (!changed) {
+    out.Line(ZoomUnchangedText(zoom));
+    return Code(ExitCode::kOk);
+  }
+  RefreshConditions conditions;
+  const HRESULT read =
+      ReadRefreshConditions(context, RegistryRoots{}, SystemAssociationQueries(), &conditions);
+  const RefreshRefusal refusal =
+      FAILED(read) ? RefreshRefusal::kVirtualized : DecideRefreshRefusal(conditions);
+  if (refusal != RefreshRefusal::kNone) {
+    Log(LogLevel::kInfo, L"zoom",
+        std::wstring(L"zoom refresh=skipped refused=") + RefreshRefusalToken(refusal));
+    out.Line(ZoomSavedText(zoom, true));
+    return Code(ExitCode::kOk);
+  }
+
+  std::stop_source stop;
+  wil::unique_event_nothrow done;
+  (void)done.create(wil::EventOptions::ManualReset);
+  ConsoleStop consoleStop(&stop, done.get());
+  RefreshCounts counts;
+  const HRESULT hr = RefreshPdfThumbnails(PdfRefreshOptions{}, RefreshProgressPrinter(out),
+                                          stop.get_token(), &counts);
+  const ExitCode code = RefreshExitCode(hr, counts);
+  switch (code) {
+    case ExitCode::kOk:
+      out.Line(ZoomRefreshedText(zoom, counts.refreshed, counts.filesRefreshed));
+      break;
+    case ExitCode::kCancelled:
+      out.Line(ZoomRefreshStoppedText(zoom, counts.refreshed));
+      break;
+    case ExitCode::kFailed:
+      out.Line(ZoomSavedText(zoom, true));
+      out.Error(RefreshFailureText(hr));
+      break;
+    default:
+      out.Line(L"Zoom set to " + std::to_wstring(ClampZoom(zoom)) + L" %.");
+      for (const std::wstring& line : RefreshReport(hr, counts, counts.files, true)) {
+        out.Line(line);
+      }
+      break;
+  }
+  return Code(code);
+}
+
+int RunZoomCommandWith(const CliArgs& args, const ProcessContext& context, bool refreshDefault,
+                       Output& out) {
   if (!args.zoom) {
     Settings settings;
     ZoomDetails details;
@@ -857,20 +927,26 @@ int RunZoomCommand(const CliArgs& args, const ProcessContext& context, Output& o
     return Code(ExitCode::kFailed);
   }
   if (lock->sessionOnly()) Log(LogLevel::kWarning, L"zoom", L"zoom lock=session-only");
+  bool changed = true;
+  if (Settings before; SUCCEEDED(LoadSettings(RegistryRoots{}, &before))) {
+    changed = before.zoom != ClampZoom(*args.zoom);
+  }
   if (const HRESULT hr = SaveZoom(RegistryRoots{}, *args.zoom); FAILED(hr)) {
     out.Error(L"Cannot save the zoom: " + HResultText(hr));
     return Code(ExitCode::kFailed);
   }
   (void)NotifyAssocChanged(RegistryRoots{});
   Log(LogLevel::kInfo, L"zoom", L"zoom saved=" + std::to_wstring(*args.zoom));
-  out.Line(ZoomSavedText(*args.zoom));
+  if (refreshDefault) return RefreshAfterZoom(args, context, changed, out);
+  out.Line(ZoomSavedText(*args.zoom, false));
   return Code(ExitCode::kOk);
 }
 
-// ---- --refresh ------------------------------------------------------------------------------
+int RunZoomCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
+  return RunZoomCommandWith(args, context, kPdfRefreshDefault, out);
+}
 
-// How often --refresh --folder prints where it is, at most.
-constexpr ULONGLONG kRefreshProgressEveryMs = 5000;
+// ---- --refresh ------------------------------------------------------------------------------
 
 // --refresh --full: the refusals first (PrecheckRebuild: they read the context, AutoRestartShell
 // and, where Windows does not restart File Explorer, whether this program could), then the
@@ -1050,17 +1126,9 @@ int RunRefreshFoldersCommand(const CliArgs& args, const ProcessContext& context,
   // --fix --take-back, may have changed the registration or the handler Windows uses for .pdf.
   if (const std::optional<int> code = refused()) return *code;
 
-  std::optional<ULONGLONG> lastLine;
-  const auto progress = [&out, &lastLine](const RefreshProgress& p) {
-    const ULONGLONG now = GetTickCount64();
-    if (lastLine && now - *lastLine < kRefreshProgressEveryMs) return;
-    const std::wstring line = RefreshProgressText(p);
-    if (line.empty()) return;
-    out.Line(line);
-    lastLine = now;
-  };
   RefreshCounts counts;
-  const HRESULT hr = RefreshPdfThumbnails(options, progress, stop.get_token(), &counts);
+  const HRESULT hr =
+      RefreshPdfThumbnails(options, RefreshProgressPrinter(out), stop.get_token(), &counts);
   const ExitCode code = RefreshExitCode(hr, counts);
   if (code == ExitCode::kFailed) {
     out.Error(RefreshFailureText(hr));
@@ -1538,11 +1606,32 @@ std::wstring ZoomText(const ZoomDecision& decision) {
   return text + L")";
 }
 
-std::wstring ZoomSavedText(int zoom) {
+std::wstring ZoomSavedText(int zoom, bool refreshDefault) {
+  if (refreshDefault) {
+    return L"Zoom set to " + std::to_wstring(ClampZoom(zoom)) +
+           L" %. Thumbnails File Explorer already made keep the old zoom; run --refresh to update "
+           L"them.";
+  }
   return L"Zoom set to " + std::to_wstring(ClampZoom(zoom)) +
          L" %. Thumbnails made from now on use it. To redo the ones File Explorer already made, "
          L"run --refresh --full (restarts File Explorer), or --refresh for PDF thumbnails only "
          L"(folder windows open now may keep the old ones).";
+}
+
+std::wstring ZoomRefreshedText(int zoom, size_t refreshed, size_t files) {
+  return L"Zoom set to " + std::to_wstring(ClampZoom(zoom)) + L" %. Refreshed " +
+         std::to_wstring(refreshed) + L" PDF thumbnails in " + std::to_wstring(files) + L" files.";
+}
+
+std::wstring ZoomUnchangedText(int zoom) {
+  return L"Zoom is already " + std::to_wstring(ClampZoom(zoom)) +
+         L" %; nothing to refresh (run --refresh to redo the thumbnails).";
+}
+
+std::wstring ZoomRefreshStoppedText(int zoom, size_t refreshed) {
+  return L"Zoom set to " + std::to_wstring(ClampZoom(zoom)) + L" %. The refresh stopped: " +
+         std::to_wstring(refreshed) +
+         L" thumbnails refreshed, the rest keep the old zoom; run --refresh to finish.";
 }
 
 bool UninstallNeedsYes(const CliArgs& args, bool canAskOnConsole) noexcept {

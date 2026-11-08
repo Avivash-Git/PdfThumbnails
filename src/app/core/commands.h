@@ -198,10 +198,18 @@ std::vector<std::wstring> UninstallCleanupErrors(HRESULT hr, const UninstallClea
 // std::bad_alloc.
 std::wstring ZoomText(const ZoomDecision& decision);
 
-// What --zoom <n> prints once it saved the zoom (pure): the thumbnails File Explorer already made
-// keep the old zoom until --refresh --full rebuilds them, or --refresh refreshes the PDF
-// thumbnails. May throw std::bad_alloc.
-std::wstring ZoomSavedText(int zoom);
+// What --zoom <n> prints once it saved the zoom and refreshed nothing (pure). Unless
+// |refreshDefault| (kPdfRefreshDefault): the thumbnails File Explorer already made keep the old
+// zoom until --refresh --full rebuilds them, or --refresh refreshes the PDF thumbnails. With it:
+// that they keep the old zoom until --refresh. May throw std::bad_alloc.
+std::wstring ZoomSavedText(int zoom, bool refreshDefault);
+
+// What --zoom <n> prints where kPdfRefreshDefault is on (pure): after a refresh of the PDF
+// thumbnails, when the zoom did not change, and after a refresh that was stopped. May throw
+// std::bad_alloc.
+std::wstring ZoomRefreshedText(int zoom, size_t refreshed, size_t files);
+std::wstring ZoomUnchangedText(int zoom);
+std::wstring ZoomRefreshStoppedText(int zoom, size_t refreshed);
 
 // --uninstall removes the product for all users, so it must be confirmed (pure): it needs --yes
 // unless standard input is a console with a window to ask on.

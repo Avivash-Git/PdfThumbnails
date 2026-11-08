@@ -64,8 +64,10 @@ are hardened like the handler, import only KnownDLLs statically (apart from the 
 api-ms-win-core-synch-l1-2-0, which Windows resolves to KernelBase.dll without looking for a
 file, and the settings executable's COMCTL32, which its manifest binds side by side to WinSxS; anything else is
 delay-loaded, see `cmake\Hardening.cmake`), and embed a manifest and a version resource; the gates check all of
-that. Every command does its real work; `--zoom <n>` saves the zoom without refreshing thumbnails
-and names `--refresh --full` and `--refresh` for those File Explorer already made:
+that. Every command does its real work; `--zoom <n>` saves the zoom and, in a build with
+`PDFT_PDF_REFRESH_DEFAULT` on, refreshes the PDF thumbnails File Explorer already made (`--no-refresh`
+leaves them, and scripts that only want to set the zoom should pass it); in a build with it off it
+names `--refresh --full` and `--refresh` for those thumbnails:
 
 | Command | What it does |
 |---|---|

@@ -57,6 +57,8 @@ enum RefreshNotify : unsigned {
   kRefreshViews = 4,        // IShellView::Refresh of the open views of those folders, at the end
   kNotifyAssociations = 8,  // SHCNE_ASSOCCHANGED, at the end
 };
+// Per file: in the refresh experiment on build 26300 that turned open windows, the desktop and
+// another program's dialog to the new thumbnails; without a notification they kept the old ones.
 inline constexpr unsigned kRefreshNotify = kNotifyItems;
 
 // Whether the flags are safe (pure): the probe has WTS_INCACHEONLY and neither
