@@ -128,9 +128,12 @@ void Program::Kill() noexcept {
 }
 
 std::wstring ControlText(HWND dialog, int id) {
+  // WM_GETTEXT itself: GetDlgItemText and GetWindowText only see the caption Windows keeps for a
+  // window of another process, which an edit box does not have.
   wchar_t text[1024] = {};
-  const UINT length = GetDlgItemTextW(dialog, id, text, ARRAYSIZE(text));
-  return std::wstring(text, length);
+  const LRESULT length = SendMessageW(GetDlgItem(dialog, id), WM_GETTEXT, ARRAYSIZE(text),
+                                      reinterpret_cast<LPARAM>(text));
+  return std::wstring(text, static_cast<size_t>(length));
 }
 
 bool SaveWindowPicture(HWND window, const std::wstring& file) {

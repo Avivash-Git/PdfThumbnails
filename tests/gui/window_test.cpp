@@ -15,7 +15,6 @@
 #include <string>
 #include <vector>
 
-#include "github_runner.h"
 #include "gui_driver.h"
 #include "instance.h"
 #include "project_config.h"
@@ -161,8 +160,10 @@ TEST_F(SettingsWindow, ASecondStartLeavesOneWindow) {
 
 // For a person: what the window looks like on this runner.
 TEST_F(SettingsWindow, KeepsAPicture) {
-  const std::wstring folder = EnvironmentValue(L"PDFT_GUI_SHOTS");
-  if (folder.empty()) GTEST_SKIP() << "PDFT_GUI_SHOTS is not set";
+  wchar_t value[1024] = {};
+  const DWORD length = GetEnvironmentVariableW(L"PDFT_GUI_SHOTS", value, ARRAYSIZE(value));
+  if (length == 0 || length >= ARRAYSIZE(value)) GTEST_SKIP() << "PDFT_GUI_SHOTS is not set";
+  const std::wstring folder(value, length);
   std::error_code error;
   std::filesystem::create_directories(folder, error);
   // The first paint after the window shows.

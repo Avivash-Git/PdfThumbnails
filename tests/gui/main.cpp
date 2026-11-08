@@ -42,9 +42,14 @@ bool ElevatedStartIsRefused() {
     program.Kill();
     return false;
   }
-  PostMessageW(box, WM_COMMAND, IDOK, 0);
-  const DWORD code = program.WaitForExit(30000);
-  std::printf("[ gui ] an elevated start: message shown, exit %lu\n", code);
+  // Asked again until it ends: a box that is still being made does not act on the first request.
+  DWORD code = 0xFFFFFFFFu;
+  for (int attempt = 0; attempt < 30 && code == 0xFFFFFFFFu; ++attempt) {
+    PostMessageW(box, WM_COMMAND, IDOK, 0);
+    code = program.WaitForExit(1000);
+  }
+  std::printf("[ gui ] an elevated start: message shown, exit %lu, message still there: %s\n", code,
+              IsWindow(box) ? "yes" : "no");
   return code == static_cast<DWORD>(pdft::ExitCode::kWrongContext);
 }
 
