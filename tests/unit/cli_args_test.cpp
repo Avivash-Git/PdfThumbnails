@@ -55,6 +55,15 @@ const std::vector<Case>& Cases() {
       Ok("NoArgumentsCli", kCli, {}, kNone, false),
       Ok("NoArgumentsGui", kGui, {}, kNone, false),
       Ok("RelaunchedAloneGui", kGui, {L"--relaunched"}, kNone, false),
+      Ok("RenderPreview", kGui, {L"--render-preview", L"130,96"}, kRenderPreview, false),
+      Fails("RenderPreviewInCli", kCli, {L"--render-preview", L"130,96"}, L"unknown command"),
+      Fails("RenderPreviewNeedsAValue", kGui, {L"--render-preview"}, L"needs a value"),
+      Fails("RenderPreviewTakesNothingElse", kGui, {L"--render-preview", L"130,96", L"--json"},
+            L"takes no other arguments"),
+      Fails("RenderPreviewZoomOutOfRange", kGui, {L"--render-preview", L"99,96"}, L"<zoom>,<edge>"),
+      Fails("RenderPreviewEdgeOutOfRange", kGui, {L"--render-preview", L"130,513"},
+            L"<zoom>,<edge>"),
+      Fails("RenderPreviewNoComma", kGui, {L"--render-preview", L"130"}, L"<zoom>,<edge>"),
       Ok("Help", kCli, {L"--help"}, kHelp, false),
       Ok("HelpDashH", kCli, {L"-h"}, kHelp, false),
       Ok("HelpDashQuestion", kCli, {L"-?"}, kHelp, false),
@@ -335,6 +344,7 @@ TEST(CliArgs, WritesColumn) {
   };
   const Row expected[] = {
       {Verb::kNone, Writes::kNo},
+      {Verb::kRenderPreview, Writes::kNo},
       {Verb::kStatus, Writes::kNo},
       {Verb::kCheck, Writes::kYes},
       {Verb::kFix, Writes::kYes},

@@ -18,7 +18,7 @@
 namespace pdft {
 
 int AppMain(Mode mode, HRESULT hardened, std::span<const wchar_t* const> args,
-            OpenWindowFn openWindow) {
+            const GuiEntry& gui) {
   // WIL is compiled without its static initializers (cmake/Dependencies.cmake), so its error
   // reporting is set up here instead. This one only sets function pointers (the module name for
   // failure reports, fail-fast through kernelbase); never wil::WilInitialize_Result, which would
@@ -46,7 +46,7 @@ int AppMain(Mode mode, HRESULT hardened, std::span<const wchar_t* const> args,
     out.Error(L"Run --help for usage.");
     return static_cast<int>(ExitCode::kUsage);
   }
-  return RunCommand(std::get<CliArgs>(parsed), mode, out, openWindow);
+  return RunCommand(std::get<CliArgs>(parsed), mode, out, gui);
 }
 
 }  // namespace pdft

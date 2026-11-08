@@ -11,9 +11,10 @@
 // - Values: --name value, or --name=value. A separate value may not start with "--".
 // - -h, -? and /? are spellings of --help.
 // - Numbers are whole decimal numbers, all digits, in range.
-// - Two internal options exist in the settings executable only and are not in the help:
+// - Three internal options exist in the settings executable only and are not in the help:
 //   --elevated <step> (the elevated half of a change; nothing else may follow) and --relaunched
-//   (marks a start that went through File Explorer, so it is not relaunched again).
+//   (marks a start that went through File Explorer, so it is not relaunched again); and
+//   --render-preview <zoom>,<edge> (the settings window's preview child; nothing else may follow).
 
 #pragma once
 
@@ -48,6 +49,7 @@ enum class Verb {
   kVersion,
   kHelp,
   kElevated,
+  kRenderPreview,
 };
 
 // Whether a command changes per-user state. Such a command must reach the real registry, so it
@@ -104,6 +106,15 @@ enum class ElevatedStep {
 
 enum class MigrateScope { kBoth, kUserOnly, kMachineOnly };
 
+// --render-preview <zoom>,<edge>: the zoom in percent and the tile's edge in pixels.
+inline constexpr int kMinPreviewEdge = 16;
+inline constexpr int kMaxPreviewEdge = 512;
+struct PreviewSize {
+  int zoom = 100;
+  int edge = 96;
+  friend bool operator==(const PreviewSize&, const PreviewSize&) = default;
+};
+
 struct CliArgs {
   Verb verb = Verb::kNone;
   // Changes per-user state, so the canary guards it: Writes::kYes, or kWithValue with the value
@@ -141,6 +152,8 @@ struct CliArgs {
   MigrateScope migrateScope = MigrateScope::kBoth;
   // --elevated
   std::optional<ElevatedStep> elevatedStep;
+  // --render-preview (the command's value)
+  std::optional<PreviewSize> preview;
 };
 
 struct ParseError {
@@ -162,6 +175,10 @@ std::wstring UsageText(const ParseOptions& options);
 
 // The zoom value syntax (pure): all decimal digits, 100 to 200.
 std::optional<int> ParseZoomValue(std::wstring_view text) noexcept;
+
+// The --render-preview value syntax (pure): "<zoom>,<edge>", all digits, zoom 100 to 200, edge
+// kMinPreviewEdge to kMaxPreviewEdge.
+std::optional<PreviewSize> ParsePreviewValue(std::wstring_view text) noexcept;
 
 // The --checks value syntax (pure): pdfcraft,signin | pdfcraft | signin | none | default.
 std::optional<ChecksSelection> ParseChecksValue(std::wstring_view text) noexcept;

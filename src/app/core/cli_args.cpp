@@ -64,13 +64,15 @@ constexpr VerbInfo kVerbs[] = {
      L"Print this help (also -h, -? and /?)."},
     {Verb::kElevated, L"--elevated", kRequired, L"<step>", Writes::kNo, false, true, false, true,
      L"Internal: the elevated half of a change."},
+    {Verb::kRenderPreview, L"--render-preview", kRequired, L"<zoom>,<edge>", Writes::kNo, false,
+     true, false, true, L"Internal: the settings window's preview."},
 };
 
 consteval bool VerbsInEnumOrder() {
   for (size_t i = 0; i < std::size(kVerbs); ++i) {
     if (static_cast<size_t>(kVerbs[i].verb) != i) return false;
   }
-  return std::size(kVerbs) == static_cast<size_t>(Verb::kElevated) + 1;
+  return std::size(kVerbs) == static_cast<size_t>(Verb::kRenderPreview) + 1;
 }
 static_assert(VerbsInEnumOrder(), "kVerbs must list every Verb in enum order");
 
@@ -222,6 +224,10 @@ std::optional<std::wstring> ApplyVerbValue(const VerbInfo& verb, std::wstring_vi
       args->elevatedStep = ParseElevatedStep(value, options);
       if (!args->elevatedStep) return L"unknown elevated step " + Quoted(value);
       return std::nullopt;
+    case Verb::kRenderPreview:
+      args->preview = ParsePreviewValue(value);
+      if (!args->preview) return L"--render-preview must be <zoom>,<edge>";
+      return std::nullopt;
     default:
       return std::wstring(verb.name) + L" takes no value";
   }
@@ -356,6 +362,21 @@ std::span<const VerbInfo> Verbs() noexcept { return kVerbs; }
 
 const VerbInfo& Describe(Verb verb) noexcept { return kVerbs[static_cast<size_t>(verb)]; }
 
+std::optional<PreviewSize> ParsePreviewValue(std::wstring_view text) noexcept {
+  const size_t comma = text.find(L',');
+  if (comma == std::wstring_view::npos) return std::nullopt;
+  const std::optional<int> zoom = ParseZoomValue(text.substr(0, comma));
+  const std::wstring_view edgeText = text.substr(comma + 1);
+  if (!zoom || edgeText.empty()) return std::nullopt;
+  int edge = 0;
+  for (wchar_t c : edgeText) {
+    if (c < L'0' || c > L'9') return std::nullopt;
+    edge = std::min(edge * 10 + (c - L'0'), kMaxPreviewEdge + 1);  // stays out of range
+  }
+  if (edge < kMinPreviewEdge || edge > kMaxPreviewEdge) return std::nullopt;
+  return PreviewSize{*zoom, edge};
+}
+
 std::optional<int> ParseZoomValue(std::wstring_view text) noexcept {
   if (text.empty()) return std::nullopt;
   long long value = 0;
@@ -409,6 +430,9 @@ std::variant<CliArgs, ParseError> ParseCommandLine(std::span<const std::wstring_
     }
     if (verb->verb == Verb::kElevated && index < args.size()) {
       return Error(L"--elevated takes no other arguments");
+    }
+    if (verb->verb == Verb::kRenderPreview && index < args.size()) {
+      return Error(L"--render-preview takes no other arguments");
     }
   } else if (const OptionInfo* option = FindOption(first.name, options);
              option && (option->verbs & Bit(Verb::kNone))) {

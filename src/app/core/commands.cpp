@@ -1650,7 +1650,7 @@ std::wstring StartMessage(Mode mode, const ProcessContext& context) {
   return message;
 }
 
-int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWindow) {
+int RunCommand(const CliArgs& args, Mode mode, Output& out, const GuiEntry& gui) {
   const ParseOptions parseOptions{mode, kDevInstall};
   switch (args.verb) {
     case Verb::kVersion:
@@ -1664,6 +1664,9 @@ int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWin
       // lines it sends its parent are its report. It reads its own command line again and
       // checks it, and where it runs from, before anything else (elevation.h).
       return ElevatedMain();
+    case Verb::kRenderPreview:
+      return gui.renderPreview ? gui.renderPreview(args.preview->zoom, args.preview->edge)
+                               : Code(ExitCode::kFailed);
     case Verb::kNone:
       if (mode == Mode::kCli) {
         DWORD processes[2] = {};
@@ -1738,7 +1741,7 @@ int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWin
   int code = Code(ExitCode::kFailed);
   switch (args.verb) {
     case Verb::kNone:
-      code = OpenSettingsWindow(context, args.relaunched, openWindow, out);
+      code = OpenSettingsWindow(context, args.relaunched, gui.openWindow, out);
       break;
     case Verb::kStatus:
       code = RunStatus(args, context, out);

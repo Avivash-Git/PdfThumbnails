@@ -49,6 +49,21 @@ INSTANTIATE_TEST_SUITE_P(Executables, Resources, ::testing::Values(kCliExe, kSet
                            return std::string(info.param == kCliExe ? "Cli" : "Settings");
                          });
 
+TEST(Resources, SettingsCarriesThePreviewSamples) {
+  const std::wstring path = OwnFolder() + L"\\" + kSettingsExe;
+  HMODULE module = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_AS_DATAFILE);
+  if (!module && test::IsApplicationControlBlock(HRESULT_FROM_WIN32(GetLastError()))) {
+    GTEST_SKIP() << "Application Control blocked reading the settings executable";
+  }
+  ASSERT_NE(module, nullptr) << "error " << GetLastError();
+  for (const UINT id : {IDR_SAMPLE_DOCUMENT, IDR_SAMPLE_SLIDE}) {
+    const HRSRC found = FindResourceW(module, MAKEINTRESOURCEW(id), RT_RCDATA);
+    ASSERT_NE(found, nullptr) << id;
+    EXPECT_GT(SizeofResource(module, found), 0u) << id;
+  }
+  FreeLibrary(module);
+}
+
 TEST(Resources, SettingsNoticeNamesTheCommandLineThroughAPlaceholder) {
   const std::wstring path = OwnFolder() + L"\\" + kSettingsExe;
   HMODULE module = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_AS_DATAFILE);

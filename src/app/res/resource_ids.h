@@ -10,6 +10,10 @@
 #define IDS_VERSION_CHANGE 102      // "0.14.0 " + U+2192 (rightwards arrow) + " 0.15.0"
 #define IDS_SEPARATOR 103           // U+00B7 (middle dot)
 
+// The sample PDFs the settings window's preview renders (RCDATA, settings executable only).
+#define IDR_SAMPLE_DOCUMENT 301
+#define IDR_SAMPLE_SLIDE 302
+
 // The settings executable's notice while the window is not built yet.
 #define IDS_WINDOW_NOT_READY 201
 #define IDS_WINDOW_USE_CLI 202  // {cli} is replaced with the command-line executable's name

@@ -99,7 +99,8 @@ target_link_libraries(pdft_appcore PUBLIC pdft_config pdft_common pdft_wil
 pdft_delay_load(pdft_appcore bcrypt.dll wevtapi.dll msi.dll rstrtmgr.dll userenv.dll)
 
 # The settings window's parts that need no window of their own, so tests link them too.
-add_library(pdft_windowcore STATIC gui/program_run.cpp gui/program_run.h)
+add_library(pdft_windowcore STATIC gui/program_run.cpp gui/program_run.h
+                                   gui/preview_protocol.cpp gui/preview_protocol.h)
 target_include_directories(pdft_windowcore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/gui")
 pdft_harden(pdft_windowcore LIB)
 target_link_libraries(pdft_windowcore PUBLIC pdft_appcore)
@@ -121,8 +122,12 @@ function(pdft_add_app_exe target subsystem file_name manifest description)
 endfunction()
 
 pdft_add_app_exe(PdfThumbnailsSettings WIN32 "${PDFT_SETTINGS_EXE}" settings
-                 "${PDFT_PRODUCT_NAME} settings" main_gui.cpp res/settings.rc)
+                 "${PDFT_PRODUCT_NAME} settings" main_gui.cpp
+                 gui/preview_child.cpp gui/preview_child.h res/settings.rc)
+# The preview samples are embedded; the resource compiler does not report them as dependencies.
+set_source_files_properties(res/settings.rc PROPERTIES OBJECT_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/res/sample-document.pdf;${CMAKE_CURRENT_SOURCE_DIR}/res/sample-slide.pdf")
 # Common Controls v6 (TaskDialog), bound through the manifest; the settings executable only.
-target_link_libraries(PdfThumbnailsSettings PRIVATE comctl32 pdft_windowcore)
+target_link_libraries(PdfThumbnailsSettings PRIVATE comctl32 gdi32 pdft_windowcore)
 pdft_add_app_exe(PdfThumbnailsCli CONSOLE "${PDFT_CLI_EXE}" cli
                  "${PDFT_PRODUCT_NAME} command line" main_cli.cpp res/cli.rc)

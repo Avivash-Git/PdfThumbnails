@@ -12,6 +12,7 @@
 #include <string_view>
 
 #include "app_main.h"
+#include "preview_child.h"
 #include "project_config.h"
 #include "resource_ids.h"
 #include "startup.h"
@@ -52,7 +53,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     // The C runtime splits the command line for Windows-subsystem programs too.
     std::span<const wchar_t* const> args;
     if (__wargv && __argc > 0) args = {__wargv, static_cast<std::size_t>(__argc)};
-    return pdft::AppMain(pdft::Mode::kGui, hardened, args, &ShowPlaceholderWindow);
+    return pdft::AppMain(pdft::Mode::kGui, hardened, args,
+                         pdft::GuiEntry{&ShowPlaceholderWindow, &pdft::RenderPreviewChild});
   } catch (...) {
     // Nothing may escape: an exit code beats std::terminate.
     return static_cast<int>(pdft::ExitCode::kFailed);

@@ -218,6 +218,7 @@ if(TARGET pdft_appcore)
     unit/output_test.cpp
     unit/paths_test.cpp
     unit/pe_info_test.cpp
+    unit/preview_protocol_test.cpp
     unit/program_output_test.cpp
     unit/rebuild_test.cpp
     unit/refresh_test.cpp
@@ -339,6 +340,7 @@ if(TARGET pdft_appcore)
     integration/rebuild_test.cpp
     integration/refresh_test.cpp
     integration/registration_test.cpp
+    integration/render_preview_test.cpp
     integration/search_index_test.cpp
     integration/settings_test.cpp
     integration/setup_test.cpp
@@ -351,6 +353,7 @@ if(TARGET pdft_appcore)
                                                        pdft_testsupport GTest::gtest
                                                        ole32 oleaut32 advapi32 user32)
   # The handler and PDFium next to it are read (headers, version, build id), never loaded.
+  # ... and the settings executable's preview child runs for real, with the handler next to it.
   add_dependencies(pdft_integration_tests PdfThumbnailsCli PdfThumbnailsSettings pdft_handler
                                           pdft_pdfium_runtime)
   # The check task tests point their tasks at pdft-run-medium.exe, and run it once (--exit 0).

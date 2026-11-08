@@ -32,10 +32,21 @@ struct WindowStart {
 // executable passes one in (main_gui.cpp); the command-line executable has no window.
 using OpenWindowFn = int (*)(const WindowStart& start) noexcept;
 
+// Renders the preview samples and writes them to standard output, returning the exit code: the
+// settings window's child (--render-preview).
+using RenderPreviewFn = int (*)(int zoom, int edge) noexcept;
+
+// What only the settings executable has (main_gui.cpp); empty in the command-line executable.
+struct GuiEntry {
+  OpenWindowFn openWindow = nullptr;
+  RenderPreviewFn renderPreview = nullptr;
+};
+
 // Runs |args| (parsed for |mode|) and returns the process exit code: an ExitCode, or for
 // --elevated the HRESULT of the elevated step. In order:
 //   --version, --help: print, exit 0 (no log, no context).
 //   --elevated <step>: the elevated half of a change (ElevatedMain, elevation.h).
+//   --render-preview: the settings window's preview child (GuiEntry); no log, no registry check.
 //   No command in the command-line executable: starts the settings executable when this
 //   console is its own (started by a double-click), else prints the help.
 //   --fix --take-back, --uninstall and --refresh --full, without --yes and without a console to
@@ -87,7 +98,7 @@ using OpenWindowFn = int (*)(const WindowStart& start) noexcept;
 //                    2, 3, 4, 5, 6, 8
 //   --refresh without --full or --folder is not built yet: it says so and exits 5.
 // May throw std::bad_alloc; AppMain's callers catch everything.
-int RunCommand(const CliArgs& args, Mode mode, Output& out, OpenWindowFn openWindow);
+int RunCommand(const CliArgs& args, Mode mode, Output& out, const GuiEntry& gui);
 
 // "PdfThumbnails 2.0.0.0 (x64)": product, ProductVersion string, architecture.
 std::wstring VersionText();
