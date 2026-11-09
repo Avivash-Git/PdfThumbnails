@@ -18,6 +18,7 @@ enum class WindowContext {
   kReady,         // installed, and writes reach the real registry
   kNotInstalled,  // nothing of this product is registered here
   kSandboxed,     // writes may not reach the real registry
+  kUnreadable,    // the first reading failed: only what helps to find out why is on
 };
 
 // The context a finished reading shows (pure): writes that may not reach the registry count first.

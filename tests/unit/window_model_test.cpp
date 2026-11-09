@@ -108,6 +108,19 @@ TEST(WindowControls, InstallIsOfferedOnlyWhereNothingIsInstalled) {
   EXPECT_FALSE(DecideControls(state).install);
 }
 
+TEST(WindowControls, AFailedReadingStillOffersTheLogAndDiagnostics) {
+  WindowState state = Ready(WindowActivity::kIdle, true);
+  state.context = WindowContext::kUnreadable;
+  const ControlStates c = DecideControls(state);
+  EXPECT_TRUE(c.openLogAndDiagnostics);
+  EXPECT_FALSE(c.zoomAndChecks);
+  EXPECT_FALSE(c.checkNowAndFix);
+  EXPECT_FALSE(c.rebuild);
+  EXPECT_FALSE(c.uninstall);
+  EXPECT_FALSE(c.save);
+  EXPECT_FALSE(c.install);
+}
+
 TEST(WindowControls, NothingBeforeTheFirstReading) {
   WindowState state;
   const ControlStates c = DecideControls(state);

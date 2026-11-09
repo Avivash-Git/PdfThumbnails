@@ -73,6 +73,18 @@ std::wstring Filled(std::wstring text, std::wstring_view name, std::wstring_view
   return text;
 }
 
+// Counts a question being open: its own message loop keeps delivering the window's messages.
+class ModalScope {
+ public:
+  explicit ModalScope(int* count) noexcept : count_(count) { ++*count_; }
+  ~ModalScope() { --*count_; }
+  ModalScope(const ModalScope&) = delete;
+  ModalScope& operator=(const ModalScope&) = delete;
+
+ private:
+  int* count_;
+};
+
 class MainWindow {
  public:
   explicit MainWindow(const WindowStart& start) : start_(start) {}
@@ -85,6 +97,8 @@ class MainWindow {
 
   HWND Item(int id) const noexcept { return GetDlgItem(dialog_, id); }
   void SetVisible(int id, bool visible) noexcept {
+    // A control that goes away must not keep the keyboard focus.
+    if (!visible && GetFocus() == Item(id)) SendMessageW(dialog_, WM_NEXTDLGCTL, 0, FALSE);
     ShowWindow(Item(id), visible ? SW_SHOWNA : SW_HIDE);
   }
   void SetText(int id, const std::wstring& text) noexcept {
@@ -169,6 +183,7 @@ class MainWindow {
     int height = 0;
   };
   std::array<Tile, kPreviewTiles.size()> tiles_;
+  int questionsOpen_ = 0;
   bool shown_ = false;
   bool closePending_ = false;
   bool readAgain_ = false;
@@ -308,7 +323,8 @@ INT_PTR MainWindow::Handle(UINT message, WPARAM w, LPARAM l) try {
       }
       if (header->idFrom == IDC_BANNER_LINK &&
           (header->code == NM_CLICK || header->code == NM_RETURN)) {
-        Relaunch();
+        // Only when closing now would lose nothing.
+        if (DecideClose(state_) == CloseAction::kCloseNow) Relaunch();
         return TRUE;
       }
       return FALSE;
@@ -460,7 +476,9 @@ void MainWindow::OnZoomBoxLeft() {
 }
 
 void MainWindow::RequestPreview() {
-  if (state_.context == WindowContext::kStarting || state_.context == WindowContext::kSandboxed) {
+  // While a child runs there is no preview; the window asks again when it has ended.
+  if (!preview_ || state_.context == WindowContext::kStarting ||
+      state_.context == WindowContext::kSandboxed) {
     return;
   }
   const std::pair<int, int> asked{edits_.zoom, PreviewEdgeForDpi(GetDpiForWindow(dialog_))};
@@ -470,6 +488,7 @@ void MainWindow::RequestPreview() {
 }
 
 void MainWindow::OnPreviewReady() {
+  if (!preview_) return;  // this message outlived the renderer
   std::optional<PreviewResult> result = preview_->Take();
   if (!result) return;
   for (size_t i = 0; i < tiles_.size(); ++i) {
@@ -544,8 +563,15 @@ void MainWindow::StartCheck(std::optional<RepairMode> fix, WindowActivity activi
 
 void MainWindow::OnFixLink() {
   if (!DecideControls(state_).checkNowAndFix || panel_.fix == FixLink::kNone) return;
-  if (panel_.fix == FixLink::kTakeBack && !ConfirmTakeBack(dialog_, panel_.takeBack)) return;
-  StartCheck(panel_.fix == FixLink::kTakeBack ? RepairMode::kSafeAndTakeBack : RepairMode::kSafe,
+  const FixLink fix = panel_.fix;
+  if (fix == FixLink::kTakeBack) {
+    {
+      const ModalScope question(&questionsOpen_);
+      if (!ConfirmTakeBack(dialog_, panel_.takeBack)) return;
+    }
+    if (!DecideControls(state_).checkNowAndFix) return;
+  }
+  StartCheck(fix == FixLink::kTakeBack ? RepairMode::kSafeAndTakeBack : RepairMode::kSafe,
              WindowActivity::kFixing);
 }
 
@@ -553,7 +579,12 @@ void MainWindow::OnRebuild() {
   if (!DecideControls(state_).rebuild) return;
   if (confirmFullRefresh_) {
     bool dontAskAgain = false;
-    if (!ConfirmRebuild(dialog_, RebuildQuestion(), &dontAskAgain)) return;
+    {
+      const ModalScope question(&questionsOpen_);
+      if (!ConfirmRebuild(dialog_, RebuildQuestion(), &dontAskAgain)) return;
+    }
+    // Things may have started while the question was open.
+    if (!DecideControls(state_).rebuild) return;
     if (dontAskAgain && SUCCEEDED(SaveConfirmFullRefresh(RegistryRoots{}, false))) {
       confirmFullRefresh_ = false;
     }
@@ -564,7 +595,11 @@ void MainWindow::OnRebuild() {
 void MainWindow::OnUninstall() {
   if (!DecideControls(state_).uninstall) return;
   bool clearCache = true;
-  if (!ConfirmUninstall(dialog_, UninstallQuestion(false), &clearCache)) return;
+  {
+    const ModalScope question(&questionsOpen_);
+    if (!ConfirmUninstall(dialog_, UninstallQuestion(false), &clearCache)) return;
+  }
+  if (!DecideControls(state_).uninstall) return;
   StartChild(clearCache ? L"--uninstall --yes --rebuild-thumbnails" : L"--uninstall --yes",
              IDS_CHILD_TITLE_UNINSTALL, true);
 }
@@ -605,6 +640,7 @@ void MainWindow::OnChildDone() {
   if (!result) return;
   const bool started = SUCCEEDED(result->hr);
   const ChildOutcome outcome = started ? OutcomeOfChild(result->exitCode) : ChildOutcome::kError;
+  const ModalScope question(&questionsOpen_);
   ShowChildResult(dialog_,
                   outcome == ChildOutcome::kError     ? ResultIcon::kError
                   : outcome == ChildOutcome::kWarning ? ResultIcon::kWarning
@@ -621,6 +657,8 @@ void MainWindow::OnChildDone() {
 }
 
 void MainWindow::OnSave() {
+  // Enter does not move the focus, so the box has not settled what it shows yet.
+  OnZoomBoxLeft();
   if (!DecideControls(state_).save) return;
   SaveRequest request;
   if (edits_.zoom != saved_.zoom) request.zoom = edits_.zoom;
@@ -657,13 +695,14 @@ void MainWindow::OnRefreshProgress() {
   const LONG_PTR style = GetWindowLongPtrW(bar, GWL_STYLE);
   SetWindowLongPtrW(bar, GWL_STYLE, counting ? style & ~PBS_MARQUEE : style | PBS_MARQUEE);
   if (counting) {
+    SendMessageW(bar, PBM_SETMARQUEE, FALSE, 0);
     SendMessageW(bar, PBM_SETRANGE32, 0, static_cast<LPARAM>(progress->files));
     SendMessageW(bar, PBM_SETPOS, progress->done, 0);
   } else {
     SendMessageW(bar, PBM_SETMARQUEE, TRUE, 30);
   }
   const std::wstring text = RefreshProgressText(*progress);
-  if (!text.empty()) panel_.lines[0] = {StatusGlyph::kNone, text};
+  if (!text.empty() && !closePending_) panel_.lines[0] = {StatusGlyph::kNone, text};
   ApplyState();
 }
 
@@ -772,7 +811,10 @@ void MainWindow::OnJobDone() {
   // A part that failed stays unsaved, so the window stays open to say so.
   if (saved && (saved->busy || !saved->problem.empty())) {
     closePending_ = false;
-    if (!saved->problem.empty()) ShowProblem(dialog_, saved->problem);
+    if (!saved->problem.empty()) {
+      const ModalScope question(&questionsOpen_);
+      ShowProblem(dialog_, saved->problem);
+    }
   } else if constexpr (!kPdfRefreshDefault) {
     // The thumbnails already made keep the old zoom until they are made again.
     if (saved && reading->save->zoomAsked && !closePending_) OnRebuild();
@@ -798,6 +840,8 @@ void MainWindow::ApplyReading(const StateReading& reading) {
                        Filled(Text(IDS_STATE_UNREADABLE), L"{hr}", HResultText(reading.hr))};
     if (reading.contextRead && RefusesWrites(context_.virtualization)) {
       state_.context = WindowContext::kSandboxed;
+    } else if (state_.context == WindowContext::kStarting) {
+      state_.context = WindowContext::kUnreadable;
     }
     return;
   }
@@ -923,15 +967,22 @@ void MainWindow::RequestReading() {
   }
   state_.activity = WindowActivity::kGathering;
   jobs_->StartReading(context_);
+  ApplyState();
 }
 
 void MainWindow::RequestClose() {
+  if (questionsOpen_ > 0) return;  // the question that is open is answered first
   switch (DecideClose(state_)) {
     case CloseAction::kCloseNow:
       DestroyWindow(dialog_);
       break;
-    case CloseAction::kAskSaveChanges:
-      switch (AskSaveChanges(dialog_)) {
+    case CloseAction::kAskSaveChanges: {
+      SaveAnswer answer = SaveAnswer::kCancel;
+      {
+        const ModalScope question(&questionsOpen_);
+        answer = AskSaveChanges(dialog_);
+      }
+      switch (answer) {
         case SaveAnswer::kCancel:
           return;
         case SaveAnswer::kSave:
@@ -948,14 +999,29 @@ void MainWindow::RequestClose() {
       }
       closePending_ = true;
       return;
-    case CloseAction::kAskStopRefresh:
-      if (!ConfirmStopRefresh(dialog_)) return;
+    }
+    case CloseAction::kAskStopRefresh: {
+      {
+        const ModalScope question(&questionsOpen_);
+        if (!ConfirmStopRefresh(dialog_)) return;
+      }
+      // The refresh may have ended while the question was open.
+      if (state_.activity != WindowActivity::kRefreshing) {
+        if (!jobs_->running()) {
+          DestroyWindow(dialog_);
+        } else {
+          closePending_ = true;
+        }
+        return;
+      }
       closePending_ = true;
       OnCancelRefresh();
       return;
+    }
     case CloseAction::kWaitForWork:
       closePending_ = true;
-      SetText(IDC_STATUS_LINE1, Text(IDS_CLOSING_AFTER_WORK));
+      panel_.lines[0] = {StatusGlyph::kNone, Text(IDS_CLOSING_AFTER_WORK)};
+      ApplyState();
       break;
   }
 }

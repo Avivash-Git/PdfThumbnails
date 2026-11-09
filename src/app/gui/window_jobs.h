@@ -92,12 +92,12 @@ class WindowJobs {
 
   HWND window_;
   UINT doneMessage_;
-  std::jthread thread_;
   std::mutex mutex_;
   std::optional<StateReading> reading_;
   std::stop_source stop_;
   std::optional<RefreshProgress> progress_;
   std::atomic<bool> progressPosted_{false};  // one message on the way at most
+  std::jthread thread_;                      // last: it uses everything above
 };
 
 }  // namespace pdft
