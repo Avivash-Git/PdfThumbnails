@@ -1,5 +1,5 @@
 # unit.samples: the preview samples committed in src/app/res are exactly what the generator
-# writes today (D30: generated, then committed so the app needs no generator at build time).
+# writes today (generated, then committed so the app needs no generator at build time).
 #   cmake -DTHUMBTEST=<thumbtest.exe> -DCOMMITTED_DIR=<src/app/res> -DWORK_DIR=<dir>
 #         -P tests/CheckSamples.cmake
 # After a deliberate change to the samples: thumbtest makesamples src/app/res
