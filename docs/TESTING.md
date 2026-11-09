@@ -256,7 +256,6 @@ with Win+R (`out\build\x64-release\bin\PdfThumbnailsSettings.exe`). Save changes
 and refreshes your PDF thumbnails; Rebuild thumbnails restarts File Explorer; Uninstall removes
 the product.
 
-- **Accessibility Insights for Windows, FastPass:** 0 failures.
 - **Keyboard only:** Tab goes through the controls in order, the underlined letters work, Esc
   closes, Enter saves when Save is on, F5 runs Check now.
 - **Narrator** reads the slider, the zoom box, the status lines and the preview tiles, and the
