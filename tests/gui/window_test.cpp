@@ -134,6 +134,8 @@ TEST_F(SettingsWindow, WhatIsNotAvailableIsOff) {
   EXPECT_EQ(IsWindowEnabled(GetDlgItem(dialog_, IDC_ZOOM_SLIDER)) != FALSE, Installed());
   EXPECT_EQ(IsWindowEnabled(GetDlgItem(dialog_, IDC_ZOOM_EDIT)) != FALSE, Installed());
   EXPECT_EQ(IsWindowEnabled(GetDlgItem(dialog_, IDC_CHECK_NOW)) != FALSE, Installed());
+  EXPECT_TRUE(IsWindowEnabled(GetDlgItem(dialog_, IDC_OPEN_LOG)));
+  EXPECT_TRUE(IsWindowEnabled(GetDlgItem(dialog_, IDC_COPY_DIAG)));
   for (const int id : {IDC_REBUILD, IDC_UNINSTALL, IDOK}) {
     EXPECT_FALSE(IsWindowEnabled(GetDlgItem(dialog_, id))) << id;
   }
@@ -223,6 +225,35 @@ TEST_F(InstalledWindow, ThePreviewFollowsTheZoom) {
   const uint64_t before = PictureOf(dialog_, tile);
   MoveSlider(200);
   EXPECT_TRUE(WaitFor([&] { return PictureOf(dialog_, tile) != before; }, 20000));
+}
+
+TEST_F(SettingsWindow, CopyDiagnosticsPutsAMaskedReportOnTheClipboard) {
+  const DWORD before = GetClipboardSequenceNumber();
+  const HWND button = GetDlgItem(dialog_, IDC_COPY_DIAG);
+  SendMessageW(dialog_, WM_COMMAND, MAKEWPARAM(IDC_COPY_DIAG, BN_CLICKED),
+               reinterpret_cast<LPARAM>(button));
+  ASSERT_TRUE(WaitFor([&] { return GetClipboardSequenceNumber() != before; }, 60000))
+      << "nothing reached the clipboard";
+  std::wstring report;
+  ASSERT_TRUE(WaitFor(
+      [&] {
+        if (!OpenClipboard(nullptr)) return false;
+        if (const HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
+          if (const auto* text = static_cast<const wchar_t*>(GlobalLock(data))) {
+            report = text;
+            GlobalUnlock(data);
+          }
+        }
+        CloseClipboard();
+        return !report.empty();
+      },
+      5000));
+  EXPECT_NE(report.find(kProductName), std::wstring::npos);
+  wchar_t user[64] = {};
+  const DWORD length = GetEnvironmentVariableW(L"USERNAME", user, ARRAYSIZE(user));
+  ASSERT_GT(length, 0u);
+  EXPECT_EQ(report.find(user), std::wstring::npos) << "the report names the account";
+  EXPECT_TRUE(WaitFor([&] { return IsWindowEnabled(button) != FALSE; }, 10000));
 }
 
 TEST_F(SettingsWindow, ScreenReadersGetNames) {

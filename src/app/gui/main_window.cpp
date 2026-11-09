@@ -1,10 +1,12 @@
 #include "main_window.h"
 
 #include <commctrl.h>
+#include <shellapi.h>
 
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -14,9 +16,11 @@
 #include "cli_args.h"
 #include "commands.h"
 #include "crop_math.h"
+#include "diagnostics.h"
 #include "dialogs.h"
 #include "instance.h"
 #include "log.h"
+#include "paths.h"
 #include "preview_protocol.h"
 #include "preview_renderer.h"
 #include "project_config.h"
@@ -103,6 +107,10 @@ class MainWindow {
   void RequestClose();
   void StartCheck(std::optional<RepairMode> fix, WindowActivity activity);
   void OnFixLink();
+  void OnOpenLog();
+  void OnCopyDiagnostics();
+  void OnDiagnosticsDone();
+  void ShowNote(std::wstring note);
   bool LockIsTaken() const noexcept;
   void EnterBusyIfLocked();
   void OnBusyTimer();
@@ -114,6 +122,8 @@ class MainWindow {
   WindowStart start_;
   HWND dialog_ = nullptr;
   std::optional<WindowJobs> jobs_;
+  // The report may be asked for while a check runs, so it has a thread of its own.
+  std::optional<WindowJobs> diagnosticsJob_;
   std::optional<PreviewRenderer> preview_;
   WindowTheme theme_;
   UINT stateChanged_ = 0;
@@ -164,6 +174,9 @@ INT_PTR MainWindow::Handle(UINT message, WPARAM w, LPARAM l) try {
     case kJobDoneMessage:
       OnJobDone();
       return TRUE;
+    case kDiagnosticsDoneMessage:
+      OnDiagnosticsDone();
+      return TRUE;
     case WM_TIMER:
       KillTimer(dialog_, w);
       if (w == kShowTimer) ShowOnce();
@@ -179,6 +192,14 @@ INT_PTR MainWindow::Handle(UINT message, WPARAM w, LPARAM l) try {
         if (DecideControls(state_).checkNowAndFix) {
           StartCheck(std::nullopt, WindowActivity::kChecking);
         }
+        return TRUE;
+      }
+      if (LOWORD(w) == IDC_OPEN_LOG && HIWORD(w) == BN_CLICKED) {
+        OnOpenLog();
+        return TRUE;
+      }
+      if (LOWORD(w) == IDC_COPY_DIAG && HIWORD(w) == BN_CLICKED) {
+        OnCopyDiagnostics();
         return TRUE;
       }
       if (LOWORD(w) == IDC_ZOOM_EDIT && HIWORD(w) == EN_CHANGE) {
@@ -263,6 +284,7 @@ void MainWindow::OnInitDialog() {
   SetText(IDC_STATUS_LINE1, Text(IDS_READING_STATE));
   preview_.emplace(dialog_);
   jobs_.emplace(dialog_);
+  diagnosticsJob_.emplace(dialog_, kDiagnosticsDoneMessage);
   jobs_->StartFirstReading(start_.relaunched);
   state_.activity = WindowActivity::kGathering;
   SetTimer(dialog_, kShowTimer, kShowAfterMs, nullptr);
@@ -428,6 +450,44 @@ void MainWindow::OnFixLink() {
              WindowActivity::kFixing);
 }
 
+void MainWindow::ShowNote(std::wstring note) {
+  message_ = std::move(note);
+  ApplyState();
+}
+
+void MainWindow::OnOpenLog() {
+  if (!DecideControls(state_).openLogAndDiagnostics) return;
+  std::filesystem::path log;
+  if (const HRESULT hr = GetLogPath(&log); FAILED(hr)) {
+    ShowNote(Filled(Text(IDS_LOG_FAILED), L"{hr}", HResultText(hr)));
+    return;
+  }
+  if (GetFileAttributesW(log.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    ShowNote(Text(IDS_LOG_MISSING));
+    return;
+  }
+  const auto opened = reinterpret_cast<INT_PTR>(
+      ShellExecuteW(dialog_, L"open", log.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+  if (opened <= 32) {
+    ShowNote(Filled(Text(IDS_LOG_FAILED), L"{hr}",
+                    HResultText(HRESULT_FROM_WIN32(static_cast<DWORD>(opened)))));
+  }
+}
+
+void MainWindow::OnCopyDiagnostics() {
+  if (!DecideControls(state_).openLogAndDiagnostics || diagnosticsJob_->running()) return;
+  diagnosticsJob_->StartDiagnostics(context_);
+  ApplyState();
+}
+
+void MainWindow::OnDiagnosticsDone() {
+  const std::optional<StateReading> reading = diagnosticsJob_->TakeReading();
+  HRESULT hr = reading ? reading->hr : E_UNEXPECTED;
+  if (SUCCEEDED(hr)) hr = CopyTextToClipboard(ToCrLf(reading->diagnostics));
+  ShowNote(SUCCEEDED(hr) ? Text(IDS_DIAG_COPIED)
+                         : Filled(Text(IDS_DIAG_FAILED), L"{hr}", HResultText(hr)));
+}
+
 bool MainWindow::LockIsTaken() const noexcept {
   std::optional<OperationLock> lock;
   const HRESULT hr = OperationLock::Acquire(0, &lock);
@@ -524,6 +584,8 @@ void MainWindow::ApplyState() {
     SetEnabled(id, controls.zoomAndChecks);
   }
   SetEnabled(IDC_CHECK_NOW, controls.checkNowAndFix);
+  SetEnabled(IDC_OPEN_LOG, controls.openLogAndDiagnostics);
+  SetEnabled(IDC_COPY_DIAG, controls.openLogAndDiagnostics && !diagnosticsJob_->running());
 
   for (size_t i = 0; i < panel_.lines.size(); ++i) {
     SetText(kLineControls[i], panel_.lines[i].text);
@@ -562,8 +624,10 @@ void MainWindow::ApplyState() {
       text = Text(IDS_BANNER_NOT_INSTALLED);
       break;
   }
+  // With the Fix link in the note's place, the banner's row carries the note if it is free.
+  if (banner == WindowBanner::kNone && showFix) text = note;
   SetText(IDC_BANNER, text);
-  SetVisible(IDC_BANNER, banner != WindowBanner::kNone);
+  SetVisible(IDC_BANNER, !text.empty());
   SetVisible(IDC_BANNER_LINK, banner == WindowBanner::kOtherUser);
 }
 

@@ -4,6 +4,7 @@
 
 #include <utility>
 
+#include "diagnostics.h"
 #include "elevation.h"
 #include "registry_roots.h"
 #include "settings.h"
@@ -42,7 +43,7 @@ void WindowJobs::Start(Body body) {
       CoUninitialize();
     }
     Store(std::move(reading));
-    PostMessageW(window_, kJobDoneMessage, 0, 0);
+    PostMessageW(window_, doneMessage_, 0, 0);
   });
 }
 
@@ -96,6 +97,12 @@ void WindowJobs::StartCheck(const ProcessContext& context, HWND owner,
       reading->snapshotRead = true;
     }
     reading->check = std::move(result);
+  });
+}
+
+void WindowJobs::StartDiagnostics(const ProcessContext& context) {
+  Start([context](StateReading* reading) {
+    reading->hr = MakeDiagnosticsReport(context, &reading->diagnostics);
   });
 }
 

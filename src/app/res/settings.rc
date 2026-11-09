@@ -91,6 +91,10 @@ BEGIN
   IDS_FIX_TAKE_BACK      "<a>Use {product} for .pdf</a>"
   IDS_TAKE_BACK_TITLE    "Use {product} for .pdf thumbnails?"
   IDS_TAKE_BACK_TEXT     "These settings belong to another program now:"
+  IDS_DIAG_COPIED        "Diagnostics copied; paste them into a GitHub issue."
+  IDS_DIAG_FAILED        "Cannot copy the diagnostics: {hr}"
+  IDS_LOG_MISSING        "There is no log yet."
+  IDS_LOG_FAILED         "Cannot open the log: {hr}"
   IDS_WINDOW_NOT_READY   "The settings window is not part of this build yet"
   IDS_WINDOW_USE_CLI     "Run {cli} --help in a terminal to see the commands of this build."
 END

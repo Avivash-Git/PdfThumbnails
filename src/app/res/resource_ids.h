@@ -69,6 +69,10 @@
 #define IDS_FIX_TAKE_BACK 311    // {product}
 #define IDS_TAKE_BACK_TITLE 312  // {product}
 #define IDS_TAKE_BACK_TEXT 313
+#define IDS_DIAG_COPIED 314
+#define IDS_DIAG_FAILED 315  // {hr}
+#define IDS_LOG_MISSING 316
+#define IDS_LOG_FAILED 317  // {hr}
 
 // The settings executable's notice while the window is not built yet.
 #define IDS_WINDOW_NOT_READY 201

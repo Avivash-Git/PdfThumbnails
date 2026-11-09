@@ -21,6 +21,7 @@
 namespace pdft {
 
 inline constexpr UINT kJobDoneMessage = WM_APP + 2;
+inline constexpr UINT kDiagnosticsDoneMessage = WM_APP + 4;
 
 // What the window reads about this PC.
 struct StateReading {
@@ -34,11 +35,14 @@ struct StateReading {
   Snapshot snapshot;
   std::vector<Finding> findings;
   std::optional<CheckResult> check;  // when the job was a check or fix
+  std::wstring diagnostics;          // when the job was the diagnostics report
 };
 
 class WindowJobs {
  public:
-  explicit WindowJobs(HWND window) noexcept : window_(window) {}
+  // |doneMessage| says that a job has finished.
+  explicit WindowJobs(HWND window, UINT doneMessage = kJobDoneMessage) noexcept
+      : window_(window), doneMessage_(doneMessage) {}
   WindowJobs(const WindowJobs&) = delete;
   WindowJobs& operator=(const WindowJobs&) = delete;
 
@@ -52,6 +56,8 @@ class WindowJobs {
   // Check now, with the Explorer test. With |fix| also the repairs that mode allows and the
   // administrator step, whose prompt belongs to |owner|.
   void StartCheck(const ProcessContext& context, HWND owner, std::optional<RepairMode> fix);
+  // The masked diagnostics report.
+  void StartDiagnostics(const ProcessContext& context);
 
   // The finished job's reading. Call once kJobDoneMessage arrived: it ends the thread.
   std::optional<StateReading> TakeReading();
@@ -62,6 +68,7 @@ class WindowJobs {
   void Store(StateReading reading) noexcept;
 
   HWND window_;
+  UINT doneMessage_;
   std::jthread thread_;
   std::mutex mutex_;
   std::optional<StateReading> reading_;
