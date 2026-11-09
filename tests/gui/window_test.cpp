@@ -77,8 +77,8 @@ TEST_F(SettingsWindow, ShowsItsTitleAndAFirstReading) {
   EXPECT_EQ(std::wstring(title), std::wstring(kProductName) + L" Settings");
   // On the runner where nothing is installed; its registry is real either way.
   if (!Installed()) {
-    EXPECT_EQ(ControlText(dialog_, IDC_BANNER), L"Not installed.");
-    EXPECT_TRUE(IsWindowVisible(GetDlgItem(dialog_, IDC_BANNER)));
+    EXPECT_TRUE(IsWindowVisible(GetDlgItem(dialog_, IDC_INSTALL_MACHINE)));
+    EXPECT_TRUE(IsWindowVisible(GetDlgItem(dialog_, IDC_INSTALL_USER)));
   }
   EXPECT_FALSE(IsWindowVisible(GetDlgItem(dialog_, IDC_BANNER_LINK)));
   EXPECT_FALSE(ControlText(dialog_, IDC_STATUS_LINE3).empty());
@@ -136,7 +136,9 @@ TEST_F(SettingsWindow, WhatIsNotAvailableIsOff) {
   EXPECT_EQ(IsWindowEnabled(GetDlgItem(dialog_, IDC_CHECK_NOW)) != FALSE, Installed());
   EXPECT_TRUE(IsWindowEnabled(GetDlgItem(dialog_, IDC_OPEN_LOG)));
   EXPECT_TRUE(IsWindowEnabled(GetDlgItem(dialog_, IDC_COPY_DIAG)));
-  for (const int id : {IDC_REBUILD, IDC_UNINSTALL, IDOK}) {
+  EXPECT_EQ(IsWindowEnabled(GetDlgItem(dialog_, IDC_REBUILD)) != FALSE, Installed());
+  EXPECT_EQ(IsWindowEnabled(GetDlgItem(dialog_, IDC_UNINSTALL)) != FALSE, Installed());
+  for (const int id : {IDOK}) {
     EXPECT_FALSE(IsWindowEnabled(GetDlgItem(dialog_, id))) << id;
   }
 }
@@ -320,6 +322,38 @@ TEST_F(SettingsWindow, ASecondStartLeavesOneWindow) {
   EXPECT_EQ(second.WaitForExit(30000), 0u);
   EXPECT_TRUE(program_.Running());
   EXPECT_TRUE(IsWindow(dialog_));
+}
+
+// Last of the installed tests: it takes the product away.
+TEST_F(InstalledWindow, UninstallRemovesTheProductAndCloses) {
+  const HWND button = GetDlgItem(dialog_, IDC_UNINSTALL);
+  // Asynchronous: the question it opens runs a message loop of its own.
+  PostMessageW(dialog_, WM_COMMAND, MAKEWPARAM(IDC_UNINSTALL, BN_CLICKED),
+               reinterpret_cast<LPARAM>(button));
+  HWND question = nullptr;
+  ASSERT_TRUE(WaitFor(
+      [&] {
+        question = TopLevelWindowOf(program_.id(), L"#32770");
+        return question != nullptr && question != dialog_;
+      },
+      15000))
+      << "no question appeared";
+  PostMessageW(question, WM_COMMAND, IDYES, 0);
+  // The child's report comes in a dialog of its own, and the window closes after it.
+  const bool ended = WaitFor(
+      [&] {
+        const HWND report = TopLevelWindowOf(program_.id(), L"#32770");
+        if (report && report != dialog_ && report != question) {
+          PostMessageW(report, WM_COMMAND, IDCLOSE, 0);
+        }
+        return !program_.Running();
+      },
+      300000);
+  ASSERT_TRUE(ended) << "the window did not close";
+  EXPECT_EQ(program_.WaitForExit(0), 0u);
+  HKEY key = nullptr;
+  EXPECT_EQ(RegOpenKeyExW(HKEY_CURRENT_USER, kRegKey, 0, KEY_READ, &key), ERROR_FILE_NOT_FOUND);
+  if (key) RegCloseKey(key);
 }
 
 // For a person: what the window looks like on this runner.

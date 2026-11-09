@@ -25,6 +25,7 @@ ControlStates DecideControls(const WindowState& state) noexcept {
   controls.openLogAndDiagnostics = state.context != WindowContext::kStarting;
   controls.save = ready && idle && state.dirty;
   controls.cancelLink = state.activity == WindowActivity::kRefreshing;
+  controls.install = state.context == WindowContext::kNotInstalled && idle;
   return controls;
 }
 
@@ -53,7 +54,6 @@ WindowBanner DecideBanner(const WindowState& state) noexcept {
   if (state.context == WindowContext::kSandboxed) return WindowBanner::kSandboxed;
   if (state.otherUser) return WindowBanner::kOtherUser;
   if (state.activity == WindowActivity::kExternalBusy) return WindowBanner::kExternalBusy;
-  if (state.context == WindowContext::kNotInstalled) return WindowBanner::kNotInstalled;
   return WindowBanner::kNone;
 }
 

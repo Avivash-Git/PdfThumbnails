@@ -125,6 +125,7 @@ endfunction()
 
 pdft_add_app_exe(PdfThumbnailsSettings WIN32 "${PDFT_SETTINGS_EXE}" settings
                  "${PDFT_PRODUCT_NAME} settings" main_gui.cpp
+                 gui/child_operation.cpp gui/child_operation.h
                  gui/dialogs.cpp gui/dialogs.h
                  gui/main_window.cpp gui/main_window.h
                  gui/preview_child.cpp gui/preview_child.h

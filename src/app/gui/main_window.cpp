@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "child_operation.h"
 #include "cli_args.h"
 #include "commands.h"
 #include "crop_math.h"
@@ -24,7 +25,10 @@
 #include "preview_protocol.h"
 #include "preview_renderer.h"
 #include "project_config.h"
+#include "rebuild.h"
+#include "registry_roots.h"
 #include "resource_ids.h"
+#include "settings.h"
 #include "status_panel.h"
 #include "strings.h"
 #include "theme.h"
@@ -107,6 +111,12 @@ class MainWindow {
   void RequestClose();
   void StartCheck(std::optional<RepairMode> fix, WindowActivity activity);
   void OnFixLink();
+  void OnRebuild();
+  void OnUninstall();
+  void OnInstall(bool forAllUsers);
+  void StartChild(std::wstring arguments, UINT titleId, bool closeOnSuccess);
+  void OnChildLine();
+  void OnChildDone();
   void OnSave();
   void OnCancelRefresh();
   void OnRefreshProgress();
@@ -135,7 +145,11 @@ class MainWindow {
   ProcessContext context_;
   StatusPanel panel_;
   StatusPanel panelBeforeCheck_;
-  std::wstring message_;            // what the last check or fix ended with
+  std::wstring message_;  // what the last check or fix ended with
+  std::optional<ChildOperation> child_;
+  UINT childTitle_ = 0;
+  bool closeAfterChild_ = false;  // an uninstall that worked leaves nothing for the window to show
+  bool confirmFullRefresh_ = true;
   bool canChangeChecks_ = false;    // an installed settings program exists for the task to run
   std::wstring pdfCraftCheckText_;  // the check box's own text
   WindowEdits saved_;
@@ -186,6 +200,12 @@ INT_PTR MainWindow::Handle(UINT message, WPARAM w, LPARAM l) try {
     case kRefreshProgressMessage:
       OnRefreshProgress();
       return TRUE;
+    case kChildLineMessage:
+      OnChildLine();
+      return TRUE;
+    case kChildDoneMessage:
+      OnChildDone();
+      return TRUE;
     case WM_ENDSESSION:
       // Windows is ending the session: a refresh stops, and gets a moment to end cleanly.
       if (w) {
@@ -208,6 +228,19 @@ INT_PTR MainWindow::Handle(UINT message, WPARAM w, LPARAM l) try {
         if (DecideControls(state_).checkNowAndFix) {
           StartCheck(std::nullopt, WindowActivity::kChecking);
         }
+        return TRUE;
+      }
+      if (LOWORD(w) == IDC_REBUILD && HIWORD(w) == BN_CLICKED) {
+        OnRebuild();
+        return TRUE;
+      }
+      if (LOWORD(w) == IDC_UNINSTALL && HIWORD(w) == BN_CLICKED) {
+        OnUninstall();
+        return TRUE;
+      }
+      if ((LOWORD(w) == IDC_INSTALL_MACHINE || LOWORD(w) == IDC_INSTALL_USER) &&
+          HIWORD(w) == BN_CLICKED) {
+        OnInstall(LOWORD(w) == IDC_INSTALL_MACHINE);
         return TRUE;
       }
       if (LOWORD(w) == IDOK) {
@@ -250,6 +283,8 @@ INT_PTR MainWindow::Handle(UINT message, WPARAM w, LPARAM l) try {
       return TRUE;
     case WM_DESTROY:
       preview_.reset();
+      // A child goes on by itself; the window only stops listening.
+      child_.reset();
       PostQuitMessage(0);
       return TRUE;
     case WM_NOTIFY: {
@@ -316,6 +351,7 @@ void MainWindow::OnInitDialog() {
   stateChanged_ = StateChangedMessage();
   SetText(IDC_STATUS_LINE1, Text(IDS_READING_STATE));
   preview_.emplace(dialog_);
+  child_.emplace(dialog_);
   jobs_.emplace(dialog_);
   diagnosticsJob_.emplace(dialog_, kDiagnosticsDoneMessage);
   jobs_->StartFirstReading(start_.relaunched);
@@ -484,6 +520,77 @@ void MainWindow::OnFixLink() {
              WindowActivity::kFixing);
 }
 
+void MainWindow::OnRebuild() {
+  if (!DecideControls(state_).rebuild) return;
+  if (confirmFullRefresh_) {
+    bool dontAskAgain = false;
+    if (!ConfirmRebuild(dialog_, RebuildQuestion(), &dontAskAgain)) return;
+    if (dontAskAgain && SUCCEEDED(SaveConfirmFullRefresh(RegistryRoots{}, false))) {
+      confirmFullRefresh_ = false;
+    }
+  }
+  StartChild(L"--refresh --full --yes", IDS_CHILD_TITLE_REBUILD, false);
+}
+
+void MainWindow::OnUninstall() {
+  if (!DecideControls(state_).uninstall) return;
+  bool clearCache = true;
+  if (!ConfirmUninstall(dialog_, UninstallQuestion(false), &clearCache)) return;
+  StartChild(clearCache ? L"--uninstall --yes --rebuild-thumbnails" : L"--uninstall --yes",
+             IDS_CHILD_TITLE_UNINSTALL, true);
+}
+
+void MainWindow::OnInstall(bool forAllUsers) {
+  if (!kDevInstall || !DecideControls(state_).install) return;
+  StartChild(forAllUsers ? L"--install --machine" : L"--install --user", IDS_CHILD_TITLE_INSTALL,
+             false);
+}
+
+void MainWindow::StartChild(std::wstring arguments, UINT titleId, bool closeOnSuccess) {
+  // The preview's child holds the handler, which a rebuild or an uninstall has to be able to
+  // replace. The window holds no lock while it is idle.
+  preview_.reset();
+  previewAsked_.reset();
+  childTitle_ = titleId;
+  closeAfterChild_ = closeOnSuccess;
+  panelBeforeCheck_ = panel_;
+  message_.clear();
+  state_.activity = WindowActivity::kChild;
+  ApplyState();
+  child_->Start(std::move(arguments));
+}
+
+void MainWindow::OnChildLine() {
+  const std::optional<std::wstring> line = child_->TakeLine();
+  if (!line || line->empty() || state_.activity != WindowActivity::kChild) return;
+  panel_.lines[0] = {StatusGlyph::kNone, *line};
+  ApplyState();
+}
+
+void MainWindow::OnChildDone() {
+  const std::optional<ChildResult> result = child_->TakeResult();
+  panel_ = panelBeforeCheck_;
+  state_.activity = WindowActivity::kIdle;
+  preview_.emplace(dialog_);
+  ApplyState();
+  if (!result) return;
+  const bool started = SUCCEEDED(result->hr);
+  const ChildOutcome outcome = started ? OutcomeOfChild(result->exitCode) : ChildOutcome::kError;
+  ShowChildResult(dialog_,
+                  outcome == ChildOutcome::kError     ? ResultIcon::kError
+                  : outcome == ChildOutcome::kWarning ? ResultIcon::kWarning
+                                                      : ResultIcon::kInformation,
+                  Text(childTitle_),
+                  started ? result->output
+                          : Filled(Text(IDS_CHILD_NOT_STARTED), L"{hr}", HResultText(result->hr)));
+  if (started && result->exitCode == 0 && closeAfterChild_) {
+    DestroyWindow(dialog_);
+    return;
+  }
+  RequestReading();
+  RequestPreview();
+}
+
 void MainWindow::OnSave() {
   if (!DecideControls(state_).save) return;
   SaveRequest request;
@@ -637,6 +744,9 @@ void MainWindow::OnJobDone() {
   if (saved && (saved->busy || !saved->problem.empty())) {
     closePending_ = false;
     if (!saved->problem.empty()) ShowProblem(dialog_, saved->problem);
+  } else if constexpr (!kPdfRefreshDefault) {
+    // The thumbnails already made keep the old zoom until they are made again.
+    if (saved && reading->save->zoomAsked && !closePending_) OnRebuild();
   }
   if (closePending_) {
     DestroyWindow(dialog_);
@@ -667,6 +777,10 @@ void MainWindow::ApplyReading(const StateReading& reading) {
                                          reading.snapshot.scope != Scope::kNone);
   panel_ = BuildStatusPanel(reading.snapshot, reading.findings);
   canChangeChecks_ = InstalledSettingsExe(reading.snapshot).has_value();
+  confirmFullRefresh_ = reading.snapshot.settings.confirmFullRefresh;
+  SendDlgItemMessageW(dialog_, IDC_UNINSTALL, BCM_SETSHIELD, 0,
+                      reading.snapshot.machineClass.has_value() ? TRUE : FALSE);
+  SendDlgItemMessageW(dialog_, IDC_INSTALL_MACHINE, BCM_SETSHIELD, 0, TRUE);
   SetText(IDC_CHECK_PDFCRAFT,
           pdfCraftCheckText_ +
               (reading.snapshot.pdfcraft.installed ? L"" : Text(IDS_PDFCRAFT_NOT_FOUND)));
@@ -697,6 +811,16 @@ void MainWindow::ApplyState() {
                                state_.activity == WindowActivity::kStopping);
   SetVisible(IDC_PROGRESS_CANCEL, controls.cancelLink);
   SetEnabled(IDC_CHECK_NOW, controls.checkNowAndFix);
+  SetEnabled(IDC_REBUILD, controls.rebuild);
+  SetEnabled(IDC_UNINSTALL, controls.uninstall);
+  // In a developer build with nothing installed, the buttons take the place of the status lines.
+  const bool installButtons = kDevInstall && controls.install;
+  SetVisible(IDC_INSTALL_MACHINE, installButtons);
+  SetVisible(IDC_INSTALL_USER, installButtons);
+  for (size_t i = 0; i < kLineControls.size(); ++i) {
+    SetVisible(kLineControls[i], !installButtons);
+    SetVisible(kGlyphControls[i], !installButtons);
+  }
   SetEnabled(IDC_OPEN_LOG, controls.openLogAndDiagnostics);
   SetEnabled(IDC_COPY_DIAG, controls.openLogAndDiagnostics && !diagnosticsJob_->running());
 
@@ -732,9 +856,6 @@ void MainWindow::ApplyState() {
       break;
     case WindowBanner::kExternalBusy:
       text = Text(IDS_BANNER_BUSY);
-      break;
-    case WindowBanner::kNotInstalled:
-      text = Text(IDS_BANNER_NOT_INSTALLED);
       break;
   }
   // With the Fix link in the note's place, the banner's row carries the note if it is free.

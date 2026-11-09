@@ -99,6 +99,15 @@ TEST(WindowControls, NotInstalledOrSandboxedChangesNothing) {
   }
 }
 
+TEST(WindowControls, InstallIsOfferedOnlyWhereNothingIsInstalled) {
+  WindowState state = Ready();
+  EXPECT_FALSE(DecideControls(state).install);
+  state.context = WindowContext::kNotInstalled;
+  EXPECT_TRUE(DecideControls(state).install);
+  state.activity = WindowActivity::kChild;
+  EXPECT_FALSE(DecideControls(state).install);
+}
+
 TEST(WindowControls, NothingBeforeTheFirstReading) {
   WindowState state;
   const ControlStates c = DecideControls(state);
@@ -140,7 +149,7 @@ TEST(WindowBannerRule, TheMostImportantOneShows) {
   state.otherUser = false;
   EXPECT_EQ(DecideBanner(state), WindowBanner::kExternalBusy);
   state.activity = WindowActivity::kIdle;
-  EXPECT_EQ(DecideBanner(state), WindowBanner::kNotInstalled);
+  EXPECT_EQ(DecideBanner(state), WindowBanner::kNone);  // the status lines say it
   EXPECT_EQ(DecideBanner(Ready()), WindowBanner::kNone);
 }
 

@@ -52,6 +52,7 @@ struct ControlStates {
   bool openLogAndDiagnostics = false;
   bool save = false;
   bool cancelLink = false;  // shown, not only enabled
+  bool install = false;     // nothing is installed: the install buttons, in developer builds
 };
 
 // Which controls may be used now (pure).
@@ -68,7 +69,7 @@ enum class CloseAction {
 // (pure) A child goes on by itself, so it never holds the window open.
 CloseAction DecideClose(const WindowState& state) noexcept;
 
-enum class WindowBanner { kNone, kSandboxed, kOtherUser, kExternalBusy, kNotInstalled };
+enum class WindowBanner { kNone, kSandboxed, kOtherUser, kExternalBusy };
 
 // The banner, the first that applies in the order of WindowBanner (pure).
 WindowBanner DecideBanner(const WindowState& state) noexcept;

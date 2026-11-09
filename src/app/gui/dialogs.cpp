@@ -56,6 +56,60 @@ bool ConfirmStopRefresh(HWND owner) {
   return SUCCEEDED(TaskDialogIndirect(&config, &pressed, nullptr, nullptr)) && pressed == IDYES;
 }
 
+bool ConfirmRebuild(HWND owner, const std::wstring& question, bool* dontAskAgain) {
+  const std::wstring rebuild = Text(IDS_REBUILD_NOW);
+  const std::wstring verification = Text(IDS_DONT_ASK_AGAIN);
+  const TASKDIALOG_BUTTON buttons[] = {{IDYES, rebuild.c_str()}};
+  TASKDIALOGCONFIG config = {sizeof(config)};
+  config.hwndParent = owner;
+  config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+  config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+  config.pszWindowTitle = kProductName;
+  config.pszContent = question.c_str();
+  config.cButtons = ARRAYSIZE(buttons);
+  config.pButtons = buttons;
+  config.nDefaultButton = IDCANCEL;
+  config.pszVerificationText = verification.c_str();
+  int pressed = IDCANCEL;
+  BOOL ticked = FALSE;
+  const bool yes =
+      SUCCEEDED(TaskDialogIndirect(&config, &pressed, nullptr, &ticked)) && pressed == IDYES;
+  *dontAskAgain = yes && ticked;
+  return yes;
+}
+
+bool ConfirmUninstall(HWND owner, const std::wstring& question, bool* clearCache) {
+  const std::wstring uninstall = Text(IDS_UNINSTALL_NOW);
+  const std::wstring verification = Text(IDS_ALSO_CLEAR_CACHE);
+  const TASKDIALOG_BUTTON buttons[] = {{IDYES, uninstall.c_str()}};
+  TASKDIALOGCONFIG config = {sizeof(config)};
+  config.hwndParent = owner;
+  config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_VERIFICATION_FLAG_CHECKED;
+  config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+  config.pszWindowTitle = kProductName;
+  config.pszMainIcon = TD_WARNING_ICON;
+  config.pszMainInstruction = question.c_str();
+  config.cButtons = ARRAYSIZE(buttons);
+  config.pButtons = buttons;
+  config.nDefaultButton = IDCANCEL;
+  config.pszVerificationText = verification.c_str();
+  int pressed = IDCANCEL;
+  BOOL ticked = FALSE;
+  const bool yes =
+      SUCCEEDED(TaskDialogIndirect(&config, &pressed, nullptr, &ticked)) && pressed == IDYES;
+  *clearCache = ticked != FALSE;
+  return yes;
+}
+
+void ShowChildResult(HWND owner, ResultIcon icon, const std::wstring& title,
+                     const std::wstring& text) {
+  (void)TaskDialog(owner, nullptr, kProductName, title.c_str(), text.c_str(), TDCBF_CLOSE_BUTTON,
+                   icon == ResultIcon::kError     ? TD_ERROR_ICON
+                   : icon == ResultIcon::kWarning ? TD_WARNING_ICON
+                                                  : TD_INFORMATION_ICON,
+                   nullptr);
+}
+
 void ShowProblem(HWND owner, const std::wstring& text) {
   (void)TaskDialog(owner, nullptr, kProductName, text.c_str(), nullptr, TDCBF_CLOSE_BUTTON,
                    TD_ERROR_ICON, nullptr);

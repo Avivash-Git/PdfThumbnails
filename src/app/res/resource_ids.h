@@ -61,7 +61,6 @@
 #define IDS_BANNER_SANDBOXED 303   // {product}
 #define IDS_BANNER_OTHER_USER 304  // {account}
 #define IDS_BANNER_BUSY 305
-#define IDS_BANNER_NOT_INSTALLED 306
 #define IDS_CHECKING 307
 #define IDS_CLOSING_AFTER_WORK 308
 #define IDS_FIX 309
@@ -83,6 +82,14 @@
 #define IDS_ASK_STOP_TEXT 325
 #define IDS_ASK_STOP_STOP 326
 #define IDS_ASK_STOP_KEEP 327
+#define IDS_REBUILD_NOW 328
+#define IDS_DONT_ASK_AGAIN 329
+#define IDS_ALSO_CLEAR_CACHE 330
+#define IDS_UNINSTALL_NOW 331
+#define IDS_CHILD_TITLE_REBUILD 332
+#define IDS_CHILD_TITLE_UNINSTALL 333
+#define IDS_CHILD_TITLE_INSTALL 334
+#define IDS_CHILD_NOT_STARTED 335  // {hr}
 
 // The settings executable's notice while the window is not built yet.
 #define IDS_WINDOW_NOT_READY 201
