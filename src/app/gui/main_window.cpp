@@ -351,6 +351,8 @@ INT_PTR MainWindow::Handle(UINT message, WPARAM w, LPARAM l) try {
     case WM_SYSCOLORCHANGE:
     case WM_THEMECHANGED:
       theme_.Rebuild(GetDpiForWindow(dialog_));
+      // The controls still point at the fonts that were just replaced.
+      ApplyFonts();
       InvalidateRect(dialog_, nullptr, TRUE);
       return FALSE;
     default:
