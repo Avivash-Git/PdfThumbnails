@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "accessibility.h"
 #include "child_operation.h"
 #include "cli_args.h"
 #include "commands.h"
@@ -92,6 +93,8 @@ class MainWindow {
 
   void OnInitDialog();
   void ApplyFonts() noexcept;
+  void DescribeControls();
+  void DescribeTiles();
   void SetUpZoomControls() noexcept;
   void SetEnabled(int id, bool enabled) noexcept;
   void ShowZoom(int zoom) noexcept;
@@ -140,6 +143,10 @@ class MainWindow {
   std::optional<WindowJobs> diagnosticsJob_;
   std::optional<PreviewRenderer> preview_;
   WindowTheme theme_;
+  WindowAccessibility accessibility_;
+  std::wstring announcedLine_;  // what screen readers were told last ...
+  std::wstring announcedBanner_;
+  ULONGLONG announcedAt_ = 0;  // ... and when: a running refresh is read out at most once a second
   UINT stateChanged_ = 0;
   WindowState state_;
   ProcessContext context_;
@@ -345,6 +352,8 @@ void MainWindow::OnInitDialog() {
   }
   ApplyFonts();
   SetUpZoomControls();
+  accessibility_.Start();
+  DescribeControls();
   wchar_t checkText[128] = {};
   GetDlgItemTextW(dialog_, IDC_CHECK_PDFCRAFT, checkText, ARRAYSIZE(checkText));
   pdfCraftCheckText_ = checkText;
@@ -357,6 +366,25 @@ void MainWindow::OnInitDialog() {
   jobs_->StartFirstReading(start_.relaunched);
   state_.activity = WindowActivity::kGathering;
   SetTimer(dialog_, kShowTimer, kShowAfterMs, nullptr);
+}
+
+void MainWindow::DescribeControls() {
+  accessibility_.SetName(Item(IDC_ZOOM_SLIDER), Text(IDS_NAME_ZOOM_SLIDER));
+  accessibility_.SetName(Item(IDC_ZOOM_EDIT), Text(IDS_NAME_ZOOM_BOX));
+  accessibility_.SetName(Item(IDC_ZOOM_SPIN), Text(IDS_NAME_ZOOM_ARROWS));
+  accessibility_.SetName(Item(IDC_PROGRESS), Text(IDS_NAME_PROGRESS));
+  for (const int id : kGlyphControls) accessibility_.MarkAsPicture(Item(id));
+  for (const int id : kPreviewTiles) accessibility_.MarkAsPicture(Item(id));
+  DescribeTiles();
+  accessibility_.MakeLiveRegion(Item(IDC_STATUS_LINE1), false);
+  accessibility_.MakeLiveRegion(Item(IDC_BANNER), true);
+}
+
+void MainWindow::DescribeTiles() {
+  const std::wstring zoom = std::to_wstring(edits_.zoom);
+  accessibility_.SetName(Item(IDC_PREVIEW_DOC), Filled(Text(IDS_NAME_TILE_DOC), L"{zoom}", zoom));
+  accessibility_.SetName(Item(IDC_PREVIEW_SLIDE),
+                         Filled(Text(IDS_NAME_TILE_SLIDE), L"{zoom}", zoom));
 }
 
 void MainWindow::ApplyFonts() noexcept {
@@ -394,6 +422,7 @@ void MainWindow::ZoomChanged(int zoom) {
   if (edits_.zoom == zoom) return;
   edits_.zoom = zoom;
   state_.dirty = edits_ != saved_;
+  DescribeTiles();
   ApplyState();
   RequestPreview();
 }
@@ -793,6 +822,7 @@ void MainWindow::ApplyReading(const StateReading& reading) {
   }
   edits_ = saved_;
   ShowZoom(edits_.zoom);
+  DescribeTiles();
   CheckDlgButton(dialog_, IDC_CHECK_PDFCRAFT,
                  reading.snapshot.task.afterPdfCraft ? BST_CHECKED : BST_UNCHECKED);
   CheckDlgButton(dialog_, IDC_CHECK_SIGNIN,
@@ -818,8 +848,16 @@ void MainWindow::ApplyState() {
   SetVisible(IDC_INSTALL_MACHINE, installButtons);
   SetVisible(IDC_INSTALL_USER, installButtons);
   for (size_t i = 0; i < kLineControls.size(); ++i) {
+    const StatusGlyph glyph = panel_.lines[i].glyph;
     SetVisible(kLineControls[i], !installButtons);
-    SetVisible(kGlyphControls[i], !installButtons);
+    // A glyph that says nothing must not be there for a screen reader to stop at.
+    SetVisible(kGlyphControls[i], !installButtons && glyph != StatusGlyph::kNone);
+    if (glyph != StatusGlyph::kNone) {
+      accessibility_.SetName(Item(kGlyphControls[i]),
+                             Text(glyph == StatusGlyph::kOk        ? IDS_NAME_GLYPH_OK
+                                  : glyph == StatusGlyph::kWarning ? IDS_NAME_GLYPH_WARNING
+                                                                   : IDS_NAME_GLYPH_PROBLEM));
+    }
   }
   SetEnabled(IDC_OPEN_LOG, controls.openLogAndDiagnostics);
   SetEnabled(IDC_COPY_DIAG, controls.openLogAndDiagnostics && !diagnosticsJob_->running());
@@ -862,6 +900,17 @@ void MainWindow::ApplyState() {
   if (banner == WindowBanner::kNone && showFix) text = note;
   SetText(IDC_BANNER, text);
   SetVisible(IDC_BANNER, !text.empty());
+  if (text != announcedBanner_) {
+    announcedBanner_ = text;
+    if (!text.empty()) accessibility_.Announce(Item(IDC_BANNER));
+  }
+  const ULONGLONG now = GetTickCount64();
+  if (panel_.lines[0].text != announcedLine_ &&
+      (state_.activity != WindowActivity::kRefreshing || now - announcedAt_ >= 1000)) {
+    announcedLine_ = panel_.lines[0].text;
+    announcedAt_ = now;
+    accessibility_.Announce(Item(IDC_STATUS_LINE1));
+  }
   SetVisible(IDC_BANNER_LINK, banner == WindowBanner::kOtherUser);
 }
 

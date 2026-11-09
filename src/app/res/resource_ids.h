@@ -90,6 +90,15 @@
 #define IDS_CHILD_TITLE_UNINSTALL 333
 #define IDS_CHILD_TITLE_INSTALL 334
 #define IDS_CHILD_NOT_STARTED 335  // {hr}
+#define IDS_NAME_ZOOM_SLIDER 336
+#define IDS_NAME_ZOOM_BOX 337
+#define IDS_NAME_ZOOM_ARROWS 338
+#define IDS_NAME_PROGRESS 339
+#define IDS_NAME_GLYPH_OK 340
+#define IDS_NAME_GLYPH_WARNING 341
+#define IDS_NAME_GLYPH_PROBLEM 342
+#define IDS_NAME_TILE_DOC 343    // {zoom}
+#define IDS_NAME_TILE_SLIDE 344  // {zoom}
 
 // The settings executable's notice while the window is not built yet.
 #define IDS_WINDOW_NOT_READY 201

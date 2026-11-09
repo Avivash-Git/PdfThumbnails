@@ -304,6 +304,9 @@ TEST_F(SettingsWindow, ScreenReadersGetNames) {
   EXPECT_EQ(NameOf(IDC_ZOOM_EDIT), L"Zoom percent");
   EXPECT_EQ(NameOf(IDCANCEL), L"Close");
   EXPECT_NE(NameOf(IDC_CHECK_SIGNIN).find(L"sign"), std::wstring::npos);
+  EXPECT_FALSE(NameOf(IDC_ZOOM_SPIN).empty());
+  EXPECT_EQ(NameOf(IDC_PREVIEW_DOC), L"Preview of a sample document at 100 % zoom");
+  EXPECT_EQ(NameOf(IDC_PREVIEW_SLIDE), L"Preview of a sample slide at 100 % zoom");
 }
 
 TEST_F(SettingsWindow, EscapeClosesIt) {
