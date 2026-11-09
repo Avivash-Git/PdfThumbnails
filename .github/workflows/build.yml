@@ -521,6 +521,8 @@ jobs:
           PDFT_GUI_INSTALLED: '1'
           PDFT_GUI_SHOTS: ${{ github.workspace }}\window-shots
         run: |
+          rem --install refuses a folder other accounts can change, as a runner's work folder is.
+          icacls runtime /inheritance:r /grant:r "%USERNAME%":(OI)(CI)F *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F >nul
           t\pdft-run-medium.exe -- runtime\PdfThumbnailsCli.exe --install --user
           echo --install --user: exit %ERRORLEVEL%
           ctest --test-dir t -L gui -V --no-tests=error
