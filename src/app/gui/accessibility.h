@@ -18,6 +18,8 @@ class WindowAccessibility {
   void Start() noexcept;
 
   void SetName(HWND control, const std::wstring& name) noexcept;
+  // What a screen reader says for the control's value, instead of what the control reports.
+  void SetValueText(HWND control, const std::wstring& value) noexcept;
   void MarkAsPicture(HWND control) noexcept;
   // Changes to |control| are read out: politely, or at once when |urgent|.
   void MakeLiveRegion(HWND control, bool urgent) noexcept;

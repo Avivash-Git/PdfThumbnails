@@ -29,6 +29,13 @@ void WindowAccessibility::SetName(HWND control, const std::wstring& name) noexce
   }
 }
 
+void WindowAccessibility::SetValueText(HWND control, const std::wstring& value) noexcept {
+  if (service_) {
+    (void)service_->SetHwndPropStr(control, static_cast<DWORD>(OBJID_CLIENT), CHILDID_SELF,
+                                   PROPID_ACC_VALUE, value.c_str());
+  }
+}
+
 void WindowAccessibility::MarkAsPicture(HWND control) noexcept {
   if (!service_) return;
   VARIANT role = {};

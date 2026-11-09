@@ -400,6 +400,8 @@ void MainWindow::DescribeControls() {
 
 void MainWindow::DescribeTiles() {
   const std::wstring zoom = std::to_wstring(edits_.zoom);
+  // A slider reports how far along its range it is: 136 would be read as 36 %.
+  accessibility_.SetValueText(Item(IDC_ZOOM_SLIDER), zoom + L" %");
   accessibility_.SetName(Item(IDC_PREVIEW_DOC), Filled(Text(IDS_NAME_TILE_DOC), L"{zoom}", zoom));
   accessibility_.SetName(Item(IDC_PREVIEW_SLIDE),
                          Filled(Text(IDS_NAME_TILE_SLIDE), L"{zoom}", zoom));
