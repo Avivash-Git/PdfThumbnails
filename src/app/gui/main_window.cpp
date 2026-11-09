@@ -14,6 +14,7 @@
 #include "cli_args.h"
 #include "commands.h"
 #include "crop_math.h"
+#include "dialogs.h"
 #include "instance.h"
 #include "log.h"
 #include "preview_protocol.h"
@@ -32,6 +33,9 @@ namespace {
 
 constexpr UINT_PTR kShowTimer = 1;
 constexpr UINT_PTR kStateChangedTimer = 2;
+constexpr UINT_PTR kBusyTimer = 3;
+// While another process holds the operation lock; one that crashed tells nobody it is gone.
+constexpr UINT kBusyPollMs = 1000;
 // The window shows at the first reading, or after this long saying that it is reading.
 constexpr UINT kShowAfterMs = 1500;
 // Several commands that end close together cause one reading.
@@ -97,6 +101,11 @@ class MainWindow {
   void ApplyState();
   void RequestReading();
   void RequestClose();
+  void StartCheck(std::optional<RepairMode> fix, WindowActivity activity);
+  void OnFixLink();
+  bool LockIsTaken() const noexcept;
+  void EnterBusyIfLocked();
+  void OnBusyTimer();
   void Relaunch() noexcept;
   void OnDrawItem(const DRAWITEMSTRUCT& item) noexcept;
   void PaintBackground(HDC dc) const noexcept;
@@ -111,6 +120,8 @@ class MainWindow {
   WindowState state_;
   ProcessContext context_;
   StatusPanel panel_;
+  StatusPanel panelBeforeCheck_;
+  std::wstring message_;  // what the last check or fix ended with
   WindowEdits saved_;
   WindowEdits edits_;
   bool updatingZoom_ = false;  // the window itself is setting the zoom controls
@@ -157,10 +168,17 @@ INT_PTR MainWindow::Handle(UINT message, WPARAM w, LPARAM l) try {
       KillTimer(dialog_, w);
       if (w == kShowTimer) ShowOnce();
       if (w == kStateChangedTimer) RequestReading();
+      if (w == kBusyTimer) OnBusyTimer();
       return TRUE;
     case WM_COMMAND:
       if (LOWORD(w) == IDCANCEL) {
         RequestClose();
+        return TRUE;
+      }
+      if (LOWORD(w) == IDC_CHECK_NOW) {
+        if (DecideControls(state_).checkNowAndFix) {
+          StartCheck(std::nullopt, WindowActivity::kChecking);
+        }
         return TRUE;
       }
       if (LOWORD(w) == IDC_ZOOM_EDIT && HIWORD(w) == EN_CHANGE) {
@@ -190,6 +208,11 @@ INT_PTR MainWindow::Handle(UINT message, WPARAM w, LPARAM l) try {
       return TRUE;
     case WM_NOTIFY: {
       const auto* header = reinterpret_cast<const NMHDR*>(l);
+      if (header->idFrom == IDC_STATUS_FIX &&
+          (header->code == NM_CLICK || header->code == NM_RETURN)) {
+        OnFixLink();
+        return TRUE;
+      }
       if (header->idFrom == IDC_BANNER_LINK &&
           (header->code == NM_CLICK || header->code == NM_RETURN)) {
         Relaunch();
@@ -389,9 +412,60 @@ void MainWindow::ShowOnce() noexcept {
   SetForegroundWindow(dialog_);
 }
 
+void MainWindow::StartCheck(std::optional<RepairMode> fix, WindowActivity activity) {
+  panelBeforeCheck_ = panel_;
+  panel_.lines[0] = {StatusGlyph::kNone, Text(IDS_CHECKING)};
+  message_.clear();
+  state_.activity = activity;
+  ApplyState();
+  jobs_->StartCheck(context_, dialog_, fix);
+}
+
+void MainWindow::OnFixLink() {
+  if (!DecideControls(state_).checkNowAndFix || panel_.fix == FixLink::kNone) return;
+  if (panel_.fix == FixLink::kTakeBack && !ConfirmTakeBack(dialog_, panel_.takeBack)) return;
+  StartCheck(panel_.fix == FixLink::kTakeBack ? RepairMode::kSafeAndTakeBack : RepairMode::kSafe,
+             WindowActivity::kFixing);
+}
+
+bool MainWindow::LockIsTaken() const noexcept {
+  std::optional<OperationLock> lock;
+  const HRESULT hr = OperationLock::Acquire(0, &lock);
+  return hr == OperationLock::kBusy || hr == OperationLock::kTakenByLowerIntegrity;
+}
+
+void MainWindow::EnterBusyIfLocked() {
+  if (state_.context != WindowContext::kReady || state_.activity != WindowActivity::kIdle ||
+      !LockIsTaken()) {
+    return;
+  }
+  state_.activity = WindowActivity::kExternalBusy;
+  SetTimer(dialog_, kBusyTimer, kBusyPollMs, nullptr);
+  ApplyState();
+}
+
+void MainWindow::OnBusyTimer() {
+  if (state_.activity != WindowActivity::kExternalBusy) return;
+  if (LockIsTaken()) {
+    SetTimer(dialog_, kBusyTimer, kBusyPollMs, nullptr);
+    return;
+  }
+  state_.activity = WindowActivity::kIdle;
+  ApplyState();
+  RequestReading();
+}
+
 void MainWindow::OnJobDone() {
   std::optional<StateReading> reading = jobs_->TakeReading();
   state_.activity = WindowActivity::kIdle;
+  if (reading && reading->check) {
+    panel_ = panelBeforeCheck_;
+    message_ = CheckOutcomeText(*reading->check);
+    if (reading->check->busy) {
+      state_.activity = WindowActivity::kExternalBusy;
+      SetTimer(dialog_, kBusyTimer, kBusyPollMs, nullptr);
+    }
+  }
   if (reading && reading->leaveContainer) {
     Relaunch();
     return;
@@ -399,6 +473,7 @@ void MainWindow::OnJobDone() {
   if (reading) ApplyReading(*reading);
   ApplyState();
   RequestPreview();
+  if (!closePending_) EnterBusyIfLocked();
   ShowOnce();
   if (closePending_) {
     DestroyWindow(dialog_);
@@ -424,6 +499,7 @@ void MainWindow::ApplyReading(const StateReading& reading) {
     }
     return;
   }
+  if (!reading.snapshotRead) return;
   state_.context = ClassifyWindowContext(RefusesWrites(context_.virtualization),
                                          reading.snapshot.scope != Scope::kNone);
   panel_ = BuildStatusPanel(reading.snapshot, reading.findings);
@@ -447,13 +523,24 @@ void MainWindow::ApplyState() {
   for (const int id : {IDC_ZOOM_SLIDER, IDC_ZOOM_EDIT, IDC_ZOOM_SPIN}) {
     SetEnabled(id, controls.zoomAndChecks);
   }
+  SetEnabled(IDC_CHECK_NOW, controls.checkNowAndFix);
 
   for (size_t i = 0; i < panel_.lines.size(); ++i) {
     SetText(kLineControls[i], panel_.lines[i].text);
     InvalidateRect(Item(kGlyphControls[i]), nullptr, TRUE);
   }
-  SetText(IDC_STATUS_HINT, panel_.hint);
-  SetVisible(IDC_STATUS_HINT, !panel_.hint.empty());
+  const bool showFix = panel_.fix != FixLink::kNone && controls.checkNowAndFix;
+  if (showFix) {
+    SetText(IDC_STATUS_FIX, panel_.fix == FixLink::kFix ? Text(IDS_FIX)
+                            : panel_.fix == FixLink::kFixNeedsAdmin
+                                ? Text(IDS_FIX_ADMIN)
+                                : Filled(Text(IDS_FIX_TAKE_BACK), L"{product}", kProductName));
+  }
+  SetVisible(IDC_STATUS_FIX, showFix);
+  // One line for both: what to do about the problem comes before how the last check ended.
+  const std::wstring& note = panel_.hint.empty() ? message_ : panel_.hint;
+  SetText(IDC_STATUS_HINT, note);
+  SetVisible(IDC_STATUS_HINT, !showFix && !note.empty());
 
   const WindowBanner banner = DecideBanner(state_);
   std::wstring text;
@@ -496,10 +583,17 @@ void MainWindow::RequestClose() {
     case CloseAction::kCloseNow:
       DestroyWindow(dialog_);
       break;
-    case CloseAction::kWaitForWork:
     case CloseAction::kAskSaveChanges:
+      // Nothing can be saved yet: an unsaved zoom is simply left.
+      if (!jobs_->running()) {
+        DestroyWindow(dialog_);
+        break;
+      }
+      [[fallthrough]];
+    case CloseAction::kWaitForWork:
     case CloseAction::kAskStopRefresh:
       closePending_ = true;
+      SetText(IDC_STATUS_LINE1, Text(IDS_CLOSING_AFTER_WORK));
       break;
   }
 }

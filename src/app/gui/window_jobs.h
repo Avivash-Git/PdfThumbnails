@@ -12,8 +12,10 @@
 #include <thread>
 #include <vector>
 
+#include "check.h"
 #include "context.h"
 #include "evaluate.h"
+#include "repair.h"
 #include "snapshot.h"
 
 namespace pdft {
@@ -28,8 +30,10 @@ struct StateReading {
   // The registry is virtualized below an app package and this start has not been through File
   // Explorer yet: start again outside it. Nothing else was read.
   bool leaveContainer = false;
+  bool snapshotRead = false;  // |snapshot| and |findings| hold what was read
   Snapshot snapshot;
   std::vector<Finding> findings;
+  std::optional<CheckResult> check;  // when the job was a check or fix
 };
 
 class WindowJobs {
@@ -45,6 +49,9 @@ class WindowJobs {
   void StartFirstReading(bool relaunched);
   // The state again, with the context read before.
   void StartReading(const ProcessContext& context);
+  // Check now, with the Explorer test. With |fix| also the repairs that mode allows and the
+  // administrator step, whose prompt belongs to |owner|.
+  void StartCheck(const ProcessContext& context, HWND owner, std::optional<RepairMode> fix);
 
   // The finished job's reading. Call once kJobDoneMessage arrived: it ends the thread.
   std::optional<StateReading> TakeReading();

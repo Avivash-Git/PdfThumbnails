@@ -23,12 +23,21 @@ bool IsAboutThisProcess(FindingId id) noexcept {
          id == FindingId::kVirtualized;
 }
 
+// Whether File Explorer's way of making a thumbnail was seen to work: in this reading, or by the
+// check recorded last.
+bool ExplorerTestPassed(const Snapshot& snapshot) noexcept {
+  if (snapshot.live) return snapshot.live->hr == S_OK;
+  return snapshot.last && snapshot.last->liveTest && *snapshot.last->liveTest == S_OK;
+}
+
 StatusPanelLine ThumbnailsLine(const Snapshot& snapshot, const Finding* problem) {
   if (problem) return {StatusGlyph::kProblem, FindingText(snapshot, *problem)};
-  return {StatusGlyph::kOk, std::wstring(L"PDF thumbnails are working (") +
-                                (snapshot.scope == Scope::kUser ? L"installed for this user"
-                                                                : L"installed for all users") +
-                                L")"};
+  const std::wstring scope =
+      snapshot.scope == Scope::kUser ? L"installed for this user" : L"installed for all users";
+  // Nothing wrong was found, but only the Explorer test shows that thumbnails are really made.
+  if (!ExplorerTestPassed(snapshot))
+    return {StatusGlyph::kNone, L"Not tested yet (" + scope + L")"};
+  return {StatusGlyph::kOk, L"PDF thumbnails are working (" + scope + L")"};
 }
 
 StatusPanelLine LastCheckLine(const Snapshot& snapshot) {
@@ -75,6 +84,27 @@ FixLink ChooseFixLink(std::span<const Finding> findings) noexcept {
 
 }  // namespace
 
+std::wstring CheckOutcomeText(const CheckResult& result) {
+  if (result.busy) return {};
+  if (result.namedObjectsRefused) return NamedObjectsRefusedMessage();
+  if (result.refused) return L"The check cannot run here.";
+  if (result.code == ExitCode::kCancelled) {
+    return L"The administrator prompt was declined; the part for all users was not changed.";
+  }
+  if (result.adminStepNeeded && result.adminStepUnavailable) {
+    return L"The part for all users needs an administrator, and no settings program is installed "
+           L"for all users to do it.";
+  }
+  std::wstring text;
+  for (const Finding& finding : result.findings) {
+    if (finding.id == FindingId::kPdfCraftChanged) {
+      text = std::wstring(kPdfCraftProductName) + L" " + finding.from + L" \u2192 " + finding.to +
+             L" detected; ";
+    }
+  }
+  return text + result.summary;
+}
+
 StatusPanel BuildStatusPanel(const Snapshot& snapshot, std::span<const Finding> findings) {
   const auto first = std::find_if(findings.begin(), findings.end(), [](const Finding& f) {
     return f.breaksThumbnails && !IsAboutThisProcess(f.id);
@@ -86,6 +116,11 @@ StatusPanel BuildStatusPanel(const Snapshot& snapshot, std::span<const Finding> 
   panel.lines[1] = LastCheckLine(snapshot);
   panel.lines[2] = VersionLine(snapshot, findings);
   panel.fix = ChooseFixLink(findings);
+  for (const Finding& finding : findings) {
+    if (finding.id == FindingId::kSlotOtherHandler) {
+      panel.takeBack.push_back(FindingText(snapshot, finding));
+    }
+  }
   if (problem && (problem->fix == FixKind::kUserAction || problem->fix == FixKind::kNone)) {
     panel.hint = FindingHint(snapshot, *problem);
   }

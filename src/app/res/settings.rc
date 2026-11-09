@@ -84,6 +84,13 @@ BEGIN
   IDS_BANNER_OTHER_USER  "Running as {account}, not the signed-in user; changes apply to that account."
   IDS_BANNER_BUSY        "A check is running…"
   IDS_BANNER_NOT_INSTALLED "Not installed."
+  IDS_CHECKING           "Checking…"
+  IDS_CLOSING_AFTER_WORK "Closing when this is done…"
+  IDS_FIX                "<a>Fix</a>"
+  IDS_FIX_ADMIN          "<a>Fix (needs admin)</a>"
+  IDS_FIX_TAKE_BACK      "<a>Use {product} for .pdf</a>"
+  IDS_TAKE_BACK_TITLE    "Use {product} for .pdf thumbnails?"
+  IDS_TAKE_BACK_TEXT     "These settings belong to another program now:"
   IDS_WINDOW_NOT_READY   "The settings window is not part of this build yet"
   IDS_WINDOW_USE_CLI     "Run {cli} --help in a terminal to see the commands of this build."
 END

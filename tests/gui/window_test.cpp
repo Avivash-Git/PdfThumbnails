@@ -133,7 +133,8 @@ TEST_F(SettingsWindow, WhatIsNotAvailableIsOff) {
   EXPECT_TRUE(IsWindowEnabled(GetDlgItem(dialog_, IDCANCEL)));
   EXPECT_EQ(IsWindowEnabled(GetDlgItem(dialog_, IDC_ZOOM_SLIDER)) != FALSE, Installed());
   EXPECT_EQ(IsWindowEnabled(GetDlgItem(dialog_, IDC_ZOOM_EDIT)) != FALSE, Installed());
-  for (const int id : {IDC_CHECK_NOW, IDC_REBUILD, IDC_UNINSTALL, IDOK}) {
+  EXPECT_EQ(IsWindowEnabled(GetDlgItem(dialog_, IDC_CHECK_NOW)) != FALSE, Installed());
+  for (const int id : {IDC_REBUILD, IDC_UNINSTALL, IDOK}) {
     EXPECT_FALSE(IsWindowEnabled(GetDlgItem(dialog_, id))) << id;
   }
 }
@@ -168,6 +169,32 @@ class InstalledWindow : public SettingsWindow {
   }
   LRESULT SliderPosition() const { return SendMessageW(Slider(), TBM_GETPOS, 0, 0); }
 };
+
+// Before the test below, which leaves a record of a check behind.
+TEST_F(InstalledWindow, SaysNotTestedUntilACheckHasRun) {
+  EXPECT_EQ(ControlText(dialog_, IDC_STATUS_LINE1).rfind(L"Not tested yet", 0), 0u)
+      << "line 1 does not say so";
+}
+
+TEST_F(InstalledWindow, CheckNowRunsAndLeavesARecord) {
+  const HWND button = GetDlgItem(dialog_, IDC_CHECK_NOW);
+  SendMessageW(dialog_, WM_COMMAND, MAKEWPARAM(IDC_CHECK_NOW, BN_CLICKED),
+               reinterpret_cast<LPARAM>(button));
+  EXPECT_TRUE(WaitFor(
+      [&] {
+        return IsWindowEnabled(button) &&
+               ControlText(dialog_, IDC_STATUS_LINE2).rfind(L"Last check:", 0) == 0;
+      },
+      120000))
+      << "line 2 does not show a check";
+  EXPECT_EQ(ControlText(dialog_, IDC_STATUS_LINE1).find(L"Checking"), std::wstring::npos);
+}
+
+TEST_F(InstalledWindow, ClosesWithAnUnsavedZoom) {
+  MoveSlider(170);
+  PostMessageW(dialog_, WM_CLOSE, 0, 0);
+  EXPECT_EQ(program_.WaitForExit(30000), 0u);
+}
 
 TEST_F(InstalledWindow, TheSliderMovesTheBox) {
   MoveSlider(150);

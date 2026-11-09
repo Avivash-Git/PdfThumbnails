@@ -6,7 +6,9 @@
 #include <array>
 #include <span>
 #include <string>
+#include <vector>
 
+#include "check.h"
 #include "evaluate.h"
 #include "snapshot.h"
 
@@ -34,9 +36,15 @@ struct StatusPanel {
   FixLink fix = FixLink::kNone;
   // What the user can do about the first problem, when the link cannot do it (else empty).
   std::wstring hint;
+  // What taking the slots back would replace, for the question before it (kTakeBack).
+  std::vector<std::wstring> takeBack;
 };
 
 // May throw std::bad_alloc.
 StatusPanel BuildStatusPanel(const Snapshot& snapshot, std::span<const Finding> findings);
+
+// What the window says when a check or fix ended (pure); empty when |result| found a lock taken,
+// which the banner says. May throw std::bad_alloc.
+std::wstring CheckOutcomeText(const CheckResult& result);
 
 }  // namespace pdft

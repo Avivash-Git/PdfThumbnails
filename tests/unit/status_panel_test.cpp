@@ -32,6 +32,31 @@ TEST(StatusPanelLines, AHealthyInstallSaysSo) {
   EXPECT_TRUE(Has(panel.lines[2].text, VersionText())) << panel.lines[2].text;
 }
 
+TEST(StatusPanelLines, NothingWrongIsNotTheSameAsTested) {
+  Snapshot s = MachineInstallSnapshot();
+  s.live = std::nullopt;
+  s.liveSkip = LiveTestSkip::kNotRequested;
+  const StatusPanel panel = Panel(s);
+  EXPECT_EQ(panel.lines[0].glyph, StatusGlyph::kNone);
+  EXPECT_TRUE(Has(panel.lines[0].text, L"Not tested yet")) << panel.lines[0].text;
+  EXPECT_FALSE(Has(panel.lines[0].text, L"working"));
+}
+
+TEST(StatusPanelLines, TheLastCheckCountsAsATest) {
+  Snapshot s = MachineInstallSnapshot();
+  s.live = std::nullopt;
+  s.liveSkip = LiveTestSkip::kNotRequested;
+  CheckRecord record;
+  record.time = {0, 0x01DD0000};
+  record.liveTest = S_OK;
+  s.last = record;
+  EXPECT_TRUE(Has(Panel(s).lines[0].text, L"PDF thumbnails are working"));
+  s.last->liveTest = E_FAIL;
+  EXPECT_TRUE(Has(Panel(s).lines[0].text, L"Not tested yet"));
+  s.last->liveTest = std::nullopt;
+  EXPECT_TRUE(Has(Panel(s).lines[0].text, L"Not tested yet"));
+}
+
 TEST(StatusPanelLines, APerUserInstallSaysSo) {
   EXPECT_TRUE(Has(Panel(UserInstallSnapshot()).lines[0].text, L"this user"));
 }
@@ -90,7 +115,43 @@ TEST(StatusPanelFix, AnEmptySlotIsRepairedByACheck) {
 TEST(StatusPanelFix, AnotherHandlersSlotIsTakenBackOnlyOnRequest) {
   Snapshot s = MachineInstallSnapshot();
   s.slots[0] = kOther;
-  EXPECT_EQ(Panel(s).fix, FixLink::kTakeBack);
+  const StatusPanel panel = Panel(s);
+  EXPECT_EQ(panel.fix, FixLink::kTakeBack);
+  EXPECT_EQ(panel.takeBack.size(), 1u);
+}
+
+TEST(CheckOutcome, SaysWhatTheCheckFound) {
+  CheckResult result;
+  result.code = ExitCode::kOk;
+  result.summary = L"nothing to fix";
+  EXPECT_EQ(CheckOutcomeText(result), L"nothing to fix");
+  Finding changed;
+  changed.id = FindingId::kPdfCraftChanged;
+  changed.from = L"0.14.0";
+  changed.to = L"0.15.0";
+  result.findings.push_back(changed);
+  EXPECT_EQ(CheckOutcomeText(result),
+            std::wstring(kPdfCraftProductName) + L" 0.14.0 \u2192 0.15.0 detected; nothing to fix");
+}
+
+TEST(CheckOutcome, ABusyLockIsTheBannersToSay) {
+  CheckResult result;
+  result.busy = true;
+  EXPECT_TRUE(CheckOutcomeText(result).empty());
+}
+
+TEST(CheckOutcome, ADeclinedPromptIsSaid) {
+  CheckResult result;
+  result.code = ExitCode::kCancelled;
+  EXPECT_TRUE(Has(CheckOutcomeText(result), L"declined"));
+}
+
+TEST(CheckOutcome, AnAdministratorStepThatCannotRunIsSaid) {
+  CheckResult result;
+  result.code = ExitCode::kProblems;
+  result.adminStepNeeded = true;
+  result.adminStepUnavailable = true;
+  EXPECT_TRUE(Has(CheckOutcomeText(result), L"no settings program is installed"));
 }
 
 TEST(StatusPanelFix, TheAdministratorPartWins) {

@@ -4,7 +4,9 @@
 
 #include <utility>
 
+#include "elevation.h"
 #include "registry_roots.h"
+#include "settings.h"
 #include "system_probes.h"
 
 namespace pdft {
@@ -16,7 +18,10 @@ void ReadState(const ProcessContext& context, StateReading* reading) {
   options.liveTest = false;
   options.context = context;
   reading->hr = GatherSnapshot(RegistryRoots{}, options, RealSystemProbes(), &reading->snapshot);
-  if (SUCCEEDED(reading->hr)) reading->findings = Evaluate(reading->snapshot);
+  if (SUCCEEDED(reading->hr)) {
+    reading->findings = Evaluate(reading->snapshot);
+    reading->snapshotRead = true;
+  }
 }
 
 }  // namespace
@@ -65,6 +70,32 @@ void WindowJobs::StartReading(const ProcessContext& context) {
     reading->context = context;
     reading->contextRead = true;
     ReadState(context, reading);
+  });
+}
+
+void WindowJobs::StartCheck(const ProcessContext& context, HWND owner,
+                            std::optional<RepairMode> fix) {
+  Start([context, owner, fix](StateReading* reading) {
+    reading->context = context;
+    reading->contextRead = true;
+    CheckOptions options;
+    options.context = context;
+    options.lockWaitMs = 0;  // the window says it is busy instead of hanging
+    options.owner = owner;
+    if (fix) {
+      options.repair = *fix;
+      options.launcher = LaunchElevatedWithShell;
+    }
+    CheckResult result;
+    reading->hr = RunCheck(options, RegistryRoots{}, RealSystemProbes(), &result);
+    if (SUCCEEDED(reading->hr) && !result.busy && !result.refused && !result.namedObjectsRefused) {
+      reading->snapshot = result.after;
+      reading->findings = result.findings;
+      // The record of this very check, which |after| was gathered before.
+      (void)ReadCheck(RegistryRoots{}, &reading->snapshot.last);
+      reading->snapshotRead = true;
+    }
+    reading->check = std::move(result);
   });
 }
 

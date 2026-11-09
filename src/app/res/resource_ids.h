@@ -62,6 +62,13 @@
 #define IDS_BANNER_OTHER_USER 304  // {account}
 #define IDS_BANNER_BUSY 305
 #define IDS_BANNER_NOT_INSTALLED 306
+#define IDS_CHECKING 307
+#define IDS_CLOSING_AFTER_WORK 308
+#define IDS_FIX 309
+#define IDS_FIX_ADMIN 310
+#define IDS_FIX_TAKE_BACK 311    // {product}
+#define IDS_TAKE_BACK_TITLE 312  // {product}
+#define IDS_TAKE_BACK_TEXT 313
 
 // The settings executable's notice while the window is not built yet.
 #define IDS_WINDOW_NOT_READY 201
