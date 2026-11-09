@@ -741,15 +741,4 @@ after a 7-day cooldown.
 
 ## Updating PDFium
 
-Each PDFium update is a pull request of its own:
-1. In `cmake/Pins.cmake`, update the tag, both archive URLs and SHA-256s, and both inner
-   `pdfium.dll` SHA-256s (`cmake -E sha256sum` on `bin\pdfium.dll` in each extracted archive).
-2. Check the provenance of both archives:
-   `cmake -DARCH=x64 -DVERIFY_ATTESTATION=ON -P cmake/FetchPdfium.cmake` and the same with
-   `-DARCH=arm64` (needs `gh`, signed in).
-3. Build and test `x64-release` and `arm64-release`. The `gate.pdfium.binds` gate checks that
-   the new DLL still exports every function the handler uses.
-4. Compare thumbnails of the test PDFs with the previous build
-   (`thumbtest makepdfs`, `thumbtest direct` with both DLLs, then `thumbtest compare`).
-5. If the archive's license files changed, update `THIRD-PARTY-NOTICES.md`; `gate.licenses`
-   names any file that is missing from it.
+See [MAINTAINING.md](MAINTAINING.md#updating-pdfium).
