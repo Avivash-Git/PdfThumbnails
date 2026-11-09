@@ -374,6 +374,10 @@ HRESULT CopyBuild(const BuildSource& source, const std::filesystem::path& root,
   if (!root.is_absolute() || source.buildName.empty() || source.dir.empty()) {
     RETURN_HR(PDFT_TRACE(E_INVALIDARG));
   }
+  // %LOCALAPPDATA%\Programs does not exist yet on a profile where nothing was installed per user.
+  if (GetFileAttributesW(root.parent_path().c_str()) == INVALID_FILE_ATTRIBUTES) {
+    RETURN_IF_FAILED(PDFT_TRACE(MakeRealFolder(root.parent_path())));
+  }
   RETURN_IF_FAILED(PDFT_TRACE(MakeRealFolder(root)));
   const std::filesystem::path app = root / kBuildsFolderName;
   RETURN_IF_FAILED(PDFT_TRACE(MakeRealFolder(app)));

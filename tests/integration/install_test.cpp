@@ -412,6 +412,16 @@ TEST_F(Install, ReadsABuildsFolder) {
   EXPECT_EQ(check.file, kCliExe);
 }
 
+TEST_F(Install, MakesTheFolderAboveTheRootOnAFreshProfile) {
+  BuildSource source;
+  SourceCheck check;
+  ASSERT_HRESULT_SUCCEEDED(ReadBuildSource(stage_, probes_.context.osArch, &source, &check));
+  const path root = path(temp_.path()) / L"Programs" / L"Product";
+  CopyBuildResult result;
+  ASSERT_HRESULT_SUCCEEDED(CopyBuild(source, root, CopyBuildOptions{}, &result));
+  EXPECT_TRUE(Exists(result.dll));
+}
+
 TEST_F(Install, CopiesABuildAndReusesIt) {
   BuildSource source;
   SourceCheck check;
