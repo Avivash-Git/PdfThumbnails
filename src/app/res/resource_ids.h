@@ -99,7 +99,3 @@
 #define IDS_NAME_GLYPH_PROBLEM 342
 #define IDS_NAME_TILE_DOC 343    // {zoom}
 #define IDS_NAME_TILE_SLIDE 344  // {zoom}
-
-// The settings executable's notice while the window is not built yet.
-#define IDS_WINDOW_NOT_READY 201
-#define IDS_WINDOW_USE_CLI 202  // {cli} is replaced with the command-line executable's name

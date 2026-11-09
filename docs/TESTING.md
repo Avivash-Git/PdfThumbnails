@@ -247,3 +247,23 @@ Answers and notes:
   exit code 1, Windows did not start File Explorer again.
 - With a copy paused, File Explorer shows a visible window of class `OperationStatusWindow`, the
   one `--refresh --full` looks for; a copy that has finished shows none.
+
+## The settings window
+
+The window's automatic tests (`gui` label) run only on runners GitHub hosts, because the window
+uses the real registry. These checks need a person, with a build run from a Command Prompt opened
+with Win+R (`out\build\x64-release\bin\PdfThumbnailsSettings.exe`). Save changes your real zoom
+and refreshes your PDF thumbnails; Rebuild thumbnails restarts File Explorer; Uninstall removes
+the product.
+
+- **Accessibility Insights for Windows, FastPass:** 0 failures.
+- **Keyboard only:** Tab goes through the controls in order, the underlined letters work, Esc
+  closes, Enter saves when Save is on, F5 runs Check now.
+- **Narrator** reads the slider, the zoom box, the status lines and the preview tiles, and the
+  zoom in the tiles' names follows the slider.
+- **Display scaling** of 100, 150 and 200 %, and moving the window between monitors with
+  different scaling: nothing is cut off, and the tiles stay sharp.
+- **High Contrast** on and off while the window is open.
+- **"Run as administrator"** shows why the window does not open, and nothing else.
+- **Save** with a new zoom refreshes thumbnails with progress; Cancel stops it and keeps the zoom.
+- **Closing** with unsaved changes asks; closing during a refresh asks whether to stop it.

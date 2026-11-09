@@ -121,6 +121,4 @@ BEGIN
   IDS_NAME_GLYPH_PROBLEM "Problem"
   IDS_NAME_TILE_DOC      "Preview of a sample document at {zoom} % zoom"
   IDS_NAME_TILE_SLIDE    "Preview of a sample slide at {zoom} % zoom"
-  IDS_WINDOW_NOT_READY   "The settings window is not part of this build yet"
-  IDS_WINDOW_USE_CLI     "Run {cli} --help in a terminal to see the commands of this build."
 END

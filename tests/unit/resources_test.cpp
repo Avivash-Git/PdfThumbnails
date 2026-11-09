@@ -134,17 +134,5 @@ TEST(Resources, SettingsCarriesItsWindow) {
   FreeLibrary(module);
 }
 
-TEST(Resources, SettingsNoticeNamesTheCommandLineThroughAPlaceholder) {
-  const std::wstring path = OwnFolder() + L"\\" + kSettingsExe;
-  HMODULE module = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_AS_DATAFILE);
-  if (!module && test::IsApplicationControlBlock(HRESULT_FROM_WIN32(GetLastError()))) {
-    GTEST_SKIP() << "Application Control blocked reading the settings executable";
-  }
-  ASSERT_NE(module, nullptr) << "error " << GetLastError();
-  EXPECT_FALSE(ResourceString(module, IDS_WINDOW_NOT_READY).empty());
-  EXPECT_NE(ResourceString(module, IDS_WINDOW_USE_CLI).find(L"{cli} --help"), std::wstring::npos);
-  FreeLibrary(module);
-}
-
 }  // namespace
 }  // namespace pdft
