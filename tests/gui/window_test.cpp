@@ -131,8 +131,9 @@ TEST_F(SettingsWindow, TheControlsAreInTheirTabOrder) {
 
 TEST_F(SettingsWindow, WhatIsNotAvailableIsOff) {
   EXPECT_TRUE(IsWindowEnabled(GetDlgItem(dialog_, IDCANCEL)));
-  for (const int id :
-       {IDC_ZOOM_SLIDER, IDC_ZOOM_EDIT, IDC_CHECK_NOW, IDC_REBUILD, IDC_UNINSTALL, IDOK}) {
+  EXPECT_EQ(IsWindowEnabled(GetDlgItem(dialog_, IDC_ZOOM_SLIDER)) != FALSE, Installed());
+  EXPECT_EQ(IsWindowEnabled(GetDlgItem(dialog_, IDC_ZOOM_EDIT)) != FALSE, Installed());
+  for (const int id : {IDC_CHECK_NOW, IDC_REBUILD, IDC_UNINSTALL, IDOK}) {
     EXPECT_FALSE(IsWindowEnabled(GetDlgItem(dialog_, id))) << id;
   }
 }
@@ -140,6 +141,61 @@ TEST_F(SettingsWindow, WhatIsNotAvailableIsOff) {
 TEST_F(SettingsWindow, ShowsTheSavedZoom) {
   EXPECT_EQ(ControlText(dialog_, IDC_ZOOM_EDIT), L"100");
   EXPECT_EQ(SendDlgItemMessageW(dialog_, IDC_ZOOM_SLIDER, TBM_GETPOS, 0, 0), 100);
+}
+
+TEST_F(SettingsWindow, ThePreviewTilesShowPages) {
+  // A real thumbnail has many colours; the stand-in drawing has three.
+  const HWND tile = GetDlgItem(dialog_, IDC_PREVIEW_DOC);
+  EXPECT_TRUE(WaitFor([&] { return ColoursIn(dialog_, tile) > 8; }, 20000))
+      << ColoursIn(dialog_, tile) << " colours";
+}
+
+class InstalledWindow : public SettingsWindow {
+ protected:
+  void SetUp() override {
+    if (!Installed()) GTEST_SKIP() << "only where the product is installed";
+    SettingsWindow::SetUp();
+  }
+  HWND Slider() const { return GetDlgItem(dialog_, IDC_ZOOM_SLIDER); }
+  HWND Box() const { return GetDlgItem(dialog_, IDC_ZOOM_EDIT); }
+  void MoveSlider(int zoom) {
+    SendMessageW(Slider(), TBM_SETPOS, TRUE, zoom);
+    SendMessageW(dialog_, WM_HSCROLL, MAKEWPARAM(TB_ENDTRACK, 0),
+                 reinterpret_cast<LPARAM>(Slider()));
+  }
+  void Type(const wchar_t* text) {
+    SendMessageW(Box(), WM_SETTEXT, 0, reinterpret_cast<LPARAM>(text));
+  }
+  LRESULT SliderPosition() const { return SendMessageW(Slider(), TBM_GETPOS, 0, 0); }
+};
+
+TEST_F(InstalledWindow, TheSliderMovesTheBox) {
+  MoveSlider(150);
+  EXPECT_EQ(ControlText(dialog_, IDC_ZOOM_EDIT), L"150");
+}
+
+TEST_F(InstalledWindow, TheBoxMovesTheSliderOnlyWithAValidNumber) {
+  Type(L"125");
+  EXPECT_EQ(SliderPosition(), 125);
+  Type(L"12");
+  EXPECT_EQ(SliderPosition(), 125);
+}
+
+TEST_F(InstalledWindow, LeavingTheBoxSettlesItsText) {
+  Type(L"999");
+  SendMessageW(dialog_, WM_COMMAND, MAKEWPARAM(IDC_ZOOM_EDIT, EN_KILLFOCUS),
+               reinterpret_cast<LPARAM>(Box()));
+  EXPECT_EQ(ControlText(dialog_, IDC_ZOOM_EDIT), L"200");
+  EXPECT_EQ(SliderPosition(), 200);
+}
+
+TEST_F(InstalledWindow, ThePreviewFollowsTheZoom) {
+  const HWND tile = GetDlgItem(dialog_, IDC_PREVIEW_DOC);
+  ASSERT_TRUE(WaitFor([&] { return ColoursIn(dialog_, tile) > 8; }, 20000));
+  Sleep(500);
+  const uint64_t before = PictureOf(dialog_, tile);
+  MoveSlider(200);
+  EXPECT_TRUE(WaitFor([&] { return PictureOf(dialog_, tile) != before; }, 20000));
 }
 
 TEST_F(SettingsWindow, ScreenReadersGetNames) {
@@ -175,9 +231,12 @@ TEST_F(SettingsWindow, KeepsAPicture) {
   const std::wstring folder(value, length);
   std::error_code error;
   std::filesystem::create_directories(folder, error);
-  // The first paint after the window shows.
+  // Once the preview has arrived.
+  const HWND tile = GetDlgItem(dialog_, IDC_PREVIEW_DOC);
+  (void)WaitFor([&] { return ColoursIn(dialog_, tile) > 8; }, 20000);
   Sleep(500);
-  EXPECT_TRUE(SaveWindowPicture(dialog_, folder + L"\\not-installed.png"));
+  EXPECT_TRUE(SaveWindowPicture(
+      dialog_, folder + (Installed() ? L"\\installed.png" : L"\\not-installed.png")));
 }
 
 }  // namespace
