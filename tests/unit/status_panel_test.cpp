@@ -120,6 +120,67 @@ TEST(StatusPanelFix, AnotherHandlersSlotIsTakenBackOnlyOnRequest) {
   EXPECT_EQ(panel.takeBack.size(), 1u);
 }
 
+TEST(SaveReportText, ASavedCheckBoxSaysSaved) {
+  SaveOutcome outcome;
+  outcome.checksAsked = true;
+  outcome.checks.code = ExitCode::kOk;
+  const SaveReport report = DescribeSave(outcome, true);
+  EXPECT_EQ(report.note, L"Saved.");
+  EXPECT_TRUE(report.problem.empty());
+  EXPECT_FALSE(report.busy);
+}
+
+TEST(SaveReportText, ARefreshReportsWhatItRefreshed) {
+  SaveOutcome outcome;
+  outcome.zoomAsked = true;
+  outcome.zoom = 130;
+  outcome.zoomResult.saved = true;
+  outcome.zoomResult.refreshRan = true;
+  outcome.zoomResult.counts.refreshed = 93;
+  outcome.zoomResult.counts.filesRefreshed = 54;
+  EXPECT_EQ(DescribeSave(outcome, true).note, ZoomRefreshedText(130, 93, 54));
+}
+
+TEST(SaveReportText, AStoppedRefreshKeepsTheZoom) {
+  SaveOutcome outcome;
+  outcome.zoomAsked = true;
+  outcome.zoom = 130;
+  outcome.zoomResult.refreshRan = true;
+  outcome.zoomResult.refreshResult = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+  outcome.zoomResult.counts.stopped = true;
+  outcome.zoomResult.counts.refreshed = 3;
+  EXPECT_EQ(DescribeSave(outcome, true).note, ZoomRefreshStoppedText(130, 3));
+}
+
+TEST(SaveReportText, ARefusedRefreshStillSavedTheZoom) {
+  SaveOutcome outcome;
+  outcome.zoomAsked = true;
+  outcome.zoom = 150;
+  outcome.zoomResult.refusal = RefreshRefusal::kThumbnailsOff;
+  EXPECT_EQ(DescribeSave(outcome, true).note, ZoomSavedText(150, true));
+}
+
+TEST(SaveReportText, ATakenLockIsBusyAndNotAProblem) {
+  SaveOutcome outcome;
+  outcome.zoomAsked = true;
+  outcome.zoomResult.busy = true;
+  const SaveReport report = DescribeSave(outcome, true);
+  EXPECT_TRUE(report.busy);
+  EXPECT_TRUE(report.problem.empty());
+  EXPECT_TRUE(report.note.empty());
+}
+
+TEST(SaveReportText, EachFailedPartIsSaid) {
+  SaveOutcome outcome;
+  outcome.checksAsked = true;
+  outcome.checksHr = E_ACCESSDENIED;
+  outcome.zoomAsked = true;
+  outcome.zoomResult.saveError = E_FAIL;
+  const SaveReport report = DescribeSave(outcome, true);
+  EXPECT_TRUE(Has(report.problem, L"when the checks run"));
+  EXPECT_TRUE(Has(report.problem, L"Cannot save the zoom"));
+}
+
 TEST(CheckOutcome, SaysWhatTheCheckFound) {
   CheckResult result;
   result.code = ExitCode::kOk;

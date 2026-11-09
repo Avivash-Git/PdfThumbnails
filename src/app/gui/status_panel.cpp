@@ -5,7 +5,9 @@
 
 #include "commands.h"
 #include "project_config.h"
+#include "refresh.h"
 #include "status_format.h"
+#include "strings.h"
 
 namespace pdft {
 namespace {
@@ -125,6 +127,61 @@ StatusPanel BuildStatusPanel(const Snapshot& snapshot, std::span<const Finding> 
     panel.hint = FindingHint(snapshot, *problem);
   }
   return panel;
+}
+
+SaveReport DescribeSave(const SaveOutcome& outcome, bool refreshDefault) {
+  SaveReport report;
+  const auto addProblem = [&report](const std::wstring& text) {
+    if (!report.problem.empty()) report.problem += L"\n";
+    report.problem += text;
+  };
+  if (outcome.checksAsked) {
+    if (FAILED(outcome.checksHr)) {
+      addProblem(L"Cannot change when the checks run: " + HResultText(outcome.checksHr));
+    } else if (outcome.checks.busy) {
+      report.busy = true;
+    } else if (outcome.checks.code != ExitCode::kOk) {
+      const std::wstring text = ScheduleResultReport(outcome.checks).error;
+      addProblem(text.empty() ? L"Cannot change when the checks run." : text);
+    }
+  }
+  if (outcome.zoomAsked) {
+    const ZoomChangeResult& zoom = outcome.zoomResult;
+    if (FAILED(outcome.zoomHr)) {
+      addProblem(L"Cannot save the zoom: " + HResultText(outcome.zoomHr));
+    } else if (zoom.busy) {
+      report.busy = true;
+    } else if (zoom.namedObjectsRefused) {
+      addProblem(NamedObjectsRefusedMessage());
+    } else if (FAILED(zoom.lockError) || FAILED(zoom.saveError)) {
+      addProblem(L"Cannot save the zoom: " +
+                 HResultText(FAILED(zoom.lockError) ? zoom.lockError : zoom.saveError));
+    } else if (!refreshDefault || !zoom.refreshRan) {
+      report.note = ZoomSavedText(outcome.zoom, refreshDefault);
+    } else {
+      switch (RefreshExitCode(zoom.refreshResult, zoom.counts)) {
+        case ExitCode::kOk:
+          report.note =
+              ZoomRefreshedText(outcome.zoom, zoom.counts.refreshed, zoom.counts.filesRefreshed);
+          break;
+        case ExitCode::kCancelled:
+          report.note = ZoomRefreshStoppedText(outcome.zoom, zoom.counts.refreshed);
+          break;
+        case ExitCode::kFailed:
+          report.note = ZoomSavedText(outcome.zoom, true);
+          addProblem(RefreshFailureText(zoom.refreshResult));
+          break;
+        default: {
+          const std::vector<std::wstring> lines =
+              RefreshReport(zoom.refreshResult, zoom.counts, zoom.counts.files, true);
+          report.note = lines.empty() ? ZoomSavedText(outcome.zoom, true) : lines.front();
+          break;
+        }
+      }
+    }
+  }
+  if (report.note.empty() && report.problem.empty() && !report.busy) report.note = L"Saved.";
+  return report;
 }
 
 }  // namespace pdft

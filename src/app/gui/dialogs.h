@@ -14,4 +14,15 @@ namespace pdft {
 // True for yes.
 bool ConfirmTakeBack(HWND owner, std::span<const std::wstring> slots);
 
+enum class SaveAnswer { kSave, kDontSave, kCancel };
+
+// Close with unsaved changes.
+SaveAnswer AskSaveChanges(HWND owner);
+
+// Close during a refresh: true to stop it and close.
+bool ConfirmStopRefresh(HWND owner);
+
+// Says what went wrong.
+void ShowProblem(HWND owner, const std::wstring& text);
+
 }  // namespace pdft

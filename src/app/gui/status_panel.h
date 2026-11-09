@@ -9,8 +9,10 @@
 #include <vector>
 
 #include "check.h"
+#include "check_schedule.h"
 #include "evaluate.h"
 #include "snapshot.h"
+#include "zoom_change.h"
 
 namespace pdft {
 
@@ -46,5 +48,26 @@ StatusPanel BuildStatusPanel(const Snapshot& snapshot, std::span<const Finding> 
 // What the window says when a check or fix ended (pure); empty when |result| found a lock taken,
 // which the banner says. May throw std::bad_alloc.
 std::wstring CheckOutcomeText(const CheckResult& result);
+
+// What Save did, part by part.
+struct SaveOutcome {
+  bool checksAsked = false;
+  HRESULT checksHr = S_OK;
+  ScheduleResult checks;
+  bool zoomAsked = false;
+  int zoom = 100;
+  HRESULT zoomHr = S_OK;
+  ZoomChangeResult zoomResult;
+};
+
+struct SaveReport {
+  std::wstring note;     // the one line the status block shows
+  std::wstring problem;  // what went wrong, for a dialog; empty when nothing did
+  bool busy = false;     // another process holds the lock: what was asked stays unsaved
+};
+
+// What to say about |outcome| (pure). |refreshDefault| is kPdfRefreshDefault. May throw
+// std::bad_alloc.
+SaveReport DescribeSave(const SaveOutcome& outcome, bool refreshDefault);
 
 }  // namespace pdft

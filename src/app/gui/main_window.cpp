@@ -107,6 +107,10 @@ class MainWindow {
   void RequestClose();
   void StartCheck(std::optional<RepairMode> fix, WindowActivity activity);
   void OnFixLink();
+  void OnSave();
+  void OnCancelRefresh();
+  void OnRefreshProgress();
+  void OnCheckBoxChanged();
   void OnOpenLog();
   void OnCopyDiagnostics();
   void OnDiagnosticsDone();
@@ -131,7 +135,9 @@ class MainWindow {
   ProcessContext context_;
   StatusPanel panel_;
   StatusPanel panelBeforeCheck_;
-  std::wstring message_;  // what the last check or fix ended with
+  std::wstring message_;            // what the last check or fix ended with
+  bool canChangeChecks_ = false;    // an installed settings program exists for the task to run
+  std::wstring pdfCraftCheckText_;  // the check box's own text
   WindowEdits saved_;
   WindowEdits edits_;
   bool updatingZoom_ = false;  // the window itself is setting the zoom controls
@@ -177,6 +183,16 @@ INT_PTR MainWindow::Handle(UINT message, WPARAM w, LPARAM l) try {
     case kDiagnosticsDoneMessage:
       OnDiagnosticsDone();
       return TRUE;
+    case kRefreshProgressMessage:
+      OnRefreshProgress();
+      return TRUE;
+    case WM_ENDSESSION:
+      // Windows is ending the session: a refresh stops, and gets a moment to end cleanly.
+      if (w) {
+        jobs_->RequestStop();
+        jobs_->WaitForEnd(3000);
+      }
+      return TRUE;
     case WM_TIMER:
       KillTimer(dialog_, w);
       if (w == kShowTimer) ShowOnce();
@@ -192,6 +208,15 @@ INT_PTR MainWindow::Handle(UINT message, WPARAM w, LPARAM l) try {
         if (DecideControls(state_).checkNowAndFix) {
           StartCheck(std::nullopt, WindowActivity::kChecking);
         }
+        return TRUE;
+      }
+      if (LOWORD(w) == IDOK) {
+        OnSave();
+        return TRUE;
+      }
+      if ((LOWORD(w) == IDC_CHECK_PDFCRAFT || LOWORD(w) == IDC_CHECK_SIGNIN) &&
+          HIWORD(w) == BN_CLICKED) {
+        OnCheckBoxChanged();
         return TRUE;
       }
       if (LOWORD(w) == IDC_OPEN_LOG && HIWORD(w) == BN_CLICKED) {
@@ -229,6 +254,11 @@ INT_PTR MainWindow::Handle(UINT message, WPARAM w, LPARAM l) try {
       return TRUE;
     case WM_NOTIFY: {
       const auto* header = reinterpret_cast<const NMHDR*>(l);
+      if (header->idFrom == IDC_PROGRESS_CANCEL &&
+          (header->code == NM_CLICK || header->code == NM_RETURN)) {
+        OnCancelRefresh();
+        return TRUE;
+      }
       if (header->idFrom == IDC_STATUS_FIX &&
           (header->code == NM_CLICK || header->code == NM_RETURN)) {
         OnFixLink();
@@ -280,6 +310,9 @@ void MainWindow::OnInitDialog() {
   }
   ApplyFonts();
   SetUpZoomControls();
+  wchar_t checkText[128] = {};
+  GetDlgItemTextW(dialog_, IDC_CHECK_PDFCRAFT, checkText, ARRAYSIZE(checkText));
+  pdfCraftCheckText_ = checkText;
   stateChanged_ = StateChangedMessage();
   SetText(IDC_STATUS_LINE1, Text(IDS_READING_STATE));
   preview_.emplace(dialog_);
@@ -325,6 +358,7 @@ void MainWindow::ZoomChanged(int zoom) {
   if (edits_.zoom == zoom) return;
   edits_.zoom = zoom;
   state_.dirty = edits_ != saved_;
+  ApplyState();
   RequestPreview();
 }
 
@@ -450,6 +484,60 @@ void MainWindow::OnFixLink() {
              WindowActivity::kFixing);
 }
 
+void MainWindow::OnSave() {
+  if (!DecideControls(state_).save) return;
+  SaveRequest request;
+  if (edits_.zoom != saved_.zoom) request.zoom = edits_.zoom;
+  request.changeChecks =
+      edits_.afterPdfCraft != saved_.afterPdfCraft || edits_.atSignIn != saved_.atSignIn;
+  request.afterPdfCraft = edits_.afterPdfCraft;
+  request.atSignIn = edits_.atSignIn;
+  panelBeforeCheck_ = panel_;
+  panel_.lines[0] = {StatusGlyph::kNone, Text(IDS_SAVING)};
+  message_.clear();
+  state_.activity = WindowActivity::kSaving;
+  ApplyState();
+  jobs_->StartSave(context_, request);
+}
+
+void MainWindow::OnCancelRefresh() {
+  if (state_.activity != WindowActivity::kRefreshing) return;
+  jobs_->RequestStop();
+  state_.activity = WindowActivity::kStopping;
+  panel_.lines[0] = {StatusGlyph::kNone, Text(IDS_STOPPING)};
+  ApplyState();
+}
+
+void MainWindow::OnRefreshProgress() {
+  const std::optional<RefreshProgress> progress = jobs_->TakeProgress();
+  if (!progress) return;
+  if (state_.activity == WindowActivity::kSaving) {
+    state_.activity = WindowActivity::kRefreshing;
+  } else if (state_.activity != WindowActivity::kRefreshing) {
+    return;  // being stopped, or over: this one was on its way
+  }
+  const HWND bar = Item(IDC_PROGRESS);
+  const bool counting = progress->phase == RefreshPhase::kRefreshing && progress->files > 0;
+  const LONG_PTR style = GetWindowLongPtrW(bar, GWL_STYLE);
+  SetWindowLongPtrW(bar, GWL_STYLE, counting ? style & ~PBS_MARQUEE : style | PBS_MARQUEE);
+  if (counting) {
+    SendMessageW(bar, PBM_SETRANGE32, 0, static_cast<LPARAM>(progress->files));
+    SendMessageW(bar, PBM_SETPOS, progress->done, 0);
+  } else {
+    SendMessageW(bar, PBM_SETMARQUEE, TRUE, 30);
+  }
+  const std::wstring text = RefreshProgressText(*progress);
+  if (!text.empty()) panel_.lines[0] = {StatusGlyph::kNone, text};
+  ApplyState();
+}
+
+void MainWindow::OnCheckBoxChanged() {
+  edits_.afterPdfCraft = IsDlgButtonChecked(dialog_, IDC_CHECK_PDFCRAFT) == BST_CHECKED;
+  edits_.atSignIn = IsDlgButtonChecked(dialog_, IDC_CHECK_SIGNIN) == BST_CHECKED;
+  state_.dirty = edits_ != saved_;
+  ApplyState();
+}
+
 void MainWindow::ShowNote(std::wstring note) {
   message_ = std::move(note);
   ApplyState();
@@ -526,6 +614,16 @@ void MainWindow::OnJobDone() {
       SetTimer(dialog_, kBusyTimer, kBusyPollMs, nullptr);
     }
   }
+  std::optional<SaveReport> saved;
+  if (reading && reading->save) {
+    panel_ = panelBeforeCheck_;
+    saved = DescribeSave(*reading->save, kPdfRefreshDefault);
+    message_ = saved->note;
+    if (saved->busy) {
+      state_.activity = WindowActivity::kExternalBusy;
+      SetTimer(dialog_, kBusyTimer, kBusyPollMs, nullptr);
+    }
+  }
   if (reading && reading->leaveContainer) {
     Relaunch();
     return;
@@ -535,6 +633,11 @@ void MainWindow::OnJobDone() {
   RequestPreview();
   if (!closePending_) EnterBusyIfLocked();
   ShowOnce();
+  // A part that failed stays unsaved, so the window stays open to say so.
+  if (saved && (saved->busy || !saved->problem.empty())) {
+    closePending_ = false;
+    if (!saved->problem.empty()) ShowProblem(dialog_, saved->problem);
+  }
   if (closePending_) {
     DestroyWindow(dialog_);
     return;
@@ -563,6 +666,10 @@ void MainWindow::ApplyReading(const StateReading& reading) {
   state_.context = ClassifyWindowContext(RefusesWrites(context_.virtualization),
                                          reading.snapshot.scope != Scope::kNone);
   panel_ = BuildStatusPanel(reading.snapshot, reading.findings);
+  canChangeChecks_ = InstalledSettingsExe(reading.snapshot).has_value();
+  SetText(IDC_CHECK_PDFCRAFT,
+          pdfCraftCheckText_ +
+              (reading.snapshot.pdfcraft.installed ? L"" : Text(IDS_PDFCRAFT_NOT_FOUND)));
   // Someone's unsaved edits stay; only what they are compared with moves.
   saved_ = {reading.snapshot.settings.zoom, reading.snapshot.task.afterPdfCraft,
             reading.snapshot.task.atSignIn};
@@ -583,6 +690,12 @@ void MainWindow::ApplyState() {
   for (const int id : {IDC_ZOOM_SLIDER, IDC_ZOOM_EDIT, IDC_ZOOM_SPIN}) {
     SetEnabled(id, controls.zoomAndChecks);
   }
+  SetEnabled(IDC_CHECK_PDFCRAFT, controls.zoomAndChecks && canChangeChecks_);
+  SetEnabled(IDC_CHECK_SIGNIN, controls.zoomAndChecks && canChangeChecks_);
+  SetEnabled(IDOK, controls.save);
+  SetVisible(IDC_PROGRESS, state_.activity == WindowActivity::kRefreshing ||
+                               state_.activity == WindowActivity::kStopping);
+  SetVisible(IDC_PROGRESS_CANCEL, controls.cancelLink);
   SetEnabled(IDC_CHECK_NOW, controls.checkNowAndFix);
   SetEnabled(IDC_OPEN_LOG, controls.openLogAndDiagnostics);
   SetEnabled(IDC_COPY_DIAG, controls.openLogAndDiagnostics && !diagnosticsJob_->running());
@@ -648,14 +761,29 @@ void MainWindow::RequestClose() {
       DestroyWindow(dialog_);
       break;
     case CloseAction::kAskSaveChanges:
-      // Nothing can be saved yet: an unsaved zoom is simply left.
+      switch (AskSaveChanges(dialog_)) {
+        case SaveAnswer::kCancel:
+          return;
+        case SaveAnswer::kSave:
+          if (!DecideControls(state_).save) return;  // busy or still reading: nothing lost
+          closePending_ = true;
+          OnSave();
+          return;
+        case SaveAnswer::kDontSave:
+          break;
+      }
       if (!jobs_->running()) {
         DestroyWindow(dialog_);
-        break;
+        return;
       }
-      [[fallthrough]];
-    case CloseAction::kWaitForWork:
+      closePending_ = true;
+      return;
     case CloseAction::kAskStopRefresh:
+      if (!ConfirmStopRefresh(dialog_)) return;
+      closePending_ = true;
+      OnCancelRefresh();
+      return;
+    case CloseAction::kWaitForWork:
       closePending_ = true;
       SetText(IDC_STATUS_LINE1, Text(IDS_CLOSING_AFTER_WORK));
       break;

@@ -192,9 +192,50 @@ TEST_F(InstalledWindow, CheckNowRunsAndLeavesARecord) {
   EXPECT_EQ(ControlText(dialog_, IDC_STATUS_LINE1).find(L"Checking"), std::wstring::npos);
 }
 
-TEST_F(InstalledWindow, ClosesWithAnUnsavedZoom) {
+TEST_F(InstalledWindow, SaveIsOnlyOnWithSomethingToSave) {
+  EXPECT_FALSE(IsWindowEnabled(GetDlgItem(dialog_, IDOK)));
+  MoveSlider(170);
+  EXPECT_TRUE(IsWindowEnabled(GetDlgItem(dialog_, IDOK)));
+  MoveSlider(static_cast<int>(100));
+  EXPECT_FALSE(IsWindowEnabled(GetDlgItem(dialog_, IDOK)));
+}
+
+TEST_F(InstalledWindow, SaveWritesTheZoom) {
+  MoveSlider(130);
+  SendMessageW(dialog_, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED),
+               reinterpret_cast<LPARAM>(GetDlgItem(dialog_, IDOK)));
+  EXPECT_TRUE(WaitFor(
+      [&] {
+        DWORD zoom = 0;
+        DWORD size = sizeof(zoom);
+        return RegGetValueW(HKEY_CURRENT_USER, kRegKey, L"Zoom", RRF_RT_REG_DWORD, nullptr, &zoom,
+                            &size) == ERROR_SUCCESS &&
+               zoom == 130 && !IsWindowEnabled(GetDlgItem(dialog_, IDOK)) &&
+               IsWindowEnabled(GetDlgItem(dialog_, IDC_CHECK_NOW));
+      },
+      120000))
+      << "the zoom was not saved";
+  // Back to what the other tests expect.
+  MoveSlider(100);
+  SendMessageW(dialog_, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED),
+               reinterpret_cast<LPARAM>(GetDlgItem(dialog_, IDOK)));
+  EXPECT_TRUE(WaitFor([&] { return IsWindowEnabled(GetDlgItem(dialog_, IDC_CHECK_NOW)) != FALSE; },
+                      120000));
+}
+
+TEST_F(InstalledWindow, CloseAsksAboutAnUnsavedZoom) {
   MoveSlider(170);
   PostMessageW(dialog_, WM_CLOSE, 0, 0);
+  HWND question = nullptr;
+  ASSERT_TRUE(WaitFor(
+      [&] {
+        question = TopLevelWindowOf(program_.id(), L"#32770");
+        return question != nullptr && question != dialog_;
+      },
+      15000))
+      << "no question appeared";
+  // "Don't save" (the second custom button, IDNO).
+  PostMessageW(question, WM_COMMAND, IDNO, 0);
   EXPECT_EQ(program_.WaitForExit(30000), 0u);
 }
 

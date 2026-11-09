@@ -4,11 +4,14 @@
 
 #include <utility>
 
+#include "check_schedule.h"
 #include "diagnostics.h"
 #include "elevation.h"
+#include "project_config.h"
 #include "registry_roots.h"
 #include "settings.h"
 #include "system_probes.h"
+#include "zoom_change.h"
 
 namespace pdft {
 namespace {
@@ -98,6 +101,58 @@ void WindowJobs::StartCheck(const ProcessContext& context, HWND owner,
     }
     reading->check = std::move(result);
   });
+}
+
+void WindowJobs::StartSave(const ProcessContext& context, const SaveRequest& request) {
+  stop_ = std::stop_source{};
+  Start([this, context, request, stop = stop_.get_token()](StateReading* reading) {
+    SaveOutcome outcome;
+    if (request.changeChecks) {
+      ScheduleOptions options;
+      options.afterPdfCraft = request.afterPdfCraft;
+      options.atSignIn = request.atSignIn;
+      options.context = context;
+      options.lockWaitMs = 0;
+      outcome.checksAsked = true;
+      outcome.checksHr =
+          ChangeCheckSchedule(options, RegistryRoots{}, RealSystemProbes(), &outcome.checks);
+    }
+    if (request.zoom) {
+      ZoomChangeOptions options;
+      options.zoom = *request.zoom;
+      options.context = context;
+      options.lockWaitMs = 0;
+      options.refresh = kPdfRefreshDefault;
+      options.stop = stop;
+      options.progress = [this](const RefreshProgress& progress) {
+        {
+          const std::lock_guard lock(mutex_);
+          progress_ = progress;
+        }
+        if (!progressPosted_.exchange(true)) {
+          PostMessageW(window_, kRefreshProgressMessage, 0, 0);
+        }
+      };
+      outcome.zoomAsked = true;
+      outcome.zoom = *request.zoom;
+      outcome.zoomHr =
+          ChangeZoom(options, RegistryRoots{}, RealZoomRefreshSteps(), &outcome.zoomResult);
+    }
+    reading->context = context;
+    reading->contextRead = true;
+    ReadState(context, reading);
+    reading->save = std::move(outcome);
+  });
+}
+
+void WindowJobs::WaitForEnd(DWORD timeoutMs) noexcept {
+  if (thread_.joinable()) WaitForSingleObject(thread_.native_handle(), timeoutMs);
+}
+
+std::optional<RefreshProgress> WindowJobs::TakeProgress() {
+  progressPosted_ = false;
+  const std::lock_guard lock(mutex_);
+  return std::exchange(progress_, std::nullopt);
 }
 
 void WindowJobs::StartDiagnostics(const ProcessContext& context) {

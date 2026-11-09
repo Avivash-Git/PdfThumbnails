@@ -73,6 +73,16 @@
 #define IDS_DIAG_FAILED 315  // {hr}
 #define IDS_LOG_MISSING 316
 #define IDS_LOG_FAILED 317  // {hr}
+#define IDS_SAVING 318
+#define IDS_STOPPING 319
+#define IDS_PDFCRAFT_NOT_FOUND 320
+#define IDS_ASK_SAVE_TITLE 321
+#define IDS_ASK_SAVE_SAVE 322
+#define IDS_ASK_SAVE_DONT 323
+#define IDS_ASK_STOP_TITLE 324
+#define IDS_ASK_STOP_TEXT 325
+#define IDS_ASK_STOP_STOP 326
+#define IDS_ASK_STOP_KEEP 327
 
 // The settings executable's notice while the window is not built yet.
 #define IDS_WINDOW_NOT_READY 201

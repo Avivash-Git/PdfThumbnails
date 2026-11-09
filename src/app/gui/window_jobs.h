@@ -7,21 +7,26 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <thread>
 #include <vector>
 
 #include "check.h"
 #include "context.h"
 #include "evaluate.h"
+#include "refresh.h"
 #include "repair.h"
 #include "snapshot.h"
+#include "status_panel.h"
 
 namespace pdft {
 
 inline constexpr UINT kJobDoneMessage = WM_APP + 2;
 inline constexpr UINT kDiagnosticsDoneMessage = WM_APP + 4;
+inline constexpr UINT kRefreshProgressMessage = WM_APP + 5;
 
 // What the window reads about this PC.
 struct StateReading {
@@ -36,6 +41,15 @@ struct StateReading {
   std::vector<Finding> findings;
   std::optional<CheckResult> check;  // when the job was a check or fix
   std::wstring diagnostics;          // when the job was the diagnostics report
+  std::optional<SaveOutcome> save;   // when the job was Save
+};
+
+// What Save has to change.
+struct SaveRequest {
+  std::optional<int> zoom;
+  bool changeChecks = false;
+  bool afterPdfCraft = false;
+  bool atSignIn = false;
 };
 
 class WindowJobs {
@@ -56,6 +70,15 @@ class WindowJobs {
   // Check now, with the Explorer test. With |fix| also the repairs that mode allows and the
   // administrator step, whose prompt belongs to |owner|.
   void StartCheck(const ProcessContext& context, HWND owner, std::optional<RepairMode> fix);
+  // Save: the check task first, so that a refresh that is stopped cannot lose it, then the zoom
+  // and, where the build says so, the refresh; then the state again.
+  void StartSave(const ProcessContext& context, const SaveRequest& request);
+  // Stops a refresh: the request under way finishes first.
+  void RequestStop() noexcept { stop_.request_stop(); }
+  // Waits at most |timeoutMs| for the job to end (the session is ending). Leaves it running then.
+  void WaitForEnd(DWORD timeoutMs) noexcept;
+  // The newest progress of a refresh; nothing when none came since the last call.
+  std::optional<RefreshProgress> TakeProgress();
   // The masked diagnostics report.
   void StartDiagnostics(const ProcessContext& context);
 
@@ -72,6 +95,9 @@ class WindowJobs {
   std::jthread thread_;
   std::mutex mutex_;
   std::optional<StateReading> reading_;
+  std::stop_source stop_;
+  std::optional<RefreshProgress> progress_;
+  std::atomic<bool> progressPosted_{false};  // one message on the way at most
 };
 
 }  // namespace pdft

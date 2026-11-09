@@ -16,6 +16,51 @@ std::wstring Text(UINT id) {
 
 }  // namespace
 
+SaveAnswer AskSaveChanges(HWND owner) {
+  const std::wstring title = Text(IDS_ASK_SAVE_TITLE);
+  const std::wstring save = Text(IDS_ASK_SAVE_SAVE);
+  const std::wstring dontSave = Text(IDS_ASK_SAVE_DONT);
+  const TASKDIALOG_BUTTON buttons[] = {{IDYES, save.c_str()}, {IDNO, dontSave.c_str()}};
+  TASKDIALOGCONFIG config = {sizeof(config)};
+  config.hwndParent = owner;
+  config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+  config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+  config.pszWindowTitle = kProductName;
+  config.pszMainInstruction = title.c_str();
+  config.cButtons = ARRAYSIZE(buttons);
+  config.pButtons = buttons;
+  config.nDefaultButton = IDYES;
+  int pressed = IDCANCEL;
+  if (FAILED(TaskDialogIndirect(&config, &pressed, nullptr, nullptr))) return SaveAnswer::kCancel;
+  return pressed == IDYES  ? SaveAnswer::kSave
+         : pressed == IDNO ? SaveAnswer::kDontSave
+                           : SaveAnswer::kCancel;
+}
+
+bool ConfirmStopRefresh(HWND owner) {
+  const std::wstring title = Text(IDS_ASK_STOP_TITLE);
+  const std::wstring content = Text(IDS_ASK_STOP_TEXT);
+  const std::wstring stop = Text(IDS_ASK_STOP_STOP);
+  const std::wstring keep = Text(IDS_ASK_STOP_KEEP);
+  const TASKDIALOG_BUTTON buttons[] = {{IDYES, stop.c_str()}, {IDNO, keep.c_str()}};
+  TASKDIALOGCONFIG config = {sizeof(config)};
+  config.hwndParent = owner;
+  config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+  config.pszWindowTitle = kProductName;
+  config.pszMainInstruction = title.c_str();
+  config.pszContent = content.c_str();
+  config.cButtons = ARRAYSIZE(buttons);
+  config.pButtons = buttons;
+  config.nDefaultButton = IDNO;
+  int pressed = IDNO;
+  return SUCCEEDED(TaskDialogIndirect(&config, &pressed, nullptr, nullptr)) && pressed == IDYES;
+}
+
+void ShowProblem(HWND owner, const std::wstring& text) {
+  (void)TaskDialog(owner, nullptr, kProductName, text.c_str(), nullptr, TDCBF_CLOSE_BUTTON,
+                   TD_ERROR_ICON, nullptr);
+}
+
 bool ConfirmTakeBack(HWND owner, std::span<const std::wstring> slots) {
   std::wstring title = Text(IDS_TAKE_BACK_TITLE);
   constexpr std::wstring_view kProductField = L"{product}";
