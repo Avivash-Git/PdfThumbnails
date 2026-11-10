@@ -3,6 +3,12 @@
 Most tests run by themselves (see [Tests](BUILDING.md#tests)). This page is for the checks that
 need someone at the PC: what they do, what they change on it, and how to stop them.
 
+- [The thumbnail refresh experiment](#the-thumbnail-refresh-experiment): how `--refresh` was
+  chosen, and its results.
+- [The settings window](#the-settings-window): what only a person can judge.
+- [The whole pass before a release](#the-whole-pass-before-a-release): install, use, take-over,
+  uninstall and reinstall on a real PC.
+
 ## The thumbnail refresh experiment
 
 `thumbtest experiment` finds out how `--refresh` (the PDF-only refresh) should make the PDF
@@ -280,3 +286,45 @@ the product.
   open the settings from File Explorer instead.
 - **Save** with a new zoom refreshes thumbnails with progress; Cancel stops it and keeps the zoom.
 - **Closing** with unsaved changes asks; closing during a refresh asks whether to stop it.
+
+## The whole pass before a release
+
+CI installs, uses and removes the product on a throw-away account (the `system` tests). This pass
+does the same on a PC someone really uses, where File Explorer, the thumbnail cache and the
+sign-in are real. It takes about half an hour, asks for administrator rights three times, signs
+you out once and restarts File Explorer twice. Use a folder of PDFs you may look at, and run every
+command from a normal prompt (not an administrator one).
+
+`<stage>` is a staged release build ([Staging](BUILDING.md#staging-install-components)), and
+`<installed>` is `C:\Program Files\PdfThumbnails`.
+
+1. **Before.** `<installed>\PdfThumbnailsCli.exe --status` and `--zoom`: note the zoom. Nothing
+   installed yet is fine too.
+2. **Install over what is there.** `<stage>\PdfThumbnailsCli.exe --install --machine`: one
+   administrator prompt, exit code 0, and the status it prints ends with `Result: healthy`. The
+   zoom is the one from step 1, and the Checks line names both triggers (or the ones chosen
+   before).
+3. **Thumbnails.** Open a folder of PDFs in File Explorer with large icons. The pages show at the
+   zoom from step 1; at 100 % a portrait page has white bands at its sides.
+4. **The window**, started from `<installed>`: the checks in
+   [The settings window](#the-settings-window).
+5. **Rebuild thumbnails** in the window, with two folder windows open. File Explorer restarts,
+   both windows come back, and the thumbnails are made again.
+6. **Another program takes `.pdf` thumbnails.** The `.pdf` setting is the default value of the key
+   `HKEY_CURRENT_USER\Software\Classes\.pdf\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}`.
+   - Delete that key, sign out and sign in again. About a minute after the sign-in, the check has
+     put it back: the log (Open log in the window) has a line `check result=healthy fixed=1`, and
+     `--status` says healthy.
+   - Set the key's default value to another class, for example
+     `{11111111-2222-3333-4444-555555555555}`. `--status` names it as another handler, and
+     `--check` exits 1 and leaves it alone. The window's status offers "Use PdfThumbnails for
+     .pdf", which asks and then takes it back; so does `--fix --take-back`.
+7. **Uninstall** from the window, with "Also clear the thumbnail cache" checked: one
+   administrator prompt, File Explorer restarts, and PDFs show their app's icon. `--status` from
+   `<stage>` says not installed (exit code 6). After a restart of Windows,
+   `C:\Program Files\PdfThumbnails` and the `PdfThumbnails.trash-...` folder next to it are gone.
+8. **Reinstall** as in step 2, then set the zoom again (`--zoom <n>`): the uninstall removed it.
+   Thumbnails are back at that zoom.
+
+With Smart App Control on, steps 2 and 8 also show whether Windows lets the unsigned build run:
+the status then has a Smart App Control line, and it says whether PdfThumbnails is being blocked.

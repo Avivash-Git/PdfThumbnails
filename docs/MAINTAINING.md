@@ -4,7 +4,7 @@
 
 1. CI is green on the commit, including the window tests in `build (ci-x64)` and in `system-x64`.
    `system-x64` is allowed to fail without failing the run, so read its steps.
-2. The manual checks in [TESTING.md](TESTING.md) pass on a real PC.
+2. [The whole pass before a release](TESTING.md#the-whole-pass-before-a-release) passes on a real PC.
 3. `CHANGELOG.md` says what changed.
 4. The version is raised in `cmake/ProjectInfo.cmake` (`PDFT_VERSION`). Build folders are named after it and the build id.
 

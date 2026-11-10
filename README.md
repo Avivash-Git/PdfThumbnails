@@ -75,6 +75,16 @@ you may have chosen it, and the window offers to take them back.
   same setting.
 - PdfCraft may ship its own handler one day (storytold/pdfcraft#1370). If it does, that one takes
   precedence and the status says so.
+- An install for one user only (`--install --user`) may not be used by File Explorer: on some
+  Windows 11 builds its thumbnail process loads only what is installed for all users. The status
+  says so when it happens. Install for all users, which is the default.
+- The ARM64 build passes its tests on an ARM64 PC, but it has not been used day to day yet.
+
+## Privacy
+
+PdfThumbnails never uses the network: no telemetry, no update check, no download. It reads a PDF
+only to draw its first page, and keeps nothing of it. The log and the diagnostics report hold no
+PDF names, and the report masks your user name, PC name and profile folder.
 
 ## How it works
 
@@ -92,7 +102,7 @@ in a short-lived separate process. The zoom lives in
 
 - [The command line](docs/CLI.md)
 - [Building and testing](docs/BUILDING.md), [manual tests](docs/TESTING.md)
-- [Changes since 1.x](CHANGELOG.md)
+- [Changes since 1.x](CHANGELOG.md): what behaves differently, and what happens to a 1.x install
 - [Contributing](CONTRIBUTING.md), [reporting security problems](SECURITY.md)
 - [Maintaining the project](docs/MAINTAINING.md)
 
