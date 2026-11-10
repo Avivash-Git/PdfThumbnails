@@ -229,15 +229,10 @@ TEST_F(InstalledWindow, CloseAsksAboutAnUnsavedZoom) {
   MoveSlider(170);
   PostMessageW(dialog_, WM_CLOSE, 0, 0);
   HWND question = nullptr;
-  ASSERT_TRUE(WaitFor(
-      [&] {
-        question = TopLevelWindowOf(program_.id(), L"#32770");
-        return question != nullptr && question != dialog_;
-      },
-      15000))
+  ASSERT_TRUE(WaitFor([&] { return (question = TaskDialogOf(program_.id())) != nullptr; }, 15000))
       << "no question appeared";
   // "Don't save" (the second custom button, IDNO).
-  PostMessageW(question, WM_COMMAND, IDNO, 0);
+  EXPECT_TRUE(PressTaskDialogButton(question, IDNO));
   EXPECT_EQ(program_.WaitForExit(30000), 0u);
 }
 
@@ -334,20 +329,14 @@ TEST_F(InstalledWindow, UninstallRemovesTheProductAndCloses) {
   PostMessageW(dialog_, WM_COMMAND, MAKEWPARAM(IDC_UNINSTALL, BN_CLICKED),
                reinterpret_cast<LPARAM>(button));
   HWND question = nullptr;
-  ASSERT_TRUE(WaitFor(
-      [&] {
-        question = TopLevelWindowOf(program_.id(), L"#32770");
-        return question != nullptr && question != dialog_;
-      },
-      15000))
+  ASSERT_TRUE(WaitFor([&] { return (question = TaskDialogOf(program_.id())) != nullptr; }, 15000))
       << "no question appeared";
-  PostMessageW(question, WM_COMMAND, IDYES, 0);
+  ASSERT_TRUE(PressTaskDialogButton(question, IDYES));
   // The child's report comes in a dialog of its own, and the window closes after it.
   const bool ended = WaitFor(
       [&] {
-        const HWND report = TopLevelWindowOf(program_.id(), L"#32770");
-        if (report && report != dialog_ && report != question) {
-          PostMessageW(report, WM_COMMAND, IDCLOSE, 0);
+        if (const HWND report = TaskDialogOf(program_.id(), question)) {
+          (void)PressTaskDialogButton(report, IDCLOSE);
         }
         return !program_.Running();
       },

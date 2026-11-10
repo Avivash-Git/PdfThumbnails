@@ -1,5 +1,7 @@
 #include "gui_driver.h"
 
+#include <commctrl.h>
+
 #include <cstdint>
 #include <fstream>
 #include <set>
@@ -93,6 +95,17 @@ HWND TopLevelWindowOf(DWORD pid, const wchar_t* className) {
   WindowSearch search{pid, className, nullptr};
   EnumWindows(CheckWindow, reinterpret_cast<LPARAM>(&search));
   return search.found;
+}
+
+HWND TaskDialogOf(DWORD pid, HWND except) {
+  const HWND found = TopLevelWindowOf(pid, L"#32770");
+  return found && found != except && IsWindowVisible(found) ? found : nullptr;
+}
+
+bool PressTaskDialogButton(HWND dialog, int button) {
+  DWORD_PTR result = 0;
+  return SendMessageTimeoutW(dialog, TDM_CLICK_BUTTON, static_cast<WPARAM>(button), 0,
+                             SMTO_ABORTIFHUNG, 5000, &result) != 0;
 }
 
 bool Program::Start(const std::wstring& arguments) {

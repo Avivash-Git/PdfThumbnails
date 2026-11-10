@@ -19,6 +19,13 @@ bool WaitFor(const std::function<bool()>& condition, DWORD timeoutMs);
 // A top-level window of process |pid| with the class |className|; nullptr when there is none.
 HWND TopLevelWindowOf(DWORD pid, const wchar_t* className);
 
+// A shown task dialog of process |pid| other than |except|; nullptr when there is none.
+HWND TaskDialogOf(DWORD pid, HWND except = nullptr);
+
+// Presses |button| in task dialog |dialog|, as a click would. A task dialog ignores a WM_COMMAND
+// posted to it, so this sends TDM_CLICK_BUTTON. False when the dialog did not answer.
+bool PressTaskDialogButton(HWND dialog, int button);
+
 // The settings executable next to this program.
 class Program {
  public:
