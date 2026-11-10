@@ -254,7 +254,7 @@ class OpenJob final : public ShellJob {
     RETURN_IF_FAILED(reached);
     for (const FolderWindow& window : windows) {
       if (abandoned.load()) break;
-      if (window.parsingName.empty()) continue;
+      if (window.parsingName.empty() || !MayReopenFolderNow(window.parsingName)) continue;
       wil::unique_variant folder = wil::make_variant_bstr_nothrow(window.parsingName.c_str());
       if (folder.vt != VT_BSTR) continue;  // out of memory: not opened
       // S_FALSE when the shell did not open it (no such folder).
@@ -320,6 +320,37 @@ class ViewsJob final : public ShellJob {
 };
 
 }  // namespace
+
+bool IsDrivePathName(std::wstring_view parsingName) noexcept {
+  return parsingName.size() >= 3 &&
+         ((parsingName[0] >= L'A' && parsingName[0] <= L'Z') ||
+          (parsingName[0] >= L'a' && parsingName[0] <= L'z')) &&
+         parsingName[1] == L':' && (parsingName[2] == L'\\' || parsingName[2] == L'/');
+}
+
+bool IsReopenableFolder(DWORD attributes, DWORD reparseTag) noexcept {
+  if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+    return false;
+  }
+  return (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 || !IsReparseTagNameSurrogate(reparseTag);
+}
+
+bool MayReopenFolderNow(const std::wstring& parsingName) noexcept {
+  if (!IsDrivePathName(parsingName)) return true;
+  // The folder itself, never what a link there leads to; reading its attributes needs no more.
+  const wil::unique_hfile folder(
+      CreateFileW(parsingName.c_str(), FILE_READ_ATTRIBUTES,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                  FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+  FILE_ATTRIBUTE_TAG_INFO info = {};
+  if (!folder ||
+      !GetFileInformationByHandleEx(folder.get(), FileAttributeTagInfo, &info, sizeof(info))) {
+    return false;
+  }
+  return IsReopenableFolder(
+      info.FileAttributes,
+      (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ? info.ReparseTag : 0);
+}
 
 HRESULT ListFolderWindows(DWORD timeoutMs, std::vector<FolderWindow>* windows) noexcept try {
   windows->clear();

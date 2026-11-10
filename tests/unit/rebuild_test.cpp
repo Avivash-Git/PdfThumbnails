@@ -1,8 +1,8 @@
 // The pure parts of the thumbnail-cache rebuild (rebuild.h): the cache-file name test, the
 // refusal decision, how a start leaves this process's job (processes.h), how a holder is
 // classified and in what order holders are ended, the wait for File Explorer, the plan to open
-// folder windows again, the exit code, and the report and question text. No Windows state is read
-// here.
+// folder windows again and which saved names may still be opened, the exit code, and the report
+// and question text. No Windows state is read here.
 
 #include <windows.h>
 
@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "shell_windows.h"
 #include "strings.h"
 
 namespace pdft {
@@ -386,6 +387,37 @@ TEST(PlanReopen, SkipsOpenAndCapsAndNotesTabs) {
   const ReopenPlan capped = PlanReopen(many, {});
   EXPECT_EQ(capped.open.size(), kMaxReopenedWindows);
   EXPECT_EQ(capped.overCap, 5u);
+}
+
+// ---- IsDrivePathName, IsReopenableFolder ----
+
+// Only a folder's path on a drive is looked at again before its window is reopened.
+TEST(ReopenCheck, DrivePathsAreLookedAt) {
+  for (const wchar_t* name : {L"C:\\", L"C:\\Users\\Someone\\Documents", L"d:\\a", L"Z:/a"}) {
+    EXPECT_TRUE(IsDrivePathName(name)) << WideToUtf8Lossy(name);
+  }
+  for (const wchar_t* name :
+       {L"", L"C:", L"C:a", L"1:\\a", L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}",
+        L"::{031E4825-7B94-4DC3-B131-E946B44C8DD5}\\Documents.library-ms",
+        L"\\\\server\\share\\folder", L"\\\\?\\C:\\a", L"shell:Downloads"}) {
+    EXPECT_FALSE(IsDrivePathName(name)) << WideToUtf8Lossy(name);
+  }
+}
+
+// A folder that is still a folder, and no link, junction or mount point.
+TEST(ReopenCheck, OnlyAFolderThatIsNoLink) {
+  EXPECT_TRUE(IsReopenableFolder(FILE_ATTRIBUTE_DIRECTORY, 0));
+  EXPECT_TRUE(IsReopenableFolder(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY, 0));
+  // Cloud files (OneDrive's folders) are folders with a reparse point that is no link.
+  EXPECT_TRUE(IsReopenableFolder(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT,
+                                 IO_REPARSE_TAG_CLOUD_6));
+  EXPECT_FALSE(IsReopenableFolder(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT,
+                                  IO_REPARSE_TAG_MOUNT_POINT));
+  EXPECT_FALSE(IsReopenableFolder(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT,
+                                  IO_REPARSE_TAG_SYMLINK));
+  EXPECT_FALSE(IsReopenableFolder(FILE_ATTRIBUTE_ARCHIVE, 0));  // a file now
+  EXPECT_FALSE(IsReopenableFolder(FILE_ATTRIBUTE_NORMAL, 0));
+  EXPECT_FALSE(IsReopenableFolder(INVALID_FILE_ATTRIBUTES, 0));  // gone, or unreadable
 }
 
 // ---- RebuildExitCode ----

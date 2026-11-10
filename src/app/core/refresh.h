@@ -47,7 +47,8 @@ inline constexpr UINT kRefreshSizes[] = {16, 32, 48, 96, 256, 768, 1280, 1920, 2
 inline constexpr DWORD kRefreshProbeFlags = 0x1;
 // The flags of the extraction that replaces a cached thumbnail: WTS_FORCEEXTRACTION (never answer
 // from the cache) | WTS_REQUIRESURROGATE (only in the thumbnail process). Never WTS_EXTRACTINPROC,
-// never WTS_EXTRACTDONOTCACHE (checked when compiled and when run).
+// never WTS_EXTRACTDONOTCACHE, never without WTS_REQUIRESURROGATE (checked when compiled and when
+// run).
 inline constexpr DWORD kRefreshExtractFlags = 0x4 | 0x800;
 
 // How File Explorer is told (bits).
@@ -62,9 +63,13 @@ enum RefreshNotify : unsigned {
 inline constexpr unsigned kRefreshNotify = kNotifyItems;
 
 // Whether the flags are safe (pure): the probe has WTS_INCACHEONLY and neither
-// WTS_FORCEEXTRACTION nor WTS_EXTRACTINPROC; the extraction has WTS_FORCEEXTRACTION and none of
-// WTS_INCACHEONLY, WTS_EXTRACTINPROC, WTS_EXTRACTDONOTCACHE; |store| (the second call's flags,
-// 0 when there is none) has neither WTS_EXTRACTINPROC nor WTS_EXTRACTDONOTCACHE.
+// WTS_FORCEEXTRACTION nor WTS_EXTRACTINPROC; the extraction has WTS_FORCEEXTRACTION and
+// WTS_REQUIRESURROGATE and none of WTS_INCACHEONLY, WTS_EXTRACTINPROC, WTS_EXTRACTDONOTCACHE;
+// |store| (the second call's flags, 0 when there is none) has neither WTS_EXTRACTINPROC nor
+// WTS_EXTRACTDONOTCACHE, and has WTS_REQUIRESURROGATE unless it is 0. Without
+// WTS_REQUIRESURROGATE the cache may extract in this process, for example with a handler that is
+// registered for .pdf by then and opts out of the thumbnail process (DisableProcessIsolation).
+// 0 also stands for a plain WTS_EXTRACT second call, which therefore passes as it is.
 bool AreSafeRefreshFlags(DWORD probe, DWORD extract, DWORD store) noexcept;
 
 // Why the refresh does not start.

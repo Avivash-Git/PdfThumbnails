@@ -32,12 +32,30 @@ using std::filesystem::path;
 
 TEST(RefreshFlags, TheProductFlagsAreSafe) {
   EXPECT_TRUE(AreSafeRefreshFlags(kRefreshProbeFlags, kRefreshExtractFlags, 0));
-  // The experiment's variants.
-  EXPECT_TRUE(AreSafeRefreshFlags(WTS_INCACHEONLY, WTS_FORCEEXTRACTION, 0));
-  EXPECT_TRUE(AreSafeRefreshFlags(kRefreshProbeFlags, WTS_FORCEEXTRACTION | WTS_SLOWRECLAIM, 0));
+  // Other flags on top of the product's.
+  EXPECT_TRUE(AreSafeRefreshFlags(WTS_INCACHEONLY, kRefreshExtractFlags | WTS_SLOWRECLAIM, 0));
   EXPECT_TRUE(
-      AreSafeRefreshFlags(kRefreshProbeFlags, WTS_FORCEEXTRACTION | WTS_INSTANCESURROGATE, 0));
+      AreSafeRefreshFlags(kRefreshProbeFlags, kRefreshExtractFlags | WTS_INSTANCESURROGATE, 0));
+  // A second call: in the thumbnail process, or a plain WTS_EXTRACT (0, the same as none).
   EXPECT_TRUE(AreSafeRefreshFlags(kRefreshProbeFlags, kRefreshExtractFlags, WTS_REQUIRESURROGATE));
+  EXPECT_TRUE(AreSafeRefreshFlags(kRefreshProbeFlags, kRefreshExtractFlags,
+                                  WTS_FORCEEXTRACTION | WTS_REQUIRESURROGATE));
+  EXPECT_TRUE(AreSafeRefreshFlags(kRefreshProbeFlags, kRefreshExtractFlags, WTS_EXTRACT));
+}
+
+// Without WTS_REQUIRESURROGATE the cache may extract in this process: never for the extraction,
+// and never for a second call that asks for anything more than a plain WTS_EXTRACT.
+TEST(RefreshFlags, ExtractingOnlyInTheThumbnailProcess) {
+  const DWORD probe = kRefreshProbeFlags;
+  EXPECT_FALSE(AreSafeRefreshFlags(probe, WTS_FORCEEXTRACTION, 0));
+  EXPECT_FALSE(AreSafeRefreshFlags(probe, WTS_FORCEEXTRACTION | WTS_SLOWRECLAIM, 0));
+  EXPECT_FALSE(AreSafeRefreshFlags(probe, WTS_FORCEEXTRACTION | WTS_INSTANCESURROGATE, 0));
+  EXPECT_FALSE(AreSafeRefreshFlags(probe, WTS_FORCEEXTRACTION, WTS_EXTRACT));
+  EXPECT_FALSE(AreSafeRefreshFlags(probe, kRefreshExtractFlags, WTS_FORCEEXTRACTION));
+  EXPECT_FALSE(AreSafeRefreshFlags(probe, kRefreshExtractFlags, WTS_SLOWRECLAIM));
+  EXPECT_FALSE(AreSafeRefreshFlags(probe, kRefreshExtractFlags, WTS_INSTANCESURROGATE));
+  EXPECT_FALSE(
+      AreSafeRefreshFlags(probe, kRefreshExtractFlags, WTS_REQUIRESURROGATE | WTS_EXTRACTINPROC));
 }
 
 TEST(RefreshFlags, RefusesExtractingHereOrWithoutStoring) {
@@ -852,7 +870,6 @@ TEST(RefreshFiles, StoreFlagsMakeASecondCall) {
   cache.getFails[{L"C:\\a\\2.pdf", 256}] = E_FAIL;  // the extraction fails: no store
   const std::vector<path> files = {L"C:\\a\\1.pdf", L"C:\\a\\2.pdf"};
   RefreshFilesOptions options = Options(&cache, {256});
-  options.extractFlags = WTS_FORCEEXTRACTION;
   options.storeFlags = WTS_EXTRACT;  // a plain extraction: 0
   FakeNotifier notifier;
   RefreshCounts counts;
@@ -860,11 +877,11 @@ TEST(RefreshFiles, StoreFlagsMakeASecondCall) {
   const std::vector<FakeCache::Call> expected = {
       {L"C:\\a\\1.pdf", 0, 0},
       {L"C:\\a\\1.pdf", 256, kRefreshProbeFlags},
-      {L"C:\\a\\1.pdf", 256, WTS_FORCEEXTRACTION},
+      {L"C:\\a\\1.pdf", 256, kRefreshExtractFlags},
       {L"C:\\a\\1.pdf", 256, WTS_EXTRACT},
       {L"C:\\a\\2.pdf", 0, 0},
       {L"C:\\a\\2.pdf", 256, kRefreshProbeFlags},
-      {L"C:\\a\\2.pdf", 256, WTS_FORCEEXTRACTION},
+      {L"C:\\a\\2.pdf", 256, kRefreshExtractFlags},
   };
   EXPECT_EQ(cache.calls, expected);
   EXPECT_EQ(counts.refreshed, 1u);
@@ -884,9 +901,9 @@ TEST(RefreshFiles, UnsafeFlagsMakeNoCall) {
   cache.cached[L"C:\\a\\1.pdf"] = {256};
   const std::vector<path> files = {L"C:\\a\\1.pdf"};
   FakeNotifier notifier;
-  const DWORD unsafe[] = {kRefreshExtractFlags | WTS_EXTRACTINPROC,
-                          kRefreshExtractFlags | WTS_EXTRACTDONOTCACHE,
-                          static_cast<DWORD>(WTS_REQUIRESURROGATE)};
+  const DWORD unsafe[] = {
+      kRefreshExtractFlags | WTS_EXTRACTINPROC, kRefreshExtractFlags | WTS_EXTRACTDONOTCACHE,
+      static_cast<DWORD>(WTS_REQUIRESURROGATE), static_cast<DWORD>(WTS_FORCEEXTRACTION)};
   for (const DWORD extract : unsafe) {
     RefreshFilesOptions options = Options(&cache);
     options.extractFlags = extract;
@@ -899,6 +916,8 @@ TEST(RefreshFiles, UnsafeFlagsMakeNoCall) {
   EXPECT_EQ(RunRefresh(files, probe, &cache, &notifier, &counts), E_INVALIDARG);
   RefreshFilesOptions store = Options(&cache);
   store.storeFlags = WTS_EXTRACTINPROC;
+  EXPECT_EQ(RunRefresh(files, store, &cache, &notifier, &counts), E_INVALIDARG);
+  store.storeFlags = WTS_FORCEEXTRACTION;  // not a plain WTS_EXTRACT, and no surrogate asked for
   EXPECT_EQ(RunRefresh(files, store, &cache, &notifier, &counts), E_INVALIDARG);
   EXPECT_EQ(RunRefresh(files, Options(&cache, {}), &cache, &notifier, &counts), E_INVALIDARG);
   EXPECT_TRUE(cache.calls.empty());

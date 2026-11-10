@@ -108,6 +108,35 @@ TEST(ShellWindows, NoViewShowsANewFolder) {
   EXPECT_EQ(ForEachViewShowing(folders, false, kTimeoutMs, ViewAction(), &found), E_INVALIDARG);
 }
 
+// What a saved folder window's name is now, before it is reopened: only the file system is looked
+// at, the shell is not asked anything. A folder is reopened; a file, a junction (even to a folder)
+// and a folder that is gone are not; a shell namespace name is not looked at.
+TEST(ShellWindows, OnlyAFolderThatIsNoLinkIsReopened) {
+  test::TempDir dir(L"reopen");
+  ASSERT_TRUE(dir.ok());
+  path folder;
+  ASSERT_EQ(Canonicalize(dir.path(), &folder), S_OK);
+  const path real = folder / L"real";
+  const path link = folder / L"link";
+  const path file = folder / L"file.txt";
+  ASSERT_TRUE(CreateDirectoryW(real.c_str(), nullptr)) << GetLastError();
+  ASSERT_TRUE(CreateDirectoryW(link.c_str(), nullptr)) << GetLastError();
+  ASSERT_TRUE(test::MakeJunction(link.native(), real.native()));
+  {
+    wil::unique_hfile made(CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                       FILE_ATTRIBUTE_NORMAL, nullptr));
+    ASSERT_TRUE(made) << GetLastError();
+  }
+  EXPECT_TRUE(MayReopenFolderNow(folder.native()));
+  EXPECT_TRUE(MayReopenFolderNow(real.native()));
+  EXPECT_TRUE(MayReopenFolderNow(folder.root_path().native()));  // the drive's root
+  EXPECT_FALSE(MayReopenFolderNow(link.native()));
+  EXPECT_FALSE(MayReopenFolderNow(file.native()));
+  EXPECT_FALSE(MayReopenFolderNow((folder / L"gone").native()));
+  // This PC: the shell's own name, opened as it is.
+  EXPECT_TRUE(MayReopenFolderNow(L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"));
+}
+
 // Starts a program of this build that ends at once, as a child of File Explorer.
 TEST(ShellWindows, StartsAProgramThroughTheShell) {
   if (!test::OnGitHubHostedRunner()) {

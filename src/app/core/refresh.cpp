@@ -38,6 +38,8 @@ static_assert((kRefreshExtractFlags & (WTS_EXTRACTINPROC | WTS_EXTRACTDONOTCACHE
               "a refresh must never extract in this process, nor without storing the result");
 static_assert((kRefreshExtractFlags & WTS_FORCEEXTRACTION) != 0,
               "a refresh must extract again, never answer from the cache");
+static_assert((kRefreshExtractFlags & WTS_REQUIRESURROGATE) != 0,
+              "a refresh must extract in the thumbnail process only");
 static_assert((kRefreshProbeFlags & WTS_INCACHEONLY) != 0 &&
                   (kRefreshProbeFlags & (WTS_FORCEEXTRACTION | WTS_EXTRACTINPROC)) == 0,
               "asking whether a thumbnail is cached must never extract it");
@@ -441,9 +443,12 @@ bool AreSafeRefreshFlags(DWORD probe, DWORD extract, DWORD store) noexcept {
   constexpr DWORD kNever = WTS_EXTRACTINPROC | WTS_EXTRACTDONOTCACHE;
   const bool probeSafe =
       (probe & WTS_INCACHEONLY) != 0 && (probe & (WTS_FORCEEXTRACTION | WTS_EXTRACTINPROC)) == 0;
-  const bool extractSafe =
-      (extract & WTS_FORCEEXTRACTION) != 0 && (extract & (kNever | WTS_INCACHEONLY)) == 0;
-  const bool storeSafe = (store & kNever) == 0;
+  const bool extractSafe = (extract & WTS_FORCEEXTRACTION) != 0 &&
+                           (extract & WTS_REQUIRESURROGATE) != 0 &&
+                           (extract & (kNever | WTS_INCACHEONLY)) == 0;
+  // 0 is a plain WTS_EXTRACT and no second call alike, so it cannot be asked for more.
+  const bool storeSafe =
+      (store & kNever) == 0 && (store == 0 || (store & WTS_REQUIRESURROGATE) != 0);
   return probeSafe && extractSafe && storeSafe;
 }
 

@@ -36,12 +36,31 @@ struct FolderWindow {
 // Asks the running shell to open each folder in a window of its own (IShellDispatch2::Open on the
 // desktop's folder view, so the window is opened inside explorer.exe, never by a child of this
 // process). Windows without a parsing name are counted as failed, and so is a folder the shell
-// does not open. *opened and *failed always add up to the windows given: S_OK when every one was
-// tried; S_FALSE when the shell did not answer in time, and the windows not opened by then count
-// as failed and are no longer tried (the one being opened may still appear); a failure when the
-// desktop's folder view cannot be reached (nothing opened).
+// does not open, and a folder path that MayReopenFolderNow refuses (it is not tried). *opened and
+// *failed always add up to the windows given: S_OK when every one was tried; S_FALSE when the
+// shell did not answer in time, and the windows not opened by then count as failed and are no
+// longer tried (the one being opened may still appear); a failure when the desktop's folder view
+// cannot be reached (nothing opened).
 [[nodiscard]] HRESULT OpenFolderWindows(std::span<const FolderWindow> windows, DWORD timeoutMs,
                                         size_t* opened, size_t* failed) noexcept;
+
+// Whether |parsingName| is a folder's path on a drive ("C:\..."), which is looked at again before
+// its window is reopened (pure). Shell namespace names ("::{...}" and the like) are opened as they
+// are, and so are network paths ("\\server\share\..."), which a look could hold up for as long
+// as the server takes to answer.
+bool IsDrivePathName(std::wstring_view parsingName) noexcept;
+
+// Whether a folder on a drive may be reopened (pure), from what it is now: its attributes
+// (INVALID_FILE_ATTRIBUTES when they could not be read) and its reparse tag (0 when it is no
+// reparse point). Only a folder that is still there, and no link, junction or mount point: the
+// name was saved seconds before, and a link put there since would open the window wherever the
+// link leads. A folder with another kind of reparse point (cloud files, such as OneDrive's) is
+// still a folder.
+bool IsReopenableFolder(DWORD attributes, DWORD reparseTag) noexcept;
+
+// Whether the window of |parsingName| may be reopened now: a drive path (IsDrivePathName) is
+// looked at, without following a link at its end (IsReopenableFolder); any other name may.
+bool MayReopenFolderNow(const std::wstring& parsingName) noexcept;
 
 // Asks the running shell to start |program| (a full path) with |arguments|
 // (IShellDispatch2::ShellExecute on the desktop's folder view), so that it runs as a child of
