@@ -393,7 +393,7 @@ TEST(PlanReopen, SkipsOpenAndCapsAndNotesTabs) {
 
 // Only a folder's path on a drive is looked at again before its window is reopened.
 TEST(ReopenCheck, DrivePathsAreLookedAt) {
-  for (const wchar_t* name : {L"C:\\", L"C:\\Users\\Someone\\Documents", L"d:\\a", L"Z:/a"}) {
+  for (const wchar_t* name : {L"C:\\", L"C:\\Data\\Documents", L"d:\\a", L"Z:/a"}) {
     EXPECT_TRUE(IsDrivePathName(name)) << WideToUtf8Lossy(name);
   }
   for (const wchar_t* name :
