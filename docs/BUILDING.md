@@ -391,7 +391,9 @@ ctest --test-dir <folder> -L "unit|handler|integration" --output-on-failure
 ```
 
 It also holds `pdft_system_tests` and, in `system-fixture\`, the three 1.x files its migration
-tests plant (`PdfThumbnails.ps1`, `PdfThumbnails.cmd`, `LICENSE`). The system tests install and
+tests plant (`PdfThumbnails.ps1`, `PdfThumbnails.cmd`, `LICENSE`). The repository keeps 1.x's
+manager and its launcher only as test data, under other names in `tests\system\fixture`; the
+build gives them their 1.x names there. The system tests install and
 uninstall for real, and they make two local accounts for the run, an administrator and a standard
 user (deleted again at the end, with their profiles); the standard account runs
 `pdft_integration_tests` from the bundle. So run them only on CI or on a throw-away virtual
@@ -579,14 +581,18 @@ the first `--install --machine` replaces it for real, so back up 1.1's state fir
    ```bat
    mkdir "%LOCALAPPDATA%\Programs\PdfThumbnails"
    copy "%USERPROFILE%\pdft-backup\settings.ini" "%LOCALAPPDATA%\Programs\PdfThumbnails\"
-   PdfThumbnails.cmd install -Machine -AutoRepair
+   "<1.1 release folder>\PdfThumbnails.cmd" install -Machine -AutoRepair
    ```
 
-   The installed copy of 1.1's manager is gone by then (the migration removed it), so it is the
-   clone's `PdfThumbnails.cmd`, which installs the build in `dist\PdfThumbnails\bin`. Restore
-   `settings.ini` first: 1.1 keeps its zoom only there and writes 100 when the file is missing,
-   and `--uninstall` has removed 2.0's copy of the zoom. 1.1's install asks for administrator
-   rights again (a second UAC prompt, for `powershell.exe`). The install writes the class and the
+   The installed copy of 1.1's manager is gone by then (the migration removed it), and the
+   repository no longer has one. So it is the `PdfThumbnails.cmd` of a 1.1 release folder, which
+   installs the build in the `bin` folder next to it: the `dist\PdfThumbnails` folder that 1.1's
+   build made, if you kept it, or one built from the tag `v1.1.0` in a folder of its own
+   (`git worktree add <folder> v1.1.0`, then the "Build from source" section of that version's
+   README). Restore `settings.ini` first: 1.1 keeps its zoom only there and writes 100 when the
+   file is missing, and `--uninstall` has removed 2.0's copy of the zoom. 1.1's install asks for
+   administrator rights again (a second UAC prompt, for `powershell.exe`). The install writes the
+   class and the
    slots again, so the `.reg` files are needed only if something still differs: the two HKCU ones
    import from a normal prompt, `clsid.reg` (an HKLM export) only from an administrator prompt.
    1.1's `repair.log` is not restored: the migration deleted it, and step 1 does not back it up.
@@ -594,7 +600,8 @@ the first `--install --machine` replaces it for real, so back up 1.1's state fir
    Once 1.1 is back, never run 2.0's `--uninstall`: 1.1 uses the same class and `.pdf` slots, so
    it would remove 1.1's slots and its `PdfThumbnails auto-repair` task, and, while 2.0's
    `PdfThumbnailsSettings.exe` is still in `C:\Program Files\PdfThumbnails`, 1.1's class for all
-   users and that whole folder too. Remove 1.1 with its own `PdfThumbnails.cmd uninstall`.
+   users and that whole folder too. Remove 1.1 with its own `PdfThumbnails.cmd uninstall`, from
+   the same release folder.
 
 ## Formatting
 

@@ -83,10 +83,13 @@ path SourceTree() {
 }
 
 // A file of the source tree whose contents the table of 1.x files has under |relative|, when
-// there is one.
+// there is one: at the top, or among the system tests' 1.x files, which are kept as
+// "<name>.txt".
 std::optional<path> V1FileFromSource(const std::wstring& relative) {
-  const path file = SourceTree() / relative;
-  if (SourceTree().empty() || !Exists(file)) return std::nullopt;
+  if (SourceTree().empty()) return std::nullopt;
+  path file = SourceTree() / relative;
+  if (!Exists(file)) file = SourceTree() / L"tests" / L"system" / L"fixture" / (relative + L".txt");
+  if (!Exists(file)) return std::nullopt;
   Sha256Digest digest = {};
   if (FAILED(Sha256File(file, &digest))) return std::nullopt;
   for (const Sha256Digest& known : V1ShippedDigests(relative)) {
