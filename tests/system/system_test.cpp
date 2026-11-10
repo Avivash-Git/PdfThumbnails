@@ -95,8 +95,9 @@ constexpr wchar_t kThumbtestExe[] = L"thumbtest.exe";
 
 // The refresh experiment's automatic part fills the cache at every size, so it gets longer than
 // one command (at its limit the runner ends it, and its report is lost); its timing folder and
-// the files made again each in a thumbnail process of their own are kept few, since this
-// runner's timings decide nothing.
+// the files made again each in a thumbnail process of their own (where that pass runs at all:
+// the experiment leaves it out while the product's refresh refuses its flags) are kept few, since
+// this runner's timings decide nothing.
 constexpr DWORD kExperimentTimeoutMs = 30 * 60 * 1000;
 constexpr int kExperimentTimingFiles = 200;
 constexpr int kExperimentInstanceFiles = 40;
@@ -1029,7 +1030,8 @@ class System : public ::testing::Test {
   // --non-interactive), with the installed command-line executable and its folder in the scratch
   // folder: it sets the account's zoom to 100 % and 142 % and puts it back, fills the account's
   // thumbnail cache with synthetic PDFs at every size, makes them again with each extraction
-  // variant and judges them by the bitmaps' sizes (Pass A). Its verdict is printed, not judged
+  // variant the product's refresh allows (the product's own; it names the others as left out)
+  // and judges them by the bitmaps' sizes (Pass A). Its verdict is printed, not judged
   // (its main lines, then its whole report): the experiment must only have reached one (exit 0,
   // or 1 without a pass or after a stop) and put the zoom back.
   void RunRefreshExperiment(const path& thumbtest) {

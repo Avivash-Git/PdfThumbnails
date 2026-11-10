@@ -34,8 +34,9 @@
 // stand for the user's own thumbnails and are only asked about from then on) and asked at once
 // (the baseline), and its answers to other flags recorded; the baseline checked, by the bitmaps'
 // sizes (an answer counts only from its size's own file); the zoom flipped, and checked in the
-// thumbnail process; each extraction variant judged right after its own refresh, and the control
-// folder with it. The cache drops a file's thumbnails at every size at once while others are
+// thumbnail process; each extraction variant the product's refresh allows judged right after its
+// own refresh, and the control folder with it (the others are left out, with one line, and get
+// no folder). The cache drops a file's thumbnails at every size at once while others are
 // stored, so a folder is judged on the files it still holds: one portrait and one landscape page
 // at every size (the control, which has 8 files: two of each), and a file dropped whole after
 // the refresh made and stored it counts neither way. With the user: rounds judged by eye on the
@@ -255,7 +256,9 @@ constexpr wchar_t kUntouchedLabel[] = L"untouched";
 constexpr wchar_t kLargestPrefix[] = L"square-largest-";
 
 // The extraction variants, judged automatically; the best is the first that passes, in this
-// order.
+// order. Those the product's refresh refuses (RefreshAllows) are left out: they get no folder and
+// are not judged. That is every one but P-product, the only one that asks for the thumbnail
+// process (WTS_REQUIRESURROGATE).
 struct Variant {
   const wchar_t* label;
   const char* flags;           // as the report names them
@@ -273,6 +276,40 @@ constexpr Variant kVariants[] = {
     {L"E-force-then-store", "FORCEEXTRACTION, then a plain EXTRACT",
      static_cast<DWORD>(WTS_FORCEEXTRACTION), static_cast<DWORD>(WTS_EXTRACT)},
 };
+
+// The own-process pass's extraction: the first timing files made again, each in a thumbnail
+// process of its own.
+constexpr DWORD kInstanceExtractFlags =
+    static_cast<DWORD>(WTS_FORCEEXTRACTION | WTS_INSTANCESURROGATE);
+
+// Why a way of extracting that the product's refresh refuses is left out.
+constexpr char kSurrogateOnly[] =
+    "the product only extracts in the thumbnail process (WTS_REQUIRESURROGATE)";
+
+// Whether the product's refresh takes |extract| and |store| with its own question
+// (AreSafeRefreshFlags): RefreshFiles refuses anything else before it asks the cache anything.
+bool RefreshAllows(DWORD extract, std::optional<DWORD> store) {
+  return pdft::AreSafeRefreshFlags(pdft::kRefreshProbeFlags, extract, store.value_or(0));
+}
+
+// The variants run (RefreshAllows), in kVariants' order.
+std::vector<const Variant*> AllowedVariants() {
+  std::vector<const Variant*> allowed;
+  for (const Variant& variant : kVariants) {
+    if (RefreshAllows(variant.extract, variant.store)) allowed.push_back(&variant);
+  }
+  return allowed;
+}
+
+// The labels of the variants left out, joined with ", "; empty when none is.
+std::string LeftOutVariants() {
+  std::string labels;
+  for (const Variant& variant : kVariants) {
+    if (RefreshAllows(variant.extract, variant.store)) continue;
+    labels += (labels.empty() ? "" : ", ") + Utf8(variant.label);
+  }
+  return labels;
+}
 
 // What makes an open window show the new thumbnails, by eye: a round's notification, a step of
 // the ladder, or associations changed after the update; the cheapest and least invasive first.
@@ -1731,9 +1768,9 @@ class Experiment {
       return Stop("the test PDFs are not the ones expected");
     }
 
-    // The judged folders, in the order the report names them.
+    // The judged folders, in the order the report names them: of the variants, only those run.
     judged_ = {kControlLabel};
-    for (const Variant& variant : kVariants) judged_.push_back(variant.label);
+    for (const Variant* variant : variants_) judged_.push_back(variant->label);
     const wchar_t* const rounds[] = {kNoneLabel,  kItemLabel,  kDirLabel,
                                      kTouchLabel, kAssocLabel, kDialogLabel};
     for (const wchar_t* label : rounds) judged_.push_back(label);
@@ -1785,9 +1822,9 @@ class Experiment {
     }
     if (options_.desktop && !MakeDesktopFile(portrait)) return false;
     fillOrder_.push_back(kDesktopLabel);
-    for (auto variant = std::rbegin(kVariants); variant != std::rend(kVariants); ++variant) {
-      if (!makeJudged(variant->label)) return false;
-      fillOrder_.push_back(variant->label);
+    for (auto variant = variants_.rbegin(); variant != variants_.rend(); ++variant) {
+      if (!makeJudged((*variant)->label)) return false;
+      fillOrder_.push_back((*variant)->label);
     }
     if (!makeJudged(kControlLabel)) return false;
     fillOrder_.push_back(kControlLabel);
@@ -2702,8 +2739,8 @@ class Experiment {
                "from thumbnails made again by something else",
                kBaselineZoom, control.baselineNotOld));
     }
-    if (std::all_of(std::begin(kVariants), std::end(kVariants),
-                    [this](const Variant& variant) { return Excluded(variant.label); })) {
+    if (std::all_of(variants_.begin(), variants_.end(),
+                    [this](const Variant* variant) { return Excluded(variant->label); })) {
       valid_ = false;
       return Stop(
           "no extraction variant's folder holds a portrait and a landscape page at every size");
@@ -2788,40 +2825,44 @@ class Experiment {
       SaveRecords(L"made-variants.tsv", made);
       SaveRecords(L"right-after-variants.tsv", rightAfter);
     };
-    for (const Variant& variant : kVariants) {
-      if (Excluded(variant.label)) {
-        Say(Text("%s: left out (no valid baseline)", Utf8(variant.label).c_str()));
+    if (const std::string leftOut = LeftOutVariants(); !leftOut.empty()) {
+      Say(leftOut + ": left out (" + kSurrogateOnly + ")");
+    }
+    for (const Variant* variant : variants_) {
+      if (Excluded(variant->label)) {
+        Say(Text("%s: left out (no valid baseline)", Utf8(variant->label).c_str()));
         continue;
       }
-      Phase(Utf8(variant.label));
+      Phase(Utf8(variant->label));
       pdft::RefreshFilesOptions options = BestOptions(0);
-      options.extractFlags = variant.extract;
-      options.storeFlags = variant.store;
+      options.extractFlags = variant->extract;
+      options.storeFlags = variant->store;
       pdft::RefreshCounts counts;
       HRESULT hr = S_OK;
       std::vector<CacheRecord> own;
-      if (!Refresh(FilesOf(variant.label), options, *cache_, &counts, &hr, &own)) return false;
+      if (!Refresh(FilesOf(variant->label), options, *cache_, &counts, &hr, &own)) return false;
       made.insert(made.end(), own.begin(), own.end());
-      labels.push_back(variant.label);
+      labels.push_back(variant->label);
+      if (variant->store) storeVariantJudged_ = true;
       // Its folder and the control, asked at once.
-      std::vector<std::filesystem::path> files = FilesOf(variant.label);
+      std::vector<std::filesystem::path> files = FilesOf(variant->label);
       for (const std::filesystem::path& file : FilesOf(kControlLabel)) files.push_back(file);
       bool unopened = false;
       size_t again = 0;
       const std::vector<CacheRecord> answers =
-          AskHeld(files, "right after " + Utf8(variant.label), {}, &again, &unopened);
+          AskHeld(files, "right after " + Utf8(variant->label), {}, &again, &unopened);
       rightAfter.insert(rightAfter.end(), answers.begin(), answers.end());
       // A refresh that reported a failure fails, as the product's would end with exit code 1.
       pdft::test::JudgeRules rules = Rules(kFilesPerPage, counts.failed == 0);
       rules.made = own;
       rules.inProcess = true;
-      const FolderVerdict verdict = JudgeFolder(variant.label, baseline_, answers, false, rules);
+      const FolderVerdict verdict = JudgeFolder(variant->label, baseline_, answers, false, rules);
       control = JudgeFolder(kControlLabel, baseline_, answers, true, Rules(kControlFilesPerPage));
-      const std::wstring label = variant.label;
+      const std::wstring label = variant->label;
       latest[label] = Only(answers, std::span<const std::wstring>(&label, 1));
       latest[kControlLabel] = Only(answers, controls);
       Say(Text("%s (%s): %s; %s; of %zu held and new right after, %zu with WTS_CACHED",
-               Utf8(variant.label).c_str(), variant.flags, CountsText(hr, counts).c_str(),
+               Utf8(variant->label).c_str(), variant->flags, CountsText(hr, counts).c_str(),
                MadeText(own).c_str(), verdict.newAfter, verdict.heldNewCached));
       std::string line = VerdictText(verdict, kBaselineZoom, " right after its refresh");
       if (!verdict.filesDropped.empty()) {
@@ -2831,8 +2872,8 @@ class Experiment {
         }
       }
       Say(line);
-      Say(ControlText(control, variant.label));
-      verdicts.push_back({&variant, verdict});
+      Say(ControlText(control, variant->label));
+      verdicts.push_back({variant, verdict});
       // The control folder is not refreshed: when it changed, something else made thumbnails
       // again, and a variant's pass would not be its own.
       if (control.outcome == pdft::test::FolderOutcome::kFail) {
@@ -2842,7 +2883,7 @@ class Experiment {
             "the control folder changed during %s's refresh (%zu new, %zu neither, "
             "%zu gone with other entries of their file left): the variants' results "
             "cannot be told from what else changed the cache",
-            Utf8(variant.label).c_str(), control.newAfter, control.otherAfter, control.missAfter));
+            Utf8(variant->label).c_str(), control.newAfter, control.otherAfter, control.missAfter));
       }
       if (control.outcome != pdft::test::FolderOutcome::kPass) {
         valid_ = false;
@@ -2852,7 +2893,7 @@ class Experiment {
                  "%s's refresh that a pass could not be told from thumbnails made again "
                  "by something else (%zu portrait and %zu landscape pages left at every "
                  "size)",
-                 Utf8(variant.label).c_str(), control.portraitAfter, control.landscapeAfter));
+                 Utf8(variant->label).c_str(), control.portraitAfter, control.landscapeAfter));
       }
     }
     save();
@@ -2933,10 +2974,11 @@ class Experiment {
       }
     }
     restsOn_ = Text(
-        "Pass A rests on %zu entries in %zu files of %zu variants, and the control on %zu entries "
-        "in %zu files; the cache dropped %zu files whole: %zu before the baseline, %zu since",
-        entries, filesHeld, verdicts.size(), control.heldAfter, control.filesHeldAfter,
-        droppedBefore + droppedAfter, droppedBefore, droppedAfter);
+        "Pass A rests on %zu entries in %zu files of %zu variant%s, and the control on %zu "
+        "entries in %zu files; the cache dropped %zu files whole: %zu before the baseline, %zu "
+        "since",
+        entries, filesHeld, verdicts.size(), verdicts.size() == 1 ? "" : "s", control.heldAfter,
+        control.filesHeldAfter, droppedBefore + droppedAfter, droppedBefore, droppedAfter);
     Say(restsOn_);
     (void)CheckUntouched("after the variants");
     return true;
@@ -3420,9 +3462,10 @@ class Experiment {
     } else if (options_.interactive && lost > 0) {
       // The stores the timing part would make: the fill at kTimingSize, then each file made
       // again once, at its largest size held (the smaller ones come with that store), the first
-      // ones once more in a thumbnail process of their own.
+      // ones once more in a thumbnail process of their own where that pass runs.
       const size_t files = static_cast<size_t>(options_.timingFiles);
-      const size_t instance = std::min(files, static_cast<size_t>(options_.instanceFiles));
+      const size_t instance =
+          InstancePassRuns() ? std::min(files, static_cast<size_t>(options_.instanceFiles)) : 0;
       Say(Text(
           "Timing: left out (the cache dropped %zu of the %zu thumbnails stored once and never "
           "touched, so %zu more stores would push out more of yours)",
@@ -3434,6 +3477,9 @@ class Experiment {
     (void)CheckUntouched("after the timing part");
     return !best_ || StopTest();
   }
+
+  // Whether the own-process pass runs: the product's refresh takes its extraction.
+  static bool InstancePassRuns() { return RefreshAllows(kInstanceExtractFlags, std::nullopt); }
 
   // The untouched files held right after their store.
   size_t Watched() const {
@@ -3534,27 +3580,31 @@ class Experiment {
         (failed ? Text(", %zu failed", failed) : "") +
         Text("; mean %.1f times the idle one", contention_));
 
-    // The first files again, each in a thumbnail process of its own.
-    Phase("the own-process pass");
+    // The first files again, each in a thumbnail process of its own, where the refresh allows it.
     const std::vector<std::filesystem::path>& timing = FilesOf(kTimingLabel);
-    const std::span<const std::filesystem::path> first(
-        timing.data(), std::min(static_cast<size_t>(options_.instanceFiles), timing.size()));
-    std::vector<DWORD> instanceExtractions;
-    pdft::RefreshFilesOptions instance = BestOptions(0);
-    instance.extractFlags = static_cast<DWORD>(WTS_FORCEEXTRACTION | WTS_INSTANCESURROGATE);
-    instance.storeFlags.reset();
-    instance.extractionMs = &instanceExtractions;
-    ContentionProbe duringInstance(probeFile_);
-    duringInstance.Start();
-    const ULONGLONG instanceStart = PreciseMs();
-    const bool instanceGo = Refresh(first, instance, *cache_, &counts, &hr);
-    const ULONGLONG instanceTotal = PreciseMs() - instanceStart;
-    const std::vector<DWORD> instanceTimes = duringInstance.Stop(&failed);
-    if (!instanceGo) return false;
-    Say(Text("own thumbnail process (INSTANCESURROGATE), first %zu files: %s; %llu ms in all",
-             first.size(), CountsText(hr, counts).c_str(), instanceTotal));
-    Say("  extractions: " + TimesText(instanceExtractions));
-    Say("  contention probe during it: " + TimesText(instanceTimes));
+    if (!InstancePassRuns()) {
+      Say(Text("own thumbnail process (INSTANCESURROGATE): left out (%s)", kSurrogateOnly));
+    } else {
+      Phase("the own-process pass");
+      const std::span<const std::filesystem::path> first(
+          timing.data(), std::min(static_cast<size_t>(options_.instanceFiles), timing.size()));
+      std::vector<DWORD> instanceExtractions;
+      pdft::RefreshFilesOptions instance = BestOptions(0);
+      instance.extractFlags = kInstanceExtractFlags;
+      instance.storeFlags.reset();
+      instance.extractionMs = &instanceExtractions;
+      ContentionProbe duringInstance(probeFile_);
+      duringInstance.Start();
+      const ULONGLONG instanceStart = PreciseMs();
+      const bool instanceGo = Refresh(first, instance, *cache_, &counts, &hr);
+      const ULONGLONG instanceTotal = PreciseMs() - instanceStart;
+      const std::vector<DWORD> instanceTimes = duringInstance.Stop(&failed);
+      if (!instanceGo) return false;
+      Say(Text("own thumbnail process (INSTANCESURROGATE), first %zu files: %s; %llu ms in all",
+               first.size(), CountsText(hr, counts).c_str(), instanceTotal));
+      Say("  extractions: " + TimesText(instanceExtractions));
+      Say("  contention probe during it: " + TimesText(instanceTimes));
+    }
 
     // What the cache dropped whole across them: the timing files at their one size, and the
     // control.
@@ -3899,9 +3949,11 @@ class Experiment {
           notDecidedLabels_ + " to judge them): run the experiment again.");
     } else if (!best_) {
       if (gone_) {
-        Say("No Pass A, the thumbnails went without new ones being stored: the variant that "
-            "stores after the extraction normally passes then; if it does not, purge through the "
-            "Thumbnail Cache clean-up handler (IEmptyVolumeCache2 "
+        Say(std::string("No Pass A, the thumbnails went without new ones being stored: ") +
+            (storeVariantJudged_ ? "the variant that stores after the extraction normally passes "
+                                   "then; if it does not, purge"
+                                 : "no variant that stores after the extraction was run; purge") +
+            " through the Thumbnail Cache clean-up handler (IEmptyVolumeCache2 "
             "{889900c3-59f3-4c2f-ae21-a409ea01e605}).");
       } else {
         Say("No Pass A, the old thumbnails stayed: the default stays off. Next: purge through the "
@@ -4018,7 +4070,7 @@ class Experiment {
     if (contention_ > 2.0) {
       Say(
           Text("Contention is high (%.1f times idle): use INSTANCESURROGATE in the product if "
-               "S-instance passed Pass A, otherwise a 20 ms pause between extractions.",
+               "S-instance ran and passed Pass A, otherwise a 20 ms pause between extractions.",
                contention_));
     }
   }
@@ -4132,6 +4184,9 @@ class Experiment {
   bool stoppedByUser_ = false;
   bool variantsJudged_ = false;
   bool valid_ = true;
+  // The variants run (AllowedVariants): only they get a folder and are judged.
+  const std::vector<const Variant*> variants_ = AllowedVariants();
+  bool storeVariantJudged_ = false;  // a variant that stores after the extraction was refreshed
   std::optional<Variant> best_;
   // The variants not decided before the best, or at all without one: with the files the cache
   // dropped, and their labels only.
@@ -4252,7 +4307,8 @@ void PrintExperimentUsage() {
       "      The one-sitting refresh experiment (docs/TESTING.md): it sets the zoom to 100 and\n"
       "      142 and puts it back, and fills and refreshes the real thumbnail cache with\n"
       "      synthetic PDFs. --instance-files: how many timing files are made again each in a\n"
-      "      thumbnail process of its own (200).\n");
+      "      thumbnail process of its own (200), where the refresh allows that extraction.\n"
+      "      Extraction variants the refresh refuses are left out.\n");
 }
 
 }  // namespace thumbtest

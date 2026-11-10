@@ -22,6 +22,9 @@
 //       Makes the cached thumbnails of the files again as --refresh --folder does (RefreshFiles),
 //       with the experiment's probe, extraction and notification (by default the product's), and
 //       prints the counts and how long the extractions took (min, mean, 95th percentile, max).
+//       An --extract that RefreshFiles refuses (every one but product: none of the others asks
+//       for the thumbnail process, WTS_REQUIRESURROGATE) is left out: it says so and exits 2
+//       before anything is read.
 //       --probe ideal asks with WTS_IDEALCACHESIZEONLY as well, which build 26100 refuses (to try
 //       again on other builds). --cancel-after asks it to stop after that many milliseconds and
 //       prints how long it took to; --timing writes how long each extraction took.
@@ -628,7 +631,8 @@ bool ParseNotify(const std::wstring& text, unsigned* notify) {
 }
 
 // The extraction variants: the flags of the call that makes a thumbnail again, and of a second,
-// plain one that stores it (force-then-extract only).
+// plain one that stores it (force-then-extract only). RunRefresh leaves out those RefreshFiles
+// refuses.
 bool ParseExtract(const std::wstring& text, pdft::RefreshFilesOptions* options) {
   options->storeFlags.reset();
   if (text == L"product") {
@@ -656,6 +660,7 @@ int RunRefresh(const std::vector<std::wstring>& args) {
   pdft::RefreshFilesOptions options;  // the product's sizes, flags and notification
   std::optional<long> cancelAfter;
   std::optional<std::wstring> timing;
+  std::wstring extract = L"product";
   size_t i = 0;
   for (; i < args.size() && args[i].starts_with(L"--"); ++i) {
     if (i + 1 == args.size()) return BadUsage();
@@ -667,6 +672,7 @@ int RunRefresh(const std::vector<std::wstring>& args) {
       options.probeFlags = value == L"ideal" ? kIdealProbeFlags : pdft::kRefreshProbeFlags;
     } else if (name == L"--extract") {
       ok = ParseExtract(value, &options);
+      extract = value;
     } else if (name == L"--notify") {
       ok = ParseNotify(value, &options.notify);
     } else if (name == L"--sizes") {
@@ -683,6 +689,16 @@ int RunRefresh(const std::vector<std::wstring>& args) {
     if (!ok) return BadUsage();
   }
   if (i == args.size()) return BadUsage();
+  // RefreshFiles refuses an extraction that does not ask for the thumbnail process: said here,
+  // before anything is read, instead of as a failed refresh.
+  if (!pdft::AreSafeRefreshFlags(options.probeFlags, options.extractFlags,
+                                 options.storeFlags.value_or(0))) {
+    std::printf(
+        "--extract %s: left out, since the product only extracts in the thumbnail process "
+        "(WTS_REQUIRESURROGATE); nothing was refreshed\n",
+        Utf8(extract).c_str());
+    return 2;
+  }
   std::vector<std::filesystem::path> files;
   if (!FinalFiles(args, i, &files)) return 2;
   files = pdft::GroupByFolder(std::move(files));
@@ -1399,6 +1415,8 @@ void PrintRefreshUsage() {
       "The refresh modes use the signed-in user's own thumbnail cache and File Explorer (judge\n"
       "reads only its two files): synthetic PDFs only, from a normal prompt with no app package\n"
       "above it (a Command Prompt opened with Win+R); elsewhere they refuse (exit 8).\n"
+      "refresh --extract: only product runs; the others are left out (exit 2), since the\n"
+      "product only extracts in the thumbnail process (WTS_REQUIRESURROGATE).\n"
       "<list>: sizes such as 16,32,256. <hex>: WTS_FLAGS such as 0x8001.\n");
 }
 

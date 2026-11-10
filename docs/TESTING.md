@@ -15,9 +15,12 @@ It decides two things:
   there and show the new zoom (or the cache forgot their whole file after the refresh made and
   stored them, which counts neither way). A thumbnail's size shows its zoom (an A4 page at 256
   pixels is 181 x 256 at 100 % and 256 x 256 at 142 %), so the experiment judges them by the
-  sizes the cache reports, without looking at pixels. Five ways of making a thumbnail again are
-  tried; the first that passes is used for the rest of the run. Pass A also needs the product
-  itself, `PdfThumbnailsCli --refresh --folder`, to pass from a Windows Terminal tab.
+  sizes the cache reports, without looking at pixels. Of the five ways of making a thumbnail
+  again it knows, it tries those the product's refresh allows, which is only the product's own
+  (`WTS_FORCEEXTRACTION | WTS_REQUIRESURROGATE`): the product only extracts in the thumbnail
+  process, and the other four do not ask for it, so the report names them as left out. The first
+  way that passes is used for the rest of the run. Pass A also needs the product itself,
+  `PdfThumbnailsCli --refresh --folder`, to pass from a Windows Terminal tab.
 - **Pass B**, by eye: an open folder window shows the new thumbnails within 10 seconds without a
   restart of File Explorer, and so do the Desktop and another program's File Open dialog. You say
   what you see.
@@ -54,7 +57,8 @@ It decides two things:
      the test folder there (a folder that does not exist yet) instead of in `%TEMP%`;
      `--timing-files <n>` sets how many files are timed (2,000; 0 leaves the timing out, but not
      how fast a refresh stops), and `--instance-files <n>` how many of them are made again each
-     in a thumbnail process of its own (200).
+     in a thumbnail process of its own (200; that pass is left out while the product's refresh
+     refuses its flags, as it does now).
 
 Answer with `y` or `n` and Enter; where it says so, press Enter alone as soon as you see the
 change. `q` at any question stops the experiment (exit code 3) and puts everything back.
@@ -68,14 +72,15 @@ change. `q` at any question stops the experiment (exit code 3) and puts everythi
    `thumbtest shellinfo --windows --holders` sees, and asks how many File Explorer windows and
    tabs you have open.
 2. **Files**: a new folder `%TEMP%\PdfThumbnails-refresh-<UTC time>` with folders of four
-   synthetic PDFs each (two A4 portrait pages, two landscape): one per extraction variant,
-   `P-product`, `F-force`, `R-slowreclaim`, `S-instance` and `E-force-then-store`; one per round,
-   `N-none`, `I-item`, `D-dir`, `T-touch`, `A-assoc` and `B-dialog`; `C-control` with eight
-   (four of each page); and `timing` (2,000 copies), `slow` (heavy and very large pages),
-   `probe`, `ladder` (two portraits) and `untouched` (20 portraits). They are made in the order
-   the cache is filled: `slow`, `probe`, the rounds' folders (then the test PDF on the Desktop),
-   the variants' from `E-force-then-store` to `P-product`, and `C-control` last, since on CI the
-   cache forgot files filled early and none of those filled last; then the others.
+   synthetic PDFs each (two A4 portrait pages, two landscape): one per extraction variant that is
+   run, which is only `P-product` now (`F-force`, `R-slowreclaim`, `S-instance` and
+   `E-force-then-store` are left out and get none; see step 7); one per round, `N-none`,
+   `I-item`, `D-dir`, `T-touch`, `A-assoc` and `B-dialog`; `C-control` with eight (four of each
+   page); and `timing` (2,000 copies), `slow` (heavy and very large pages), `probe`, `ladder`
+   (two portraits) and `untouched` (20 portraits). They are made in the order the cache is
+   filled: `slow`, `probe`, the rounds' folders (then the test PDF on the Desktop), the
+   variants' (`P-product` last), and `C-control` last, since on CI the cache forgot files filled
+   early and none of those filled last; then the others.
 3. **Zoom 100 %**, through `PdfThumbnailsCli --zoom 100 --no-refresh`.
 4. **The cache filled**: first the two `ladder` files, one at 256 pixels only and one at 100
    only, each followed by the cache files' sizes; then the `untouched` files once at 256 pixels.
@@ -100,9 +105,12 @@ change. `q` at any question stops the experiment (exit code 3) and puts everythi
    `C-control` the run stops, since nothing would then show that a pass came from the refresh.
 6. **Zoom 142 %**; then one thumbnail made without storing it must show 142 %, else the thumbnail
    process does not see the new zoom and the run stops.
-7. **The extraction variants** (about a minute): each variant's folder is refreshed, and straight
-   after it and `C-control` are asked about and judged. A variant passes when its refresh
-   reported no failure; each thumbnail it held at 100 % in a file the refresh reached was made by
+7. **The extraction variants** (about a minute): a variant whose flags the product's refresh
+   refuses is left out, with one line in the report that names them all: the product only
+   extracts in the thumbnail process (`WTS_REQUIRESURROGATE`), and only `P-product` asks for it.
+   Each other variant's folder is refreshed, and straight after it and `C-control` are asked
+   about and judged. A variant passes when its refresh reported no failure; each thumbnail it
+   held at 100 % in a file the refresh reached was made by
    the refresh's own extraction at 142 %, and is now held at 142 % or went with every other
    thumbnail of its file after the cache said it stored it (the cache forgot that file: it
    counts neither way); nothing is at 100 % or at neither zoom, no file lost only some of its
@@ -140,8 +148,9 @@ change. `q` at any question stops the experiment (exit code 3) and puts everythi
     files are filled at 256 (only now, after the variants were judged), and `C-control` and the
     timing files asked about again; then the timing files refreshed while another thread
     measures how long a thumbnail like File Explorer's waits meanwhile (against how long it takes
-    before); the first 200 again (`--instance-files`), each in a thumbnail process of its own,
-    and what the cache forgot across them. Either way, how fast a refresh of the slow folder
+    before); the first 200 again (`--instance-files`), each in a thumbnail process of its own
+    (left out, with one line, while the product's refresh refuses that extraction, as it does
+    now), and what the cache forgot across them. Either way, how fast a refresh of the slow folder
     stops when asked to, and whether the cache answers consistently afterwards.
 11. **The product**: the experiment first checks that `C-control` still shows 100 % (from here one
     page of each kind held at every size will do; otherwise this step is left out, and Pass A is
@@ -232,7 +241,9 @@ each time. One run was closed before its end and has no report.
 
 Answers and notes:
 - The product's own extraction flags (`WTS_FORCEEXTRACTION | WTS_REQUIRESURROGATE`) passed first
-  each time, and `SHCNE_UPDATEITEM` per file is the notification chosen.
+  each time, and `SHCNE_UPDATEITEM` per file is the notification chosen. These runs tried all
+  five ways; since then the product's refresh refuses an extraction that does not ask for the
+  thumbnail process, so the experiment tries the product's own alone.
 - The cache's question must be `WTS_INCACHEONLY` alone: with `WTS_IDEALCACHESIZEONLY` it refuses
   with `E_INVALIDARG`.
 - Run 2 had a second File Explorer process, left from a time File Explorer had stopped, and the
