@@ -130,6 +130,12 @@ TEST(Resources, SettingsCarriesItsWindow) {
   EXPECT_NE(FindResourceW(module, MAKEINTRESOURCEW(IDI_APP), RT_GROUP_ICON), nullptr);
   EXPECT_NE(FindResourceW(module, MAKEINTRESOURCEW(IDA_SETTINGS), RT_ACCELERATOR), nullptr);
   EXPECT_FALSE(ResourceString(module, IDS_BANNER_OTHER_USER).empty());
+  // The banners without a link of their own say what to do instead.
+  const std::wstring noLink = ResourceString(module, IDS_BANNER_OTHER_USER_NO_LINK);
+  EXPECT_NE(noLink.find(L"{product} Settings from File Explorer"), std::wstring::npos);
+  EXPECT_NE(noLink.find(L"{account}"), std::wstring::npos);
+  EXPECT_NE(ResourceString(module, IDS_BANNER_BLOCKED).find(L"sign out and in again"),
+            std::wstring::npos);
   EXPECT_NE(ResourceString(module, IDS_READING_STATE).find(L"\u2026"), std::wstring::npos);
   FreeLibrary(module);
 }

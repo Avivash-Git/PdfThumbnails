@@ -4,6 +4,8 @@
 
 #include <gtest/gtest.h>
 
+#include "instance.h"
+
 namespace pdft {
 namespace {
 
@@ -155,6 +157,7 @@ TEST(WindowClose, OtherWorkIsWaitedFor) {
 TEST(WindowBannerRule, TheMostImportantOneShows) {
   WindowState state = Ready(WindowActivity::kExternalBusy);
   state.otherUser = true;
+  state.mayReopen = true;
   state.context = WindowContext::kSandboxed;
   EXPECT_EQ(DecideBanner(state), WindowBanner::kSandboxed);
   state.context = WindowContext::kNotInstalled;
@@ -164,6 +167,46 @@ TEST(WindowBannerRule, TheMostImportantOneShows) {
   state.activity = WindowActivity::kIdle;
   EXPECT_EQ(DecideBanner(state), WindowBanner::kNone);  // the status lines say it
   EXPECT_EQ(DecideBanner(Ready()), WindowBanner::kNone);
+}
+
+// The link that starts the window again as the desktop's user shows only where that may happen;
+// otherwise the banner says how to open the window instead.
+TEST(WindowBannerRule, AnotherAccountsWindowOffersTheLinkOnlyWhereItMayReopen) {
+  WindowState state = Ready();
+  state.otherUser = true;
+  EXPECT_EQ(DecideBanner(state), WindowBanner::kOtherUserNoLink);
+  state.mayReopen = true;
+  EXPECT_EQ(DecideBanner(state), WindowBanner::kOtherUser);
+  // mayReopen alone says nothing.
+  state.otherUser = false;
+  EXPECT_EQ(DecideBanner(state), WindowBanner::kNone);
+}
+
+// A lock that a process below Medium integrity took is not a check that ends: it has its own
+// banner.
+TEST(WindowBannerRule, ALockTakenBelowMediumIsNotACheckRunning) {
+  WindowState state = Ready(WindowActivity::kExternalBusy);
+  state.lockBlocked = true;
+  EXPECT_EQ(DecideBanner(state), WindowBanner::kExternalBlocked);
+  state.lockBlocked = false;
+  EXPECT_EQ(DecideBanner(state), WindowBanner::kExternalBusy);
+  // Only while the window waits for the lock.
+  state.lockBlocked = true;
+  state.activity = WindowActivity::kIdle;
+  EXPECT_EQ(DecideBanner(state), WindowBanner::kNone);
+  // Another account's window says that first.
+  state.activity = WindowActivity::kExternalBusy;
+  state.otherUser = true;
+  EXPECT_EQ(DecideBanner(state), WindowBanner::kOtherUserNoLink);
+}
+
+TEST(WindowLock, WhatTheLocksAnswerSays) {
+  EXPECT_EQ(ClassifyLockAnswer(S_OK), LockHold::kNone);
+  EXPECT_EQ(ClassifyLockAnswer(OperationLock::kBusy), LockHold::kBusy);
+  EXPECT_EQ(ClassifyLockAnswer(OperationLock::kTakenByLowerIntegrity), LockHold::kBlocked);
+  // Nothing that waiting would end, and nothing that keeps the window out.
+  EXPECT_EQ(ClassifyLockAnswer(kNamedObjectsRefusedHr), LockHold::kNone);
+  EXPECT_EQ(ClassifyLockAnswer(E_FAIL), LockHold::kNone);
 }
 
 TEST(WindowZoomBox, ClampsANumberAndKeepsTheZoomOtherwise) {

@@ -264,5 +264,8 @@ the product.
   different scaling: nothing is cut off, and the tiles stay sharp.
 - **High Contrast** on and off while the window is open.
 - **"Run as administrator"** shows why the window does not open, and nothing else.
+- **"Run as different user"** shows a banner that names that account. Started from the install
+  for all users, it offers to reopen as the signed-in user; started from anywhere else, it says to
+  open the settings from File Explorer instead.
 - **Save** with a new zoom refreshes thumbnails with progress; Cancel stops it and keeps the zoom.
 - **Closing** with unsaved changes asks; closing during a refresh asks whether to stop it.

@@ -121,4 +121,6 @@ BEGIN
   IDS_NAME_GLYPH_PROBLEM "Problem"
   IDS_NAME_TILE_DOC      "Preview of a sample document at {zoom} % zoom"
   IDS_NAME_TILE_SLIDE    "Preview of a sample slide at {zoom} % zoom"
+  IDS_BANNER_BLOCKED     "Another program is blocking checks and changes; sign out and in again."
+  IDS_BANNER_OTHER_USER_NO_LINK "For the signed-in user, open {product} Settings from File Explorer; this window runs as {account}."
 END

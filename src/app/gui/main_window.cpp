@@ -142,7 +142,8 @@ class MainWindow {
   void OnCopyDiagnostics();
   void OnDiagnosticsDone();
   void ShowNote(std::wstring note);
-  bool LockIsTaken() const noexcept;
+  LockHold ReadLockHold() const noexcept;
+  void EnterExternalBusy(LockHold hold) noexcept;
   void EnterBusyIfLocked();
   void OnBusyTimer();
   void Relaunch() noexcept;
@@ -323,8 +324,11 @@ INT_PTR MainWindow::Handle(UINT message, WPARAM w, LPARAM l) try {
       }
       if (header->idFrom == IDC_BANNER_LINK &&
           (header->code == NM_CLICK || header->code == NM_RETURN)) {
-        // Only when closing now would lose nothing.
-        if (DecideClose(state_) == CloseAction::kCloseNow) Relaunch();
+        // Only while the link is offered, and only when closing now would lose nothing.
+        if (DecideBanner(state_) == WindowBanner::kOtherUser &&
+            DecideClose(state_) == CloseAction::kCloseNow) {
+          Relaunch();
+        }
         return TRUE;
       }
       return FALSE;
@@ -382,6 +386,7 @@ void MainWindow::OnInitDialog() {
   jobs_.emplace(dialog_);
   diagnosticsJob_.emplace(dialog_, kDiagnosticsDoneMessage);
   jobs_->StartFirstReading(start_.relaunched);
+  state_.mayReopen = start_.mayReopenAsShellUser;
   state_.activity = WindowActivity::kGathering;
   SetTimer(dialog_, kShowTimer, kShowAfterMs, nullptr);
 }
@@ -755,29 +760,36 @@ void MainWindow::OnDiagnosticsDone() {
                          : Filled(Text(IDS_DIAG_FAILED), L"{hr}", HResultText(hr)));
 }
 
-bool MainWindow::LockIsTaken() const noexcept {
+LockHold MainWindow::ReadLockHold() const noexcept {
   std::optional<OperationLock> lock;
-  const HRESULT hr = OperationLock::Acquire(0, &lock);
-  return hr == OperationLock::kBusy || hr == OperationLock::kTakenByLowerIntegrity;
+  return ClassifyLockAnswer(OperationLock::Acquire(0, &lock));
+}
+
+void MainWindow::EnterExternalBusy(LockHold hold) noexcept {
+  state_.activity = WindowActivity::kExternalBusy;
+  state_.lockBlocked = hold == LockHold::kBlocked;
+  SetTimer(dialog_, kBusyTimer, kBusyPollMs, nullptr);
 }
 
 void MainWindow::EnterBusyIfLocked() {
-  if (state_.context != WindowContext::kReady || state_.activity != WindowActivity::kIdle ||
-      !LockIsTaken()) {
-    return;
-  }
-  state_.activity = WindowActivity::kExternalBusy;
-  SetTimer(dialog_, kBusyTimer, kBusyPollMs, nullptr);
+  if (state_.context != WindowContext::kReady || state_.activity != WindowActivity::kIdle) return;
+  const LockHold hold = ReadLockHold();
+  if (hold == LockHold::kNone) return;
+  EnterExternalBusy(hold);
   ApplyState();
 }
 
 void MainWindow::OnBusyTimer() {
   if (state_.activity != WindowActivity::kExternalBusy) return;
-  if (LockIsTaken()) {
-    SetTimer(dialog_, kBusyTimer, kBusyPollMs, nullptr);
+  const LockHold hold = ReadLockHold();
+  if (hold != LockHold::kNone) {
+    const bool changed = state_.lockBlocked != (hold == LockHold::kBlocked);
+    EnterExternalBusy(hold);
+    if (changed) ApplyState();
     return;
   }
   state_.activity = WindowActivity::kIdle;
+  state_.lockBlocked = false;
   ApplyState();
   RequestReading();
 }
@@ -788,20 +800,14 @@ void MainWindow::OnJobDone() {
   if (reading && reading->check) {
     panel_ = panelBeforeCheck_;
     message_ = CheckOutcomeText(*reading->check);
-    if (reading->check->busy) {
-      state_.activity = WindowActivity::kExternalBusy;
-      SetTimer(dialog_, kBusyTimer, kBusyPollMs, nullptr);
-    }
+    if (reading->check->busy) EnterExternalBusy(ReadLockHold());
   }
   std::optional<SaveReport> saved;
   if (reading && reading->save) {
     panel_ = panelBeforeCheck_;
     saved = DescribeSave(*reading->save, kPdfRefreshDefault);
     message_ = saved->note;
-    if (saved->busy) {
-      state_.activity = WindowActivity::kExternalBusy;
-      SetTimer(dialog_, kBusyTimer, kBusyPollMs, nullptr);
-    }
+    if (saved->busy) EnterExternalBusy(ReadLockHold());
   }
   if (reading && reading->leaveContainer) {
     Relaunch();
@@ -940,8 +946,15 @@ void MainWindow::ApplyState() {
     case WindowBanner::kOtherUser:
       text = Filled(Text(IDS_BANNER_OTHER_USER), L"{account}", context_.userAccount);
       break;
+    case WindowBanner::kOtherUserNoLink:
+      text = Filled(Filled(Text(IDS_BANNER_OTHER_USER_NO_LINK), L"{product}", kProductName),
+                    L"{account}", context_.userAccount);
+      break;
     case WindowBanner::kExternalBusy:
       text = Text(IDS_BANNER_BUSY);
+      break;
+    case WindowBanner::kExternalBlocked:
+      text = Text(IDS_BANNER_BLOCKED);
       break;
   }
   // With the Fix link in the note's place, the banner's row carries the note if it is free.

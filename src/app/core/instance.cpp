@@ -335,18 +335,67 @@ HRESULT CreateNamedMutex(std::wstring_view name, std::wstring_view userSid,
 }
 CATCH_RETURN();
 
+SingleInstance ClassifyExistingInstanceMutex(std::wstring_view ownerSid, std::wstring_view userSid,
+                                             bool belowMedium) noexcept {
+  if (!MadeByThisUser(ownerSid, userSid)) return SingleInstance::kAnotherAccount;
+  return belowMedium ? SingleInstance::kLowerIntegrity : SingleInstance::kOtherWindow;
+}
+
 HRESULT TakeSingleInstance(std::wstring_view userSid, wil::unique_handle* mutex,
-                           bool* first) noexcept try {
-  *first = false;
-  bool existed = false;
-  const HRESULT made = CreateNamedMutex(SettingsInstanceMutexName(userSid), userSid, false,
-                                        SYNCHRONIZE, mutex, &existed);
-  if (made == kNamedObjectsRefusedHr) return made;  // the caller says so (not a WIL failure)
-  RETURN_IF_FAILED(made);
-  *first = !existed;
+                           SingleInstance* found) noexcept try {
+  *found = SingleInstance::kFirst;
+  const std::wstring name = SettingsInstanceMutexName(userSid);
+  for (int attempt = 0; attempt < kCreateAttempts; ++attempt) {
+    bool existed = false;
+    const HRESULT made = CreateNamedMutex(name, userSid, false, SYNCHRONIZE, mutex, &existed);
+    if (made == kNamedObjectsRefusedHr) return made;  // the caller says so (not a WIL failure)
+    RETURN_IF_FAILED(made);
+    if (!existed) return S_OK;  // kFirst
+
+    // It exists. Whose it is, as OpenLockMutex tells for the operation lock: the app's descriptor
+    // lets this user read the owner and the label, so a mutex that does not was not made for this
+    // user by the app.
+    wil::unique_handle readable(OpenMutexW(READ_CONTROL, FALSE, name.c_str()));
+    if (!readable) {
+      const DWORD error = GetLastError();
+      mutex->reset();
+      if (error == ERROR_FILE_NOT_FOUND) continue;  // gone in between: make it again
+      *found = SingleInstance::kAnotherAccount;
+      return S_OK;
+    }
+    std::wstring owner;
+    bool belowMedium = false;
+    HRESULT read = GetOwnerSid(readable.get(), &owner);
+    if (SUCCEEDED(read)) read = LabelIsBelowMedium(readable.get(), &belowMedium);
+    if (FAILED(read)) {
+      LOG_HR(read);
+      owner.clear();  // not shown to be this user's
+    }
+    *found = ClassifyExistingInstanceMutex(owner, userSid, belowMedium);
+    if (*found != SingleInstance::kOtherWindow) mutex->reset();
+    return S_OK;
+  }
+  // There each time, and gone again each time before it could be read: some other process keeps
+  // making and closing the name, which no settings window of this user does.
+  mutex->reset();
+  *found = SingleInstance::kAnotherAccount;
   return S_OK;
 }
 CATCH_RETURN();
+
+const wchar_t* SingleInstanceToken(SingleInstance found) noexcept {
+  switch (found) {
+    case SingleInstance::kFirst:
+      return L"first";
+    case SingleInstance::kOtherWindow:
+      return L"other-window";
+    case SingleInstance::kAnotherAccount:
+      return L"another-account";
+    case SingleInstance::kLowerIntegrity:
+      return L"lower-integrity";
+  }
+  return L"unknown";
+}
 
 HRESULT AppMutexes::Hold(std::wstring_view userSid) noexcept try {
   // Opened with SYNCHRONIZE when another account created them: the handle keeps the mutex in

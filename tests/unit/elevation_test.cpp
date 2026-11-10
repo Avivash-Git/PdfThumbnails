@@ -378,6 +378,17 @@ TEST(ElevatedEntry, OnlyMachineInstallInDeveloperBuildsMayRunElsewhere) {
   EXPECT_EQ(CheckElevatedEntry(facts), HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK));
 }
 
+// The install for all users' own executable: run from the machine root, with no link on the way.
+// The settings window starts again for another account only from there.
+TEST(MachineInstall, TheMachineRootWithNoLinkOnTheWay) {
+  EXPECT_TRUE(IsMachineInstall(MachineRootCheck{true, S_OK}));
+  EXPECT_FALSE(IsMachineInstall(MachineRootCheck{false, S_OK}));
+  EXPECT_FALSE(
+      IsMachineInstall(MachineRootCheck{true, HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK)}));
+  EXPECT_FALSE(IsMachineInstall(MachineRootCheck{true, E_UNEXPECTED}));  // no machine root
+  EXPECT_FALSE(IsMachineInstall(MachineRootCheck{}));
+}
+
 TEST(ElevatedExit, HowARunEnded) {
   HRESULT failure = E_FAIL;
   EXPECT_EQ(ClassifyElevatedExit(S_OK, 0, &failure), ElevatedOutcome::kDone);

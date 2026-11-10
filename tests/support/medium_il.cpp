@@ -228,6 +228,25 @@ HRESULT CreateMediumTokenForSelf(MediumToken kind, HANDLE* token) {
   return CreateMediumToken(self.get(), kind, token);
 }
 
+HRESULT CreateLowTokenForSelf(HANDLE* token) {
+  if (!token) return E_POINTER;
+  *token = nullptr;
+  Handle created;
+  HRESULT hr = CreateMediumTokenForSelf(MediumToken::kLabelOnly, created.out());
+  if (FAILED(hr)) return hr;
+  BYTE low[SECURITY_MAX_SID_SIZE];
+  if (!WellKnownSid(WinLowLabelSid, low)) return LastError();
+  TOKEN_MANDATORY_LABEL label = {};
+  label.Label.Attributes = SE_GROUP_INTEGRITY;
+  label.Label.Sid = low;
+  if (!SetTokenInformation(created.get(), TokenIntegrityLevel, &label,
+                           sizeof(label) + GetLengthSid(low))) {
+    return LastError();
+  }
+  *token = created.release();
+  return S_OK;
+}
+
 HRESULT RunWithToken(HANDLE token, const std::wstring& application, const std::wstring& commandLine,
                      DWORD* exitCode) {
   if (!exitCode) return E_POINTER;

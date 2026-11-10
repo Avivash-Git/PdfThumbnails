@@ -8,8 +8,8 @@
 // Medium process holds Administrators deny-only, so it could not open the object and would take
 // it for missing. Every named object therefore gets an explicit descriptor (NamedObjectSddl),
 // and ERROR_ACCESS_DENIED on opening one still means "another instance has it" (for the
-// operation lock's Global\ name, only when its owner shows that this user made it: see
-// OperationLock).
+// operation lock and the settings window's mutex, only when its owner and its label show that
+// this user made it at Medium or above: see OperationLock and TakeSingleInstance).
 //
 // Windows gives the same ERROR_ACCESS_DENIED for every name in a namespace that this process may
 // not create objects in at all. A program started with another account's token inside someone
@@ -110,11 +110,35 @@ RefusedMutex ClassifyRefusedMutex(DWORD openError, std::optional<HRESULT> probe)
                                        bool everyoneSynchronize, DWORD fallbackAccess,
                                        wil::unique_handle* mutex, bool* existed) noexcept;
 
-// The settings window's single-instance mutex. *first is false when another settings window
-// of this user already runs. Keep |mutex| open for as long as the window is.
+// What the settings window's single-instance mutex is to this process.
+enum class SingleInstance {
+  kFirst,           // made now: this window is the first; keep the mutex open while it is open
+  kOtherWindow,     // this user's, made at Medium or above: another settings window runs
+  kAnotherAccount,  // made by another account, or with a descriptor that keeps this user from
+                    // reading who made it, or it could not be read at all
+  kLowerIntegrity,  // made by a process of this user below Medium integrity
+};
+
+// What a single-instance mutex that already exists is (pure), from its owner |ownerSid| (empty
+// when it could not be read) and whether its integrity label is below Medium. Only a mutex this
+// user made (MadeByThisUser) at Medium or above stands for another window: the app's descriptor
+// keeps a process below Medium from opening its mutex, but whoever creates a name first owns it,
+// so a sandboxed process of the same user, or another account in this session, could otherwise
+// keep the window from ever opening. Never kFirst.
+SingleInstance ClassifyExistingInstanceMutex(std::wstring_view ownerSid, std::wstring_view userSid,
+                                             bool belowMedium) noexcept;
+
+// The settings window's single-instance mutex. *found says what it is (SingleInstance); |mutex|
+// holds it for kFirst and kOtherWindow and is empty otherwise. Keep it open for as long as the
+// window is. For kAnotherAccount and kLowerIntegrity the window opens all the same: one window per
+// user is a convenience, and a name someone else made first must not keep it shut.
 // kNamedObjectsRefusedHr: this process cannot tell whether another window runs.
 [[nodiscard]] HRESULT TakeSingleInstance(std::wstring_view userSid, wil::unique_handle* mutex,
-                                         bool* first) noexcept;
+                                         SingleInstance* found) noexcept;
+
+// The log's word for |found| (pure): "first", "other-window", "another-account",
+// "lower-integrity".
+const wchar_t* SingleInstanceToken(SingleInstance found) noexcept;
 
 // The fixed-name mutexes that an installer checks before it replaces files (Inno Setup's
 // AppMutex): <prefix>AppMutex in this session and Global\<prefix>AppMutex across sessions.

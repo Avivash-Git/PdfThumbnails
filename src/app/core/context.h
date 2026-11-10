@@ -93,6 +93,10 @@ struct ProcessContext {
 // cannot be read; a registry check that cannot decide gives kUnknown.
 [[nodiscard]] HRESULT GetProcessContext(ContextProbe probe, ProcessContext* context) noexcept;
 
+// ProcessContext::differentFromShellUser read again now. Where this process's own token or the
+// shell's cannot be read it counts as another user's; without a shell window it is false.
+bool ShellRunsAsAnotherUser() noexcept;
+
 // Walks from this process up through its parents (at most 32, from a process snapshot) and
 // returns the package full name of the first one that runs in a foreign package, or
 // std::nullopt. Stops where a parent cannot be opened, or was created after its child (its

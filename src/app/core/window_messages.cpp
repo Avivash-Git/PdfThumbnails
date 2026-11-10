@@ -2,6 +2,7 @@
 
 #include <wil/resource.h>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -20,8 +21,22 @@ PSID TokenUserSid(HANDLE token, std::vector<BYTE>* buffer) {
   return reinterpret_cast<TOKEN_USER*>(buffer->data())->User.Sid;
 }
 
-// Whether process |pid| runs as this process's user.
-bool RunsAsThisUser(DWORD pid) {
+// The integrity level (SECURITY_MANDATORY_*_RID) of |token|; nothing when it cannot be read.
+std::optional<DWORD> TokenIntegrityRid(HANDLE token) {
+  alignas(TOKEN_MANDATORY_LABEL) BYTE buffer[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
+  DWORD size = 0;
+  if (!GetTokenInformation(token, TokenIntegrityLevel, buffer, sizeof(buffer), &size)) {
+    return std::nullopt;
+  }
+  const PSID label = reinterpret_cast<TOKEN_MANDATORY_LABEL*>(buffer)->Label.Sid;
+  const UCHAR count = *GetSidSubAuthorityCount(label);
+  if (count == 0) return std::nullopt;
+  return *GetSidSubAuthority(label, count - 1u);
+}
+
+// Whether process |pid| may own this user's settings window (IsOwnWindowProcess). What cannot be
+// read does not count.
+bool IsOwnWindowOwner(DWORD pid) {
   wil::unique_handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
   if (!process) return false;
   wil::unique_handle theirToken;
@@ -34,7 +49,10 @@ bool RunsAsThisUser(DWORD pid) {
   std::vector<BYTE> own;
   const PSID theirSid = TokenUserSid(theirToken.get(), &theirs);
   const PSID ownSid = TokenUserSid(ownToken.get(), &own);
-  return theirSid && ownSid && EqualSid(theirSid, ownSid);
+  const std::optional<DWORD> theirIntegrity = TokenIntegrityRid(theirToken.get());
+  const std::optional<DWORD> ownIntegrity = TokenIntegrityRid(ownToken.get());
+  return theirSid && ownSid && theirIntegrity && ownIntegrity &&
+         IsOwnWindowProcess(EqualSid(theirSid, ownSid) != FALSE, *theirIntegrity, *ownIntegrity);
 }
 
 // This user's settings window on this desktop, and its process; nullptr when there is none.
@@ -43,7 +61,7 @@ HWND FindOwnWindow(DWORD* pid) {
   HWND window = nullptr;
   while ((window = FindWindowExW(nullptr, window, className.c_str(), nullptr)) != nullptr) {
     DWORD owner = 0;
-    if (GetWindowThreadProcessId(window, &owner) && RunsAsThisUser(owner)) {
+    if (GetWindowThreadProcessId(window, &owner) && IsOwnWindowOwner(owner)) {
       *pid = owner;
       return window;
     }
@@ -52,6 +70,10 @@ HWND FindOwnWindow(DWORD* pid) {
 }
 
 }  // namespace
+
+bool IsOwnWindowProcess(bool sameUser, DWORD theirIntegrityRid, DWORD ownIntegrityRid) noexcept {
+  return sameUser && theirIntegrityRid >= ownIntegrityRid;
+}
 
 UINT StateChangedMessage() noexcept try {
   return RegisterWindowMessageW(StateChangedMessageName().c_str());

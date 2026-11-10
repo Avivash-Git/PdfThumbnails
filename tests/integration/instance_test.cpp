@@ -173,24 +173,7 @@ TEST(OperationLock, AHolderThatEndsWithoutReleasingCountsAsGone) {
 
 // A primary token like this process's, labelled Low integrity.
 HRESULT CreateLowToken(wil::unique_handle* token) {
-  HANDLE medium = nullptr;
-  HRESULT hr = test::CreateMediumTokenForSelf(test::MediumToken::kLabelOnly, &medium);
-  if (FAILED(hr)) return hr;
-  wil::unique_handle owned(medium);
-  BYTE low[SECURITY_MAX_SID_SIZE];
-  DWORD size = sizeof(low);
-  if (!CreateWellKnownSid(WinLowLabelSid, nullptr, low, &size)) {
-    return HRESULT_FROM_WIN32(GetLastError());
-  }
-  TOKEN_MANDATORY_LABEL label = {};
-  label.Label.Attributes = SE_GROUP_INTEGRITY;
-  label.Label.Sid = low;
-  if (!SetTokenInformation(owned.get(), TokenIntegrityLevel, &label,
-                           sizeof(label) + GetLengthSid(low))) {
-    return HRESULT_FROM_WIN32(GetLastError());
-  }
-  *token = std::move(owned);
-  return S_OK;
+  return test::CreateLowTokenForSelf(token->put());
 }
 
 // Restores the run's own name suffix when it goes away.
@@ -460,13 +443,104 @@ TEST(OperationLock, LivesInTheGlobalNamespace) {
 TEST(NamedObjects, SingleInstanceSeesTheFirst) {
   const std::wstring sid = Sid();
   wil::unique_handle first;
-  bool isFirst = false;
-  ASSERT_HRESULT_SUCCEEDED(TakeSingleInstance(sid, std::addressof(first), &isFirst));
-  EXPECT_TRUE(isFirst);
+  SingleInstance found = SingleInstance::kAnotherAccount;
+  ASSERT_HRESULT_SUCCEEDED(TakeSingleInstance(sid, std::addressof(first), &found));
+  EXPECT_EQ(found, SingleInstance::kFirst);
+  EXPECT_TRUE(first);
   wil::unique_handle second;
-  bool secondIsFirst = true;
-  ASSERT_HRESULT_SUCCEEDED(TakeSingleInstance(sid, std::addressof(second), &secondIsFirst));
-  EXPECT_FALSE(secondIsFirst);
+  ASSERT_HRESULT_SUCCEEDED(TakeSingleInstance(sid, std::addressof(second), &found));
+  EXPECT_EQ(found, SingleInstance::kOtherWindow);
+  EXPECT_TRUE(second);
+}
+
+// The settings window's mutex made first by someone with a descriptor that lets this user wait on
+// it but not read who made it (an OWNER RIGHTS entry keeps its owner, this test, from reading it
+// too): the app's own descriptor never does that, so it is no window of this user's, and the
+// window opens anyway.
+TEST(NamedObjects, SingleInstanceIgnoresAMutexThisUserMayNotRead) {
+  const std::wstring sid = Sid();
+  SuffixScope scope(test::NamedObjectSuffix() + L".window-wait-only");
+  wil::unique_handle other;
+  ASSERT_NO_FATAL_FAILURE(MakeMutex(SettingsInstanceMutexName(sid),
+                                    L"D:(A;;0x00100000;;;" + sid + L")(A;;0x00100000;;;OW)",
+                                    std::addressof(other)));  // SYNCHRONIZE
+  wil::unique_handle mutex;
+  SingleInstance found = SingleInstance::kFirst;
+  ASSERT_HRESULT_SUCCEEDED(TakeSingleInstance(sid, std::addressof(mutex), &found));
+  EXPECT_EQ(found, SingleInstance::kAnotherAccount);
+  EXPECT_FALSE(mutex);
+}
+
+// The same for a mutex another account made with a descriptor that lets everyone in: its owner
+// shows that it is no window of this user's.
+TEST(NamedObjects, SingleInstanceIgnoresAnotherAccountsMutex) {
+  SuffixScope scope(test::NamedObjectSuffix() + L".window-other-owner");
+  wil::unique_handle other;
+  bool made = false;
+  // A made-up account's SID, split as in AGlobalNameAnotherAccountOwnsLeadsToTheSessionLock.
+  ASSERT_NO_FATAL_FAILURE(MakeMutexOwnedBy(SettingsInstanceMutexName(Sid()),
+                                           L"S-1-5-21-"
+                                           L"1000-2000-3000-1001",
+                                           L"D:(A;;GA;;;WD)", std::addressof(other), &made));
+  if (!made) GTEST_SKIP() << "needs SeRestorePrivilege (an elevated run) to give it another owner";
+  wil::unique_handle mutex;
+  SingleInstance found = SingleInstance::kFirst;
+  ASSERT_HRESULT_SUCCEEDED(TakeSingleInstance(Sid(), std::addressof(mutex), &found));
+  EXPECT_EQ(found, SingleInstance::kAnotherAccount);
+  EXPECT_FALSE(mutex);
+}
+
+// A process of the same user below Medium integrity cannot open the settings window's mutex (the
+// label keeps it out), and if it makes the name first, the window does not take that for a window
+// of this user's: it opens anyway instead of exiting quietly.
+TEST(NamedObjects, SingleInstanceIgnoresAMutexMadeBelowMedium) {
+  if (test::CurrentIntegrityRid() < SECURITY_MANDATORY_MEDIUM_RID) {
+    GTEST_SKIP() << "needs a test process at Medium integrity or above";
+  }
+  const std::wstring sid = Sid();
+  wil::unique_handle own;
+  SingleInstance found = SingleInstance::kAnotherAccount;
+  ASSERT_HRESULT_SUCCEEDED(TakeSingleInstance(sid, std::addressof(own), &found));
+  ASSERT_EQ(found, SingleInstance::kFirst);
+  const std::wstring heldName = SettingsInstanceMutexName(sid);
+  const std::wstring freshSuffix = test::NamedObjectSuffix() + L".window-squat";
+  std::wstring freshName;
+  {
+    SuffixScope scope(freshSuffix);
+    freshName = SettingsInstanceMutexName(sid);
+  }
+
+  wil::unique_handle low;
+  ASSERT_HRESULT_SUCCEEDED(CreateLowToken(std::addressof(low)));
+  test::PipedChild child;
+  const HRESULT started = child.Start(test::SelfPath(),
+                                      L"--pdft-child squat-lock " + test::QuoteArgument(heldName) +
+                                          L" " + test::QuoteArgument(freshName),
+                                      low.get());
+  if (test::IsApplicationControlBlock(started)) {
+    GTEST_SKIP() << "Application Control blocked the test program at Low integrity";
+  }
+  ASSERT_HRESULT_SUCCEEDED(started);
+  EXPECT_EQ(child.ReadLine(), "il=0x1000");
+  const std::string open = child.ReadLine();
+  EXPECT_EQ(open.rfind("open=no", 0), 0u) << open;
+  const std::string create = child.ReadLine();
+  std::printf("[ low integrity ] %s, %s\n", open.c_str(), create.c_str());
+  {
+    SuffixScope scope(freshSuffix);
+    wil::unique_handle mutex;
+    found = SingleInstance::kFirst;
+    ASSERT_HRESULT_SUCCEEDED(TakeSingleInstance(sid, std::addressof(mutex), &found));
+    if (create == "create=yes") {
+      EXPECT_EQ(found, SingleInstance::kLowerIntegrity);
+      EXPECT_FALSE(mutex);
+    } else {
+      EXPECT_EQ(create.rfind("create=no", 0), 0u) << create;
+      EXPECT_EQ(found, SingleInstance::kFirst);
+    }
+  }
+  child.CloseInput();
+  EXPECT_EQ(child.Wait(30000), 0u);
 }
 
 // Another instance made the mutex with a descriptor that does not give this process full access

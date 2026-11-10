@@ -96,20 +96,9 @@ HRESULT GatherEntryFacts(ElevatedEntryFacts* facts) noexcept try {
     facts->verb = ParseElevatedArguments(args, facts->devInstall);
   }
 
-  std::filesystem::path root;
-  std::filesystem::path own;
-  std::filesystem::path canonicalRoot;
-  std::filesystem::path canonicalOwn;
-  if (SUCCEEDED(GetMachineRoot(&root))) {
-    facts->reparsePoints = CheckNoReparsePoints(root, {});
-    facts->runsFromMachineRoot =
-        SUCCEEDED(GetOwnExe(&own)) && SUCCEEDED(Canonicalize(own, &canonicalOwn)) &&
-        SUCCEEDED(Canonicalize(root, &canonicalRoot)) &&
-        IEquals(canonicalOwn.parent_path().native(), canonicalRoot.native()) &&
-        IEquals(canonicalOwn.filename().native(), kSettingsExe);
-  } else {
-    facts->reparsePoints = E_UNEXPECTED;
-  }
+  const MachineRootCheck machineRoot = CheckMachineRoot();
+  facts->runsFromMachineRoot = machineRoot.runsFromMachineRoot;
+  facts->reparsePoints = machineRoot.reparsePoints;
   return S_OK;
 }
 CATCH_RETURN();
@@ -229,6 +218,31 @@ std::wstring TokenFactsText(const TokenFacts& facts) {
   return std::wstring(L"token: elevated ") + (facts.elevated ? L"yes" : L"no") +
          L", elevation type " + std::to_wstring(static_cast<int>(facts.elevationType)) + L" (" +
          type + L"), integrity " + integrity + L", Administrators " + administrators;
+}
+
+MachineRootCheck CheckMachineRoot() noexcept try {
+  MachineRootCheck check;
+  std::filesystem::path root;
+  if (FAILED(GetMachineRoot(&root))) {
+    check.reparsePoints = E_UNEXPECTED;
+    return check;
+  }
+  check.reparsePoints = CheckNoReparsePoints(root, {});
+  std::filesystem::path own;
+  std::filesystem::path canonicalRoot;
+  std::filesystem::path canonicalOwn;
+  check.runsFromMachineRoot =
+      SUCCEEDED(GetOwnExe(&own)) && SUCCEEDED(Canonicalize(own, &canonicalOwn)) &&
+      SUCCEEDED(Canonicalize(root, &canonicalRoot)) &&
+      IEquals(canonicalOwn.parent_path().native(), canonicalRoot.native()) &&
+      IEquals(canonicalOwn.filename().native(), kSettingsExe);
+  return check;
+} catch (...) {
+  return MachineRootCheck{false, E_OUTOFMEMORY};
+}
+
+bool IsMachineInstall(const MachineRootCheck& check) noexcept {
+  return check.runsFromMachineRoot && SUCCEEDED(check.reparsePoints);
 }
 
 HRESULT ReadEntryTokenFacts(HANDLE token, ElevatedEntryFacts* facts) noexcept {

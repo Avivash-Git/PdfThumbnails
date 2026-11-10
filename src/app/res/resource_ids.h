@@ -99,3 +99,5 @@
 #define IDS_NAME_GLYPH_PROBLEM 342
 #define IDS_NAME_TILE_DOC 343    // {zoom}
 #define IDS_NAME_TILE_SLIDE 344  // {zoom}
+#define IDS_BANNER_BLOCKED 345
+#define IDS_BANNER_OTHER_USER_NO_LINK 346  // {product}, {account}

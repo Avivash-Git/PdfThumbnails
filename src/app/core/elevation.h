@@ -118,6 +118,23 @@ std::optional<ElevatedVerb> ParseElevatedArguments(std::span<const std::wstring_
 
 // ---- What the elevated side checks first ----------------------------------------------------
 
+// Where this executable runs from, as the elevated side checks it, and as the settings window
+// checks it before File Explorer starts it again for another account.
+struct MachineRootCheck {
+  // This executable is <machine root>\<settings exe> (both canonicalized).
+  bool runsFromMachineRoot = false;
+  HRESULT reparsePoints = S_OK;  // CheckNoReparsePoints on the machine root
+};
+
+// Reads MachineRootCheck for this executable. Where the machine root cannot be found,
+// reparsePoints is E_UNEXPECTED (and runsFromMachineRoot false).
+MachineRootCheck CheckMachineRoot() noexcept;
+
+// Whether |check| shows the settings executable of the install for all users (pure): it runs from
+// the machine root, and no link or junction is on the way there. Only administrators can change
+// what lies there, while a copy anywhere else may lie in a folder its account can change.
+bool IsMachineInstall(const MachineRootCheck& check) noexcept;
+
 struct ElevatedEntryFacts {
   bool tokenElevated = false;  // TokenElevation
   // The Administrators group is enabled in the token (CheckTokenMembership): present but

@@ -23,6 +23,11 @@
 //                                <error>"), then to create and own the mutex <fresh> ("create=
 //                                yes"/"create=no <error>"), and keeps it until its standard
 //                                input closes
+//   window-squat <suffix>        run below Medium integrity: prints its integrity level, makes a
+//                                hidden window of the settings window's class (named with the
+//                                parent's suffix), prints "ready", counts the activation and
+//                                state-changed messages it gets until its standard input closes,
+//                                then prints "activate=<n> changed=<n>"
 //   apply-task <folder> <name> <fallback name> <program>
 //                                registers the check task with both triggers through
 //                                ApplyTaskOptions, as whatever token it runs with (the tests
@@ -80,6 +85,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "child_process.h"
@@ -92,6 +98,7 @@
 #include "processes.h"
 #include "strings.h"
 #include "tasks.h"
+#include "window_messages.h"
 
 namespace {
 
@@ -142,6 +149,51 @@ int SquatLock(const wchar_t* held, const wchar_t* fresh) {
          read > 0) {
   }
   if (created) CloseHandle(created);
+  return 0;
+}
+
+// What a process of the same user below Medium integrity gets when it registers a window of the
+// settings window's class.
+int WindowSquat(const wchar_t* suffix) {
+  pdft::SetObjectNameSuffixForTesting(suffix);
+  char text[64];
+  sprintf_s(text, "il=0x%04lX\n", pdft::test::CurrentIntegrityRid());
+  Print(text);
+  const std::wstring className = pdft::SettingsWindowClassName();
+  WNDCLASSEXW windowClass = {sizeof(windowClass)};
+  windowClass.lpfnWndProc = DefWindowProcW;
+  windowClass.hInstance = GetModuleHandleW(nullptr);
+  windowClass.lpszClassName = className.c_str();
+  if (!RegisterClassExW(&windowClass)) return 3;
+  const HWND window = CreateWindowExW(0, className.c_str(), L"", WS_POPUP, 0, 0, 1, 1, nullptr,
+                                      nullptr, windowClass.hInstance, nullptr);
+  if (!window) return 4;
+  const UINT changed = pdft::StateChangedMessage();
+  // Posted to this thread once standard input closes: after every message the parent sent first.
+  constexpr UINT kInputClosed = WM_APP + 100;
+  const DWORD thread = GetCurrentThreadId();
+  std::thread waiter([thread] {
+    char buffer[64];
+    DWORD read = 0;
+    while (ReadFile(GetStdHandle(STD_INPUT_HANDLE), buffer, sizeof(buffer), &read, nullptr) &&
+           read > 0) {
+    }
+    PostThreadMessageW(thread, kInputClosed, 0, 0);
+  });
+  Print("ready\n");
+  int activations = 0;
+  int changes = 0;
+  MSG message;
+  while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+    if (message.hwnd == nullptr && message.message == kInputClosed) break;
+    if (message.message == pdft::kActivateWindowMessage) ++activations;
+    if (changed != 0 && message.message == changed) ++changes;
+    DispatchMessageW(&message);
+  }
+  waiter.join();
+  sprintf_s(text, "activate=%d changed=%d\n", activations, changes);
+  Print(text);
+  DestroyWindow(window);
   return 0;
 }
 
@@ -417,6 +469,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (mode == L"ancestor" && argc == 4) return Ancestor(_wtoi(argv[3]));
     if (mode == L"squat-lock" && argc == 5) return SquatLock(argv[3], argv[4]);
+    if (mode == L"window-squat" && argc == 4) return WindowSquat(argv[3]);
     if (mode == L"apply-task" && argc == 7) return ApplyTask(argv[3], argv[4], argv[5], argv[6]);
     if (mode == L"make-folder" && argc == 4) return MakeFolder(argv[3]);
     if (mode == L"hold-file" && argc == 4) return HoldFile(argv[3]);

@@ -140,8 +140,8 @@ int OpenSettingsWindow(const ProcessContext& context, bool relaunched, OpenWindo
     return Code(ExitCode::kWrongContext);
   }
   wil::unique_handle instance;
-  bool first = false;
-  if (const HRESULT hr = TakeSingleInstance(context.userSid, std::addressof(instance), &first);
+  SingleInstance found = SingleInstance::kFirst;
+  if (const HRESULT hr = TakeSingleInstance(context.userSid, std::addressof(instance), &found);
       FAILED(hr)) {
     // WIL logs other failures.
     if (hr == kNamedObjectsRefusedHr) {
@@ -154,18 +154,45 @@ int OpenSettingsWindow(const ProcessContext& context, bool relaunched, OpenWindo
     }
     return Code(ExitCode::kFailed);
   }
-  if (!first) {
+  if (found == SingleInstance::kOtherWindow) {
     (void)ActivateExistingWindow();
     return Code(ExitCode::kOk);
   }
+  if (found != SingleInstance::kFirst) {
+    // Someone else made the name first: not a window of this user's, so this one opens anyway.
+    Log(LogLevel::kWarning, L"window",
+        std::wstring(L"window instance-mutex=ignored made-by=") + SingleInstanceToken(found));
+  }
   if (!openWindow) return Code(ExitCode::kOk);
-  const WindowExit exit = openWindow(WindowStart{context, relaunched});
+  WindowStart start{context, relaunched};
+  start.mayReopenAsShellUser = MayRelaunchThroughShell(true, IsMachineInstall(CheckMachineRoot()));
+  const WindowExit exit = openWindow(start);
   if (!exit.relaunch) return exit.code;
   // Only now: the new window must find the mutex free.
   instance.reset();
-  std::filesystem::path own;
-  HRESULT started = GetOwnExe(&own);
-  if (SUCCEEDED(started)) started = StartThroughShell(own, L"--relaunched", kRelaunchTimeoutMs);
+  // Asked again now: the shell may not be the one there was at the start, and the window may have
+  // been open for a long time.
+  const bool shellIsAnotherUser = context.differentFromShellUser || ShellRunsAsAnotherUser();
+  const bool machineInstall = shellIsAnotherUser && IsMachineInstall(CheckMachineRoot());
+  if (!MayRelaunchThroughShell(shellIsAnotherUser, machineInstall)) {
+    Log(LogLevel::kWarning, L"window",
+        L"window relaunch refused other-shell-user not-machine-install");
+    const std::wstring message = WindowRelaunchFailedMessage();
+    out.Error(message);
+    MessageBoxW(nullptr, message.c_str(), kProductName, MB_OK | MB_ICONERROR);
+    return Code(ExitCode::kWrongContext);
+  }
+  std::filesystem::path program;
+  HRESULT started = S_OK;
+  if (shellIsAnotherUser) {
+    // The machine root's own path, not the one this process was started by, which may lead
+    // through a link that this process's account can point elsewhere.
+    started = GetMachineRoot(&program);
+    if (SUCCEEDED(started)) program /= kSettingsExe;
+  } else {
+    started = GetOwnExe(&program);
+  }
+  if (SUCCEEDED(started)) started = StartThroughShell(program, L"--relaunched", kRelaunchTimeoutMs);
   Log(LogLevel::kInfo, L"window", L"window relaunch hr=" + HResultText(started));
   if (FAILED(started)) {
     const std::wstring message = WindowRelaunchFailedMessage();
@@ -1404,6 +1431,10 @@ std::wstring WindowElevatedRefusalMessage() {
   return std::wstring(L"Cannot run here: running as administrator. ") + kProductName +
          L" Settings shows and changes the signed-in user's own settings, which an administrator "
          L"process does not write. Open it normally (not as administrator).";
+}
+
+bool MayRelaunchThroughShell(bool shellIsAnotherUser, bool machineInstall) noexcept {
+  return !shellIsAnotherUser || machineInstall;
 }
 
 std::wstring WindowRelaunchFailedMessage() {

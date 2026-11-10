@@ -1,7 +1,8 @@
 // The pure decisions behind the process context and the commands (context.h, commands.h,
-// instance.h): registry virtualization verdicts (the elevated side's below an app package too),
-// the refusal message, named-object descriptors and names, and what a refused creation of a
-// named mutex means.
+// instance.h, window_messages.h): registry virtualization verdicts (the elevated side's below an
+// app package too), the refusal message, named-object descriptors and names, what a refused
+// creation of a named mutex means, whose settings window mutex and window count, and when the
+// window may start again through File Explorer.
 
 #include <windows.h>
 
@@ -16,6 +17,7 @@
 #include "context.h"
 #include "instance.h"
 #include "project_config.h"
+#include "window_messages.h"
 
 namespace pdft {
 namespace {
@@ -223,6 +225,16 @@ TEST(Commands, WindowRelaunchFailureSaysHowToOpenIt) {
   EXPECT_NE(message.find(L"File Explorer or a normal terminal"), std::wstring::npos) << message;
 }
 
+// File Explorer starts the window again with its own token. For this process's own user any copy
+// may start (leaving an app package); for another account only the install for all users' own
+// executable, which that account cannot change.
+TEST(Commands, OnlyTheInstallForAllUsersStartsAgainForAnotherAccount) {
+  EXPECT_TRUE(MayRelaunchThroughShell(false, false));
+  EXPECT_TRUE(MayRelaunchThroughShell(false, true));
+  EXPECT_TRUE(MayRelaunchThroughShell(true, true));
+  EXPECT_FALSE(MayRelaunchThroughShell(true, false));
+}
+
 // --checks refuses an elevated process too, saying why for the task.
 TEST(Commands, ChecksCannotRunElevated) {
   const std::wstring message = ChecksElevatedRefusalMessage();
@@ -367,6 +379,48 @@ TEST(NamedObjects, LockOwnerMadeByThisUser) {
   EXPECT_FALSE(MadeByThisUser(L"S-1-5-19", kUser));        // LOCAL SERVICE
   EXPECT_FALSE(MadeByThisUser(L"S-1-1-0", kUser));         // Everyone
   EXPECT_FALSE(MadeByThisUser(L"", kUser));                // no owner could be read
+}
+
+// The settings window's mutex, found made already: another window of this user only when this
+// user made it at Medium or above. Made-up SIDs in the Microsoft Entra form, as above.
+TEST(NamedObjects, AnExistingInstanceMutexIsAWindowOnlyWhenThisUserMadeIt) {
+  using enum SingleInstance;
+  constexpr wchar_t kUser[] = L"S-1-12-1-1-2-3-4";
+  EXPECT_EQ(ClassifyExistingInstanceMutex(kUser, kUser, false), kOtherWindow);
+  EXPECT_EQ(ClassifyExistingInstanceMutex(L"S-1-5-32-544", kUser, false), kOtherWindow);
+  // Made by a process of this user below Medium (a sandboxed one): not a window of theirs.
+  EXPECT_EQ(ClassifyExistingInstanceMutex(kUser, kUser, true), kLowerIntegrity);
+  // Another account's, or one whose owner could not be read: not a window of this user's either,
+  // whatever its label says.
+  EXPECT_EQ(ClassifyExistingInstanceMutex(L"S-1-12-1-1-2-3-5", kUser, false), kAnotherAccount);
+  EXPECT_EQ(ClassifyExistingInstanceMutex(L"S-1-12-1-1-2-3-5", kUser, true), kAnotherAccount);
+  EXPECT_EQ(ClassifyExistingInstanceMutex(L"", kUser, false), kAnotherAccount);
+}
+
+TEST(NamedObjects, SingleInstanceTokens) {
+  EXPECT_STREQ(SingleInstanceToken(SingleInstance::kFirst), L"first");
+  EXPECT_STREQ(SingleInstanceToken(SingleInstance::kOtherWindow), L"other-window");
+  EXPECT_STREQ(SingleInstanceToken(SingleInstance::kAnotherAccount), L"another-account");
+  EXPECT_STREQ(SingleInstanceToken(SingleInstance::kLowerIntegrity), L"lower-integrity");
+}
+
+// A window of the settings window's class counts as this user's only when its process runs as
+// this user at this process's integrity level or above.
+TEST(WindowMessages, OnlyThisUsersWindowAtThisIntegrityOrAbove) {
+  EXPECT_TRUE(
+      IsOwnWindowProcess(true, SECURITY_MANDATORY_MEDIUM_RID, SECURITY_MANDATORY_MEDIUM_RID));
+  EXPECT_TRUE(IsOwnWindowProcess(true, SECURITY_MANDATORY_HIGH_RID, SECURITY_MANDATORY_MEDIUM_RID));
+  EXPECT_TRUE(
+      IsOwnWindowProcess(true, SECURITY_MANDATORY_MEDIUM_PLUS_RID, SECURITY_MANDATORY_MEDIUM_RID));
+  EXPECT_FALSE(IsOwnWindowProcess(true, SECURITY_MANDATORY_LOW_RID, SECURITY_MANDATORY_MEDIUM_RID));
+  EXPECT_FALSE(
+      IsOwnWindowProcess(true, SECURITY_MANDATORY_UNTRUSTED_RID, SECURITY_MANDATORY_MEDIUM_RID));
+  EXPECT_FALSE(
+      IsOwnWindowProcess(true, SECURITY_MANDATORY_MEDIUM_RID, SECURITY_MANDATORY_HIGH_RID));
+  EXPECT_FALSE(
+      IsOwnWindowProcess(false, SECURITY_MANDATORY_MEDIUM_RID, SECURITY_MANDATORY_MEDIUM_RID));
+  EXPECT_FALSE(
+      IsOwnWindowProcess(false, SECURITY_MANDATORY_HIGH_RID, SECURITY_MANDATORY_MEDIUM_RID));
 }
 
 // CreateMutexW refuses with ERROR_ACCESS_DENIED both a mutex that another instance made with a

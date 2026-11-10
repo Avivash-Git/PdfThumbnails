@@ -541,6 +541,18 @@ TEST(TokenFactsTest, ThisProcessAndAStandardUsersToken) {
   std::printf("standard user's entry check: refused, %ls\n", ElevatedRefusalText(refusal).data());
 }
 
+// ---- where this executable runs from ----
+
+// The test program is not the settings executable in the machine root, wherever the build is: the
+// settings window would not start again for another account from such a place.
+TEST(MachineRootCheckTest, TheTestProgramIsNotTheInstallForAllUsers) {
+  const MachineRootCheck check = CheckMachineRoot();
+  EXPECT_FALSE(check.runsFromMachineRoot);
+  EXPECT_FALSE(IsMachineInstall(check));
+  std::printf("machine root's reparse point check: 0x%08lX\n",
+              static_cast<unsigned long>(check.reparsePoints));
+}
+
 // ---- the installer's records, in private keys ----
 
 TEST(InnoRecords, MachineFirstThenUser) {

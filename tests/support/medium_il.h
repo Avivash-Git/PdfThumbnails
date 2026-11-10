@@ -61,6 +61,9 @@ enum class MediumToken {
 HRESULT CreateMediumToken(HANDLE source, MediumToken kind, HANDLE* token);
 // The same for this process's own token.
 HRESULT CreateMediumTokenForSelf(MediumToken kind, HANDLE* token);
+// A primary token like this process's (CreateMediumTokenForSelf with kLabelOnly) labelled Low
+// integrity: what a sandboxed process of the same user runs with.
+HRESULT CreateLowTokenForSelf(HANDLE* token);
 
 // Starts |commandLine| (program first, quoted as needed; |application| is the program's full
 // path, or empty to take it from the command line) with |token| on the caller's desktop, with

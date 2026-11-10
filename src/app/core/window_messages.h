@@ -3,7 +3,10 @@
 //
 // Only a window of this process's own user counts. Windows of one class name can belong to
 // several accounts on one desktop ("Run as different user"), and each account has its own settings
-// window (the single-instance mutex carries the user's SID).
+// window (the single-instance mutex carries the user's SID). Any process may register a window of
+// that class name, so a process of the same user below this one's integrity level (a sandboxed
+// part of a browser, say) does not count either: it would be handed the foreground and the
+// messages meant for the real window.
 
 #pragma once
 
@@ -13,6 +16,11 @@ namespace pdft {
 
 // Posted to the window by a second start: restore yourself and come to the front.
 inline constexpr UINT kActivateWindowMessage = WM_APP + 1;
+
+// Whether a window of the settings window's class may be taken for this user's settings window
+// (pure): its process runs as this process's user (|sameUser|) at this process's integrity level
+// (|ownIntegrityRid|, SECURITY_MANDATORY_*_RID) or above.
+bool IsOwnWindowProcess(bool sameUser, DWORD theirIntegrityRid, DWORD ownIntegrityRid) noexcept;
 
 // The registered message that says the state changed (StateChangedMessageName, instance.h); 0
 // when Windows cannot register it.

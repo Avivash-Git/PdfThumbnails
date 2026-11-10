@@ -521,4 +521,13 @@ HRESULT GetProcessContext(ContextProbe probe, ProcessContext* context) noexcept 
 }
 CATCH_RETURN();
 
+bool ShellRunsAsAnotherUser() noexcept {
+  wil::unique_handle token;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, token.put())) return true;
+  alignas(TOKEN_USER) BYTE storage[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+  PSID userSid = nullptr;
+  if (FAILED(TokenUserSid(token.get(), storage, &userSid))) return true;
+  return DifferentFromShellUser(userSid);
+}
+
 }  // namespace pdft

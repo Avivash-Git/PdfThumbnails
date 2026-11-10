@@ -42,8 +42,21 @@ struct WindowState {
   WindowContext context = WindowContext::kStarting;
   WindowActivity activity = WindowActivity::kIdle;
   bool otherUser = false;  // this process's user is not the desktop's
-  bool dirty = false;      // the fields differ from what is saved
+  // With otherUser: the window may start again as the desktop's user (MayRelaunchThroughShell).
+  bool mayReopen = false;
+  // With kExternalBusy: a process below Medium integrity holds the operation lock's name
+  // (OperationLock::kTakenByLowerIntegrity), which no wait ends.
+  bool lockBlocked = false;
+  bool dirty = false;  // the fields differ from what is saved
 };
+
+// What OperationLock::Acquire's answer says about another process's hold on the lock (pure).
+enum class LockHold {
+  kNone,     // it was free (or failed otherwise): nobody keeps the window out
+  kBusy,     // OperationLock::kBusy: another check or change runs
+  kBlocked,  // OperationLock::kTakenByLowerIntegrity: until that process ends
+};
+LockHold ClassifyLockAnswer(HRESULT acquired) noexcept;
 
 struct ControlStates {
   bool zoomAndChecks = false;
@@ -70,9 +83,17 @@ enum class CloseAction {
 // (pure) A child goes on by itself, so it never holds the window open.
 CloseAction DecideClose(const WindowState& state) noexcept;
 
-enum class WindowBanner { kNone, kSandboxed, kOtherUser, kExternalBusy };
+enum class WindowBanner {
+  kNone,
+  kSandboxed,
+  kOtherUser,        // with the link that starts the window again as the desktop's user
+  kOtherUserNoLink,  // ... without it (not mayReopen): it says how to open the window instead
+  kExternalBusy,     // another check or change runs
+  kExternalBlocked,  // ... lockBlocked: it says what ends it
+};
 
-// The banner, the first that applies in the order of WindowBanner (pure).
+// The banner, the first that applies in the order of WindowBanner (pure); of a pair, the one the
+// state's flag picks.
 WindowBanner DecideBanner(const WindowState& state) noexcept;
 
 // The fields the Save button writes.

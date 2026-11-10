@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "cli_args.h"
+#include "instance.h"
 #include "zoom.h"
 
 namespace pdft {
@@ -52,9 +53,19 @@ CloseAction DecideClose(const WindowState& state) noexcept {
 
 WindowBanner DecideBanner(const WindowState& state) noexcept {
   if (state.context == WindowContext::kSandboxed) return WindowBanner::kSandboxed;
-  if (state.otherUser) return WindowBanner::kOtherUser;
-  if (state.activity == WindowActivity::kExternalBusy) return WindowBanner::kExternalBusy;
+  if (state.otherUser) {
+    return state.mayReopen ? WindowBanner::kOtherUser : WindowBanner::kOtherUserNoLink;
+  }
+  if (state.activity == WindowActivity::kExternalBusy) {
+    return state.lockBlocked ? WindowBanner::kExternalBlocked : WindowBanner::kExternalBusy;
+  }
   return WindowBanner::kNone;
+}
+
+LockHold ClassifyLockAnswer(HRESULT acquired) noexcept {
+  if (acquired == OperationLock::kBusy) return LockHold::kBusy;
+  if (acquired == OperationLock::kTakenByLowerIntegrity) return LockHold::kBlocked;
+  return LockHold::kNone;
 }
 
 int ZoomFromBox(std::wstring_view text, int current) noexcept {

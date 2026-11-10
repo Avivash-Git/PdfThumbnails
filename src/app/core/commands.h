@@ -21,12 +21,22 @@
 namespace pdft {
 
 // What the settings window starts from: this process (never elevated: an administrator process
-// is refused before the window is asked for; no registry check has run), and whether this start
-// already went through File Explorer (--relaunched).
+// is refused before the window is asked for; no registry check has run), whether this start
+// already went through File Explorer (--relaunched), and whether the window may offer to start
+// again as the signed-in user when it runs as another account (MayRelaunchThroughShell).
 struct WindowStart {
   ProcessContext context;
   bool relaunched = false;
+  bool mayReopenAsShellUser = false;
 };
+
+// Whether the settings window may start again through File Explorer (pure), which starts it with
+// File Explorer's token. For this process's own user (leaving an app package) any copy may. For
+// another account (|shellIsAnotherUser|), only the install for all users' own executable
+// (|machineInstall|, IsMachineInstall): any other copy may lie in a folder that this process's
+// account can change, such as its install for one user, and would then run whatever that
+// account put there as the signed-in user.
+bool MayRelaunchThroughShell(bool shellIsAnotherUser, bool machineInstall) noexcept;
 
 // How the settings window ended: the exit code, or that it must start again through File Explorer
 // (it left the app package above it, or handed over to the signed-in user). The caller starts it
