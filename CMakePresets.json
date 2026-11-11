@@ -164,6 +164,13 @@
         { "type": "build", "name": "ci-arm64" },
         { "type": "test", "name": "ci-arm64" }
       ]
+    },
+    {
+      "name": "ci-x64-build",
+      "steps": [
+        { "type": "configure", "name": "ci-x64" },
+        { "type": "build", "name": "ci-x64" }
+      ]
     }
   ]
 }

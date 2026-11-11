@@ -128,6 +128,7 @@ outside a terminal whose registry is virtualized.
 | `x64-asan` | x64 Debug with AddressSanitizer (`/fsanitize=address`) in every target, for local test runs; not built by CI | like `x64-debug`, without the import, hardening and planting gates (see below) |
 | `ci-x64` | x64 Release as CI builds it: Spectre mitigations required, deterministic output (`/Brepro`) | the same as `x64-release` |
 | `ci-arm64` | ARM64 Release as CI builds it | `gate` only |
+| `ci-x64-build` | `ci-x64`, configured and built in its folder | none (CodeQL's build) |
 
 All presets use Ninja, `cl.exe` and the static C runtime, and treat compiler and linker warnings
 as errors in the project's own code. Each preset has its own folder, `out\build\<preset>`. Don't
@@ -617,7 +618,7 @@ Use `-i` instead of `--dry-run --Werror` to reformat. CI pins clang-format 23.1.
 
 ## Continuous integration
 
-GitHub Actions runs three workflows. Every action is pinned to a full commit SHA, every
+GitHub Actions runs four workflows. Every action is pinned to a full commit SHA, every
 workflow starts with no token permissions and grants each job only what it needs, and checkouts
 don't keep the token.
 
@@ -722,6 +723,14 @@ On every push to `main` and every pull request, on `ubuntu-24.04`:
   `pip install --require-hashes --only-binary=:all:`, and runs the formatting check above;
 - fails if a tracked file contains a personal Windows or Linux profile path, a user SID, a
   default PC name or a personal mail address. Placeholders such as `%USERPROFILE%` are fine.
+
+### `codeql.yml`
+
+CodeQL's C and C++ analysis (code scanning), on pushes to `main` and pull requests (with the
+same path filter as `build.yml`), every Monday, and by hand. It builds `ci-x64` on the x64 runner
+through `scripts\build.cmd ci-x64-build`, so CodeQL sees every compiler call, and uploads the
+results to the repository's Security tab. Only its analysis job may write security events.
+Code scanning's "default setup" must stay off, since it cannot run next to this workflow.
 
 ### `pdfium-watch.yml`
 
