@@ -67,7 +67,7 @@ std::wstring TestFileProblemText(TestFileProblem problem);
 std::wstring RepairOutcomeText(const RepairOutcome& outcome);
 
 // The two checkboxes as the Checks line and --checks show them (pure): "after PdfCraft updates:
-// on · at sign-in: off". May throw std::bad_alloc.
+// on, at sign-in: off". May throw std::bad_alloc.
 std::wstring ChecksStateText(bool afterPdfCraft, bool atSignIn);
 
 // The --checks value that asks for these checkboxes (pure): "default" (both), "pdfcraft",

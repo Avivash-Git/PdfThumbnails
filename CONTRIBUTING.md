@@ -66,7 +66,12 @@ compares them with the exact text.
 
 - The texts the reports show (`--status`, the JSON `text` fields, `--check`/`--fix` output) are
   built in `src/app/core/status_format.cpp`, so they can move into the string table with the
-  settings window. Write a non-ASCII character in C++ source as a `\u` escape (`L" \u00B7 "`).
+  settings window.
+- What the command line prints in its own words is ASCII only. A pipe or file gets UTF-8, and
+  Windows PowerShell 5.1 decodes a program's piped output in the console's code page, so any
+  other character comes out garbled there (`status_format_test.cpp` checks every report). Only
+  data such as paths may be non-ASCII. The settings window may use any character; write a
+  non-ASCII character in C++ source as a `\u` escape (`L" \u00B7 "`).
 - Everything `--diagnostics` shows goes through `BuildDiagnostics`
   (`src/app/core/diagnostics.cpp`), which masks the whole report at the end: the profile folder,
   the user, computer and domain names and every SID. Add new details there, never next to it.

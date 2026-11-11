@@ -24,8 +24,18 @@ namespace {
 using namespace test;  // NOLINT(build/namespaces): the fixtures
 
 const std::wstring kProduct = kProductName;
-// The separator between the parts of one line: a middle dot between spaces.
-const std::wstring kDotText = std::wstring(L" ") + wchar_t{0xB7} + L" ";
+// The separator between the parts of one line.
+const std::wstring kPartsText = L", ";
+
+// True when |text| is ASCII only. Everything the command line prints in its own words is, so
+// that piped output reads the same in any code page (Windows PowerShell 5.1 decodes a pipe in
+// the console's, not as UTF-8); the made-up snapshots carry ASCII data only.
+bool IsAscii(const std::wstring& text) {
+  for (wchar_t c : text) {
+    if (c > 0x7F) return false;
+  }
+  return true;
+}
 
 std::vector<std::wstring> SplitLines(const std::wstring& text) {
   std::vector<std::wstring> lines;
@@ -41,7 +51,9 @@ std::vector<std::wstring> SplitLines(const std::wstring& text) {
 
 std::vector<std::wstring> Report(const Snapshot& s) {
   const std::vector<Finding> findings = Evaluate(s);
-  return SplitLines(RenderStatus(FormatStatus(s, findings)));
+  const std::wstring text = RenderStatus(FormatStatus(s, findings));
+  EXPECT_TRUE(IsAscii(text)) << ::testing::PrintToString(text);
+  return SplitLines(text);
 }
 
 std::wstring Header(const std::wstring& build = L"26300.9818") {
@@ -59,7 +71,22 @@ std::optional<StatusLine> FindLine(const std::vector<StatusLine>& lines, const s
   return std::nullopt;
 }
 
-std::vector<StatusLine> Lines(const Snapshot& s) { return FormatStatus(s, Evaluate(s)); }
+// |report|, after checking that it is ASCII (see IsAscii).
+ScheduleReport AsciiReport(ScheduleReport report) {
+  for (const std::wstring& line : report.out) {
+    EXPECT_TRUE(IsAscii(line)) << ::testing::PrintToString(line);
+  }
+  EXPECT_TRUE(IsAscii(report.error)) << ::testing::PrintToString(report.error);
+  return report;
+}
+
+std::vector<StatusLine> Lines(const Snapshot& s) {
+  std::vector<StatusLine> lines = FormatStatus(s, Evaluate(s));
+  for (const StatusLine& line : lines) {
+    EXPECT_TRUE(IsAscii(line.label + line.text + line.hint)) << ::testing::PrintToString(line.text);
+  }
+  return lines;
+}
 
 // Every problem line says what fixes it.
 void ExpectHintsOnProblems(const Snapshot& s) {
@@ -85,8 +112,8 @@ TEST(StatusFormat, ThisPcsShape) {
       L"  OK .pdf slot      .pdf -> " + kProduct,
       L"  OK .pdf slot      SystemFileAssociations\\.pdf -> " + kProduct,
       L"  OK Effective      Windows resolves .pdf thumbnails to " + kProduct,
-      L"     Default app    PdfCraft.Document (no icon overlay)" + kDotText + kPdfCraftProductName +
-          L" 0.14.0",
+      L"     Default app    PdfCraft.Document (no icon overlay)" + kPartsText +
+          kPdfCraftProductName + L" 0.14.0",
       L"  OK Explorer test  thumbnail extracted in a fresh thumbnail process (212 ms)",
       L"     Zoom           130 % (1.x settings.ini)",
       L"     Checks         off (the 1.x task " + std::wstring(kLegacyTask) + L" is still there)",
@@ -121,11 +148,12 @@ TEST(StatusFormat, PerUserInstallWithARecordedCheck) {
       L"  OK .pdf slot      .pdf -> " + kProduct,
       L"  OK .pdf slot      SystemFileAssociations\\.pdf -> " + kProduct,
       L"  OK Effective      Windows resolves .pdf thumbnails to " + kProduct,
-      L"     Default app    none" + kDotText + kPdfCraftProductName + L" 0.14.0",
+      L"     Default app    none" + kPartsText + kPdfCraftProductName + L" 0.14.0",
       L"  OK Explorer test  thumbnail extracted in a fresh thumbnail process (200 ms)",
       L"     Zoom           120 % (registry)",
       L"  OK Checks         after " + std::wstring(kPdfCraftProductName) + L" updates: on" +
-          kDotText + L"at sign-in: on" + kDotText + L"last check " + when + L" (nothing to fix)",
+          kPartsText + L"at sign-in: on" + kPartsText + L"last check " + when +
+          L" (nothing to fix)",
       L"Result: healthy",
   };
   EXPECT_EQ(ToText(Report(s)), ToText(expected));
@@ -147,7 +175,7 @@ TEST(StatusFormat, NothingInstalled) {
   EXPECT_EQ(lines[5], L"     .pdf slot      SystemFileAssociations\\.pdf -> empty");
   EXPECT_EQ(lines[6], L"     Effective      Windows resolves .pdf thumbnails to nothing");
   EXPECT_EQ(lines[7],
-            L"     Default app    none" + kDotText + kPdfCraftProductName + L" not found");
+            L"     Default app    none" + kPartsText + kPdfCraftProductName + L" not found");
   EXPECT_EQ(lines[8], L"     Explorer test  skipped: no class is registered");
   EXPECT_EQ(lines[9], L"     Zoom           100 % (default)");
   EXPECT_EQ(lines[10], L"     Checks         off");
@@ -236,7 +264,7 @@ TEST(StatusFormat, DefaultAppBringsItsOwnHandler) {
   EXPECT_NE(effective->hint.find(L"choose another default app"), std::wstring::npos);
   std::optional<StatusLine> app = FindLine(lines, L"Default app", '!');
   ASSERT_TRUE(app);
-  EXPECT_EQ(app->text.rfind(L"Acme.Pdf (its icon is drawn on thumbnails)" + kDotText, 0), 0u)
+  EXPECT_EQ(app->text.rfind(L"Acme.Pdf (its icon is drawn on thumbnails)" + kPartsText, 0), 0u)
       << app->text;
   EXPECT_NE(app->text.find(L"brings its own thumbnail handler " + kOther + L" (Acme thumbnails)"),
             std::wstring::npos)
@@ -510,7 +538,7 @@ TEST(StatusFormat, TaskAndZoomProblems) {
   std::optional<StatusLine> checks = FindLine(Lines(s), L"Checks", '!');
   ASSERT_TRUE(checks);
   EXPECT_EQ(checks->text.rfind(L"after " + std::wstring(kPdfCraftProductName) + L" updates: on" +
-                                   kDotText +
+                                   kPartsText +
                                    L"at sign-in: off; the check task is disabled; "
                                    L"the check task runs C:\\old\\settings.exe " +
                                    kCheckTaskArguments + L" instead of ",
@@ -695,7 +723,7 @@ TEST(StatusFormat, TaskDisabledAndStaleWithoutTheProgram) {
 
 TEST(StatusFormat, ChecksTexts) {
   EXPECT_EQ(ChecksStateText(true, false), L"after " + std::wstring(kPdfCraftProductName) +
-                                              L" updates: on" + kDotText + L"at sign-in: off");
+                                              L" updates: on" + kPartsText + L"at sign-in: off");
   EXPECT_EQ(std::wstring(ChecksValue(true, true)), L"default");
   EXPECT_EQ(std::wstring(ChecksValue(true, false)), L"pdfcraft");
   EXPECT_EQ(std::wstring(ChecksValue(false, true)), L"signin");
@@ -717,7 +745,7 @@ TEST(StatusFormat, ChecksReports) {
   result.after.path = L"\\" + kProduct + L" check S-1-12-1-1-2-3-4";
   result.after.actionPath = result.program.native();
   result.after.actionArgs = kCheckTaskArguments;
-  ScheduleReport report = ScheduleResultReport(result);
+  ScheduleReport report = AsciiReport(ScheduleResultReport(result));
   EXPECT_EQ(report.error, L"");
   ASSERT_EQ(report.out.size(), 2u);
   EXPECT_EQ(report.out[0], L"Checks: " + ChecksStateText(true, false));
@@ -727,7 +755,7 @@ TEST(StatusFormat, ChecksReports) {
   // Read back failed: what was asked for, and why the task is not shown.
   result.readError = E_ACCESSDENIED;
   result.after = {};
-  report = ScheduleResultReport(result);
+  report = AsciiReport(ScheduleResultReport(result));
   ASSERT_EQ(report.out.size(), 2u);
   EXPECT_EQ(report.out[0], L"Checks: " + ChecksStateText(true, false));
   EXPECT_EQ(report.out[1], L"The check task was changed but could not be read back: 0x80070005");
@@ -737,13 +765,13 @@ TEST(StatusFormat, ChecksReports) {
   result.before = ThisPcSnapshot();
   result.code = ExitCode::kOk;
   result.remove = true;
-  report = ScheduleResultReport(result);
+  report = AsciiReport(ScheduleResultReport(result));
   ASSERT_EQ(report.out.size(), 2u);
   EXPECT_EQ(report.out[0], L"Checks: off (there was no check task)");
   EXPECT_EQ(report.out[1], L"The 1.x task " + std::wstring(kLegacyTask) +
                                L" is still there; it was left as it is.");
   result.before = UserInstallSnapshot();
-  report = ScheduleResultReport(result);
+  report = AsciiReport(ScheduleResultReport(result));
   EXPECT_EQ(report.out, (std::vector<std::wstring>{L"Checks: off (the check task was removed)"}));
 
   // Off where another account's tasks hold both names: nothing of this user's was changed or
@@ -753,7 +781,7 @@ TEST(StatusFormat, ChecksReports) {
   ASSERT_HRESULT_SUCCEEDED(
       DefaultTaskLocation(result.before.context.userSid, &result.before.taskLocation));
   result.readError = kTaskTakenHr;
-  report = ScheduleResultReport(result);
+  report = AsciiReport(ScheduleResultReport(result));
   ASSERT_EQ(report.out.size(), 2u);
   EXPECT_EQ(report.out[0], L"Checks: off (there was no check task)");
   EXPECT_EQ(report.out[1],
@@ -770,25 +798,25 @@ TEST(StatusFormat, ChecksReports) {
   result = {};
   result.refusal = ScheduleRefusal::kNotInstalled;
   result.code = ExitCode::kNotInstalled;
-  report = ScheduleResultReport(result);
+  report = AsciiReport(ScheduleResultReport(result));
   EXPECT_TRUE(report.out.empty());
   EXPECT_EQ(report.error.rfind(kProduct + L" is not installed", 0), 0u) << report.error;
   result.refusal = ScheduleRefusal::kNoSettingsExe;
   result.before = ThisPcSnapshot();
-  report = ScheduleResultReport(result);
+  report = AsciiReport(ScheduleResultReport(result));
   EXPECT_TRUE(report.out.empty());
   EXPECT_EQ(report.error, L"The installed " + kProduct + L" is a 1.x build, which has no " +
                               (kMachineRoot / kSettingsExe).native() +
                               L" for the scheduled checks to run. Install this version first.");
   result.before = MachineInstallSnapshot();
   result.before.settingsExeFound = false;
-  report = ScheduleResultReport(result);
+  report = AsciiReport(ScheduleResultReport(result));
   EXPECT_EQ(report.error, (kMachineRoot / kSettingsExe).native() +
                               L" is not there, so a scheduled check would have nothing to run. "
                               L"Reinstall " +
                               kProduct + L".");
   result.before = EmptySnapshot();
-  report = ScheduleResultReport(result);
+  report = AsciiReport(ScheduleResultReport(result));
   EXPECT_NE(report.error.find(L"Run --check first"), std::wstring::npos) << report.error;
 
   // The change failed.
@@ -796,11 +824,11 @@ TEST(StatusFormat, ChecksReports) {
   result.before = UserInstallSnapshot();
   result.code = ExitCode::kFailed;
   result.error = E_ACCESSDENIED;
-  report = ScheduleResultReport(result);
+  report = AsciiReport(ScheduleResultReport(result));
   EXPECT_TRUE(report.out.empty());
   EXPECT_EQ(report.error, L"Could not change the check task: 0x80070005");
   result.error = kSomeTriggersFailed;
-  report = ScheduleResultReport(result);
+  report = AsciiReport(ScheduleResultReport(result));
   EXPECT_EQ(report.error.rfind(L"Task Scheduler registered the check task but could not set up "
                                L"all of its triggers (0x8004131B)",
                                0),
@@ -812,7 +840,7 @@ TEST(StatusFormat, ChecksReports) {
   ASSERT_HRESULT_SUCCEEDED(
       DefaultTaskLocation(result.before.context.userSid, &result.before.taskLocation));
   result.error = kTaskTakenHr;
-  report = ScheduleResultReport(result);
+  report = AsciiReport(ScheduleResultReport(result));
   EXPECT_TRUE(report.out.empty());
   EXPECT_EQ(report.error,
             L"Could not register the check task: another account's scheduled tasks hold the names "
@@ -838,7 +866,7 @@ TEST(StatusFormat, WhereTheWindowsChecksCannotRun) {
   EXPECT_EQ(effective->hint,
             L"Run it from File Explorer or from a terminal that is not part of an app package");
   EXPECT_TRUE(FindLine(lines, L"Default app", ' ',
-                       L"not checked" + kDotText + kPdfCraftProductName + L" not found"));
+                       L"not checked" + kPartsText + kPdfCraftProductName + L" not found"));
   EXPECT_TRUE(FindLine(lines, L"Explorer test", ' ',
                        L"skipped: this process may not see the registry File Explorer sees"));
   EXPECT_EQ(lines.back().text, L"Result: healthy");
@@ -920,6 +948,25 @@ TEST(StatusFormat, EveryFindingHasAText) {
     EXPECT_FALSE(text.empty()) << FindingName(finding.id);
     EXPECT_EQ(text.find(L'\n'), std::wstring::npos) << FindingName(finding.id);
     EXPECT_NE(text, FindingName(finding.id)) << "no text of its own";
+  }
+}
+
+// The command line's own words are ASCII (see IsAscii), on every made-up snapshot and for
+// every finding.
+TEST(StatusFormat, OwnTextIsAscii) {
+  for (const Snapshot& s :
+       {EmptySnapshot(), UserInstallSnapshot(), MachineInstallSnapshot(), ThisPcSnapshot()}) {
+    Report(s);
+    for (int id = 0; id <= static_cast<int>(FindingId::kVirtualized); ++id) {
+      Finding finding;
+      finding.id = static_cast<FindingId>(id);
+      EXPECT_TRUE(IsAscii(FindingText(s, finding))) << FindingName(finding.id);
+    }
+  }
+  for (bool afterPdfCraft : {false, true}) {
+    for (bool atSignIn : {false, true}) {
+      EXPECT_TRUE(IsAscii(ChecksStateText(afterPdfCraft, atSignIn)));
+    }
   }
 }
 

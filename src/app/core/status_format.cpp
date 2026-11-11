@@ -16,8 +16,11 @@
 namespace pdft {
 namespace {
 
-// Separates the parts of one line: a middle dot between spaces.
-constexpr wchar_t kDot[] = L" \u00B7 ";
+// Separates the parts of one line. ASCII, like every word the command line prints itself: a
+// pipe carries UTF-8, and Windows PowerShell 5.1 reads a program's piped output in the console's
+// code page, where any other character comes out garbled (a middle dot as two box-drawing
+// characters). The settings window has a separator of its own (status_panel.cpp).
+constexpr wchar_t kParts[] = L", ";
 
 // The width of the label column; longer labels get two spaces after them.
 constexpr size_t kLabelWidth = 15;
@@ -711,7 +714,7 @@ std::wstring RepairOutcomeText(const RepairOutcome& outcome) {
 std::wstring ChecksStateText(bool afterPdfCraft, bool atSignIn) {
   const auto onOff = [](bool on) { return on ? L"on" : L"off"; };
   return L"after " + std::wstring(kPdfCraftProductName) + L" updates: " + onOff(afterPdfCraft) +
-         kDot + L"at sign-in: " + onOff(atSignIn);
+         kParts + L"at sign-in: " + onOff(atSignIn);
 }
 
 const wchar_t* ChecksValue(bool afterPdfCraft, bool atSignIn) noexcept {
@@ -984,9 +987,9 @@ std::vector<StatusLine> FormatStatus(const Snapshot& s, std::span<const Finding>
       craft += L" (" + VersionOrNone(changed->from) + L" at the last check)";
     }
     if (const Finding* f = has(FindingId::kDefaultAppHandler)) {
-      line('!', kLabelDefaultApp, app + kDot + craft + L"; " + FindingText(s, *f), hint(*f));
+      line('!', kLabelDefaultApp, app + kParts + craft + L"; " + FindingText(s, *f), hint(*f));
     } else {
-      line(' ', kLabelDefaultApp, app + kDot + craft);
+      line(' ', kLabelDefaultApp, app + kParts + craft);
     }
   }
 
@@ -1061,7 +1064,7 @@ std::vector<StatusLine> FormatStatus(const Snapshot& s, std::span<const Finding>
     }
     if (s.task.exists) {
       std::wstring text = ChecksStateText(s.task.afterPdfCraft, s.task.atSignIn);
-      if (!last.empty()) text += kDot + last;
+      if (!last.empty()) text += kParts + last;
       std::vector<std::wstring> problems;
       std::vector<std::wstring> hints;
       for (FindingId id : {FindingId::kTaskDisabled, FindingId::kTaskStaleAction}) {
@@ -1084,7 +1087,7 @@ std::vector<StatusLine> FormatStatus(const Snapshot& s, std::span<const Finding>
       // Not the user's choice: another account's tasks keep theirs from being registered.
       const bool taken = off != nullptr && TaskNamesTaken(s);
       if (taken) text += L"; " + TaskTakenText();
-      if (!last.empty()) text += kDot + last;
+      if (!last.empty()) text += kParts + last;
       line(taken ? '!' : ' ', kLabelChecks, std::move(text), off ? hint(*off) : std::wstring());
     }
   }

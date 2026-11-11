@@ -108,6 +108,20 @@ message says which, and nothing has been changed.
 A scheduled check is `PdfThumbnailsSettings.exe --check --quiet`, so its exit code is the task's
 "Last Run Result" in Task Scheduler.
 
+## Output in scripts
+
+On a console the commands print through the console itself, so every character shows. Piped or
+redirected, the output is UTF-8 without a byte order mark, with CR LF line ends. The program's
+own words are plain ASCII; only paths and names that came from your PC can contain other
+characters. Windows PowerShell 5.1 decodes a program's output in the console's code page, so to
+read such a path right, set this first:
+
+```powershell
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+```
+
+`--status --json` follows the same rules.
+
 ## Where things are
 
 - The zoom: `HKEY_CURRENT_USER\Software\PdfThumbnails`, value `Zoom`.
