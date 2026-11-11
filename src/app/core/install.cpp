@@ -808,6 +808,22 @@ HRESULT InstallFromOwnFolder(const InstallOptions& options, const RegistryRoots&
   } else {
     result->code = status;
   }
+  // A healthy install has just checked everything a check does, the Explorer test included: it
+  // is recorded as one, so an earlier check's problems are not shown beside it.
+  if (result->code == ExitCode::kOk) {
+    CheckRecord record;
+    GetSystemTimeAsFileTime(&record.time);
+    record.result = ExitCode::kOk;
+    record.summary = CheckSummary(ExitCode::kOk, 0, 0);
+    const Snapshot& after = result->after;
+    record.pdfcraftVersion = after.pdfcraft.installed ? after.pdfcraft.version : std::wstring();
+    if (after.live) record.liveTest = after.live->hr;
+    if (const HRESULT hr = RecordCheck(roots, record); SUCCEEDED(hr)) {
+      result->after.last = std::move(record);
+    } else {
+      Log(LogLevel::kWarning, kLogComponent, L"install record failed hr=" + HResultText(hr));
+    }
+  }
   // A warning when a step of this program failed; an Explorer test that could not start is one.
   Log((!failures.empty() || FAILED(result->after.liveError)) ? LogLevel::kWarning : LogLevel::kInfo,
       kLogComponent,

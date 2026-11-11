@@ -174,10 +174,13 @@ class InstalledWindow : public SettingsWindow {
   LRESULT SliderPosition() const { return SendMessageW(Slider(), TBM_GETPOS, 0, 0); }
 };
 
-// Before the test below, which leaves a record of a check behind.
-TEST_F(InstalledWindow, SaysNotTestedUntilACheckHasRun) {
-  EXPECT_EQ(ControlText(dialog_, IDC_STATUS_LINE1).rfind(L"Not tested yet", 0), 0u)
-      << "line 1 does not say so";
+// A healthy install records its own Explorer test, so line 1 says that thumbnails work; an
+// install whose test did not pass leaves no record, and line 1 says that nothing was tested.
+TEST_F(InstalledWindow, LineOneSaysWhetherThumbnailsWereSeenToWork) {
+  const std::wstring line = ControlText(dialog_, IDC_STATUS_LINE1);
+  EXPECT_TRUE(line.rfind(L"PDF thumbnails are working", 0) == 0 ||
+              line.rfind(L"Not tested yet", 0) == 0)
+      << "line 1 says neither";
 }
 
 TEST_F(InstalledWindow, CheckNowRunsAndLeavesARecord) {

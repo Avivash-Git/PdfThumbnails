@@ -947,6 +947,44 @@ TEST_F(Install, InstallForThisUser) {
   EXPECT_EQ(result.after.scope, Scope::kUser);
 }
 
+// A healthy install counts as a check: what an earlier check found wrong is not shown beside it.
+// An install that is not confirmed leaves the earlier record alone.
+TEST_F(Install, AHealthyInstallReplacesAnEarlierChecksRecord) {
+  if (const auto why = StageUnsafe()) GTEST_SKIP() << *why;
+  CheckRecord earlier;
+  earlier.time.dwLowDateTime = 1;
+  earlier.result = ExitCode::kProblems;
+  earlier.summary = L"2 problems remain";
+  ASSERT_HRESULT_SUCCEEDED(RecordCheck(roots_, earlier));
+
+  probes_.liveError = E_ACCESSDENIED;
+  InstallResult unconfirmed;
+  const HRESULT first =
+      InstallFromOwnFolder(MakeInstallOptions(Scope::kUser), roots_, probes_, &unconfirmed);
+  probes_.liveError = S_OK;
+  ASSERT_HRESULT_SUCCEEDED(first);
+  EXPECT_EQ(unconfirmed.code, ExitCode::kProblems);
+  std::optional<CheckRecord> record;
+  ASSERT_HRESULT_SUCCEEDED(ReadCheck(roots_, &record));
+  ASSERT_TRUE(record.has_value());
+  EXPECT_EQ(record->summary, L"2 problems remain");
+
+  InstallResult result;
+  ASSERT_HRESULT_SUCCEEDED(
+      InstallFromOwnFolder(MakeInstallOptions(Scope::kUser), roots_, probes_, &result));
+  EXPECT_EQ(result.code, ExitCode::kOk);
+  ASSERT_HRESULT_SUCCEEDED(ReadCheck(roots_, &record));
+  ASSERT_TRUE(record.has_value());
+  EXPECT_EQ(record->result, ExitCode::kOk);
+  EXPECT_EQ(record->summary, L"nothing to fix");
+  ASSERT_TRUE(record->liveTest.has_value());
+  EXPECT_EQ(*record->liveTest, S_OK);
+  EXPECT_GT(record->time.dwHighDateTime, 0u);
+  // The status the install prints shows its own record.
+  ASSERT_TRUE(result.after.last.has_value());
+  EXPECT_EQ(result.after.last->summary, L"nothing to fix");
+}
+
 // The install's result rests on its own Explorer test: one that cannot start leaves the install
 // unconfirmed (exit 1), though no step failed and nothing is known to keep thumbnails from
 // working. The log line says so; installing again with a test that runs confirms it.
