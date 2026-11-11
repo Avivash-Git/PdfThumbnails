@@ -4,8 +4,8 @@
 // Explorer creates this COM object in its isolated thumbnail process, hands it
 // the file as an IStream (IInitializeWithStream) and asks for a bitmap
 // (IThumbnailProvider). PDFium is loaded from this DLL's own folder under a
-// private file name. The settings app registers the class (until it ships, the
-// 1.x PowerShell manager, PdfThumbnails.ps1, does), so there is no
+// private file name. The settings app registers the class (1.x's PowerShell
+// manager did before it), so there is no
 // DllRegisterServer here. The zoom comes from HKCU\Software\PdfThumbnails, with
 // the 1.x settings.ini as fallback (see ReadZoomPercent); a preview can set its
 // own through a private interface (preview_override.h).

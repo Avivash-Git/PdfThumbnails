@@ -392,8 +392,8 @@ ctest --test-dir <folder> -L "unit|handler|integration" --output-on-failure
 
 It also holds `pdft_system_tests` and, in `system-fixture\`, the three 1.x files its migration
 tests plant (`PdfThumbnails.ps1`, `PdfThumbnails.cmd`, `LICENSE`). The repository keeps 1.x's
-manager and its launcher only as test data, under other names in `tests\system\fixture`; the
-build gives them their 1.x names there. The system tests install and
+manager, its launcher and its `LICENSE` only as test data, under other names in
+`tests\system\fixture`; the build gives them their 1.x names there. The system tests install and
 uninstall for real, and they make two local accounts for the run, an administrator and a standard
 user (deleted again at the end, with their profiles); the standard account runs
 `pdft_integration_tests` from the bundle. So run them only on CI or on a throw-away virtual

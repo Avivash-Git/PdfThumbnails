@@ -7,8 +7,8 @@
 // read or touched.
 //
 // Files with 1.x's contents come from the source tree (1.x's LICENSE, launcher and manager are
-// still there unchanged), found next to the build-id script the build tree names; the test bundle
-// has no source tree and leaves those parts out.
+// kept unchanged in tests\system\fixture), found next to the build-id script the build tree
+// names; the test bundle has no source tree and leaves those parts out.
 
 #include <windows.h>
 
@@ -87,13 +87,14 @@ path SourceTree() {
 // "<name>.txt".
 std::optional<path> V1FileFromSource(const std::wstring& relative) {
   if (SourceTree().empty()) return std::nullopt;
-  path file = SourceTree() / relative;
-  if (!Exists(file)) file = SourceTree() / L"tests" / L"system" / L"fixture" / (relative + L".txt");
-  if (!Exists(file)) return std::nullopt;
-  Sha256Digest digest = {};
-  if (FAILED(Sha256File(file, &digest))) return std::nullopt;
-  for (const Sha256Digest& known : V1ShippedDigests(relative)) {
-    if (known == digest) return file;
+  // The fixture copy first: a file of the same name in the root may have changed since 1.x.
+  for (const path& file : {SourceTree() / L"tests" / L"system" / L"fixture" / (relative + L".txt"),
+                           SourceTree() / relative}) {
+    Sha256Digest digest = {};
+    if (!Exists(file) || FAILED(Sha256File(file, &digest))) continue;
+    for (const Sha256Digest& known : V1ShippedDigests(relative)) {
+      if (known == digest) return file;
+    }
   }
   return std::nullopt;
 }

@@ -400,8 +400,9 @@ if(TARGET pdft_appcore)
   if(TARGET thumbtest)
     add_dependencies(pdft_system_tests thumbtest)
   endif()
-  # 1.x's manager and its launcher are kept as test data under other names (nothing in the
-  # repository runs them) and get their 1.x names in the fixture folder.
+  # 1.x's manager, its launcher and its LICENSE are kept as test data under other names
+  # (nothing in the repository runs them, and the project's own LICENSE has changed since) and
+  # get their 1.x names in the fixture folder.
   set(_pdft_v1_dir "$<TARGET_FILE_DIR:pdft_system_tests>/system-fixture")
   set(_pdft_v1_data "${CMAKE_CURRENT_SOURCE_DIR}/system/fixture")
   add_custom_command(TARGET pdft_system_tests POST_BUILD
@@ -410,14 +411,15 @@ if(TARGET pdft_appcore)
             "${_pdft_v1_dir}/PdfThumbnails.ps1"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_pdft_v1_data}/PdfThumbnails.cmd.txt"
             "${_pdft_v1_dir}/PdfThumbnails.cmd"
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${PROJECT_SOURCE_DIR}/LICENSE"
-            "${_pdft_v1_dir}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_pdft_v1_data}/LICENSE.txt"
+            "${_pdft_v1_dir}/LICENSE"
     VERBATIM)
   install(FILES "${_pdft_v1_data}/PdfThumbnails.ps1.txt"
           DESTINATION system-fixture RENAME PdfThumbnails.ps1 COMPONENT tests)
   install(FILES "${_pdft_v1_data}/PdfThumbnails.cmd.txt"
           DESTINATION system-fixture RENAME PdfThumbnails.cmd COMPONENT tests)
-  install(FILES "${PROJECT_SOURCE_DIR}/LICENSE" DESTINATION system-fixture COMPONENT tests)
+  install(FILES "${_pdft_v1_data}/LICENSE.txt"
+          DESTINATION system-fixture RENAME LICENSE COMPONENT tests)
   unset(_pdft_v1_dir)
   unset(_pdft_v1_data)
   pdft_add_program_test(system.tests pdft_system_tests LABELS system RUN_SERIAL TRUE
