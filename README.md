@@ -44,6 +44,9 @@ details, including ARM64 builds and installing for one user only.
 
 Start `PdfThumbnailsSettings.exe` from `C:\Program Files\PdfThumbnails`.
 
+![The settings window: a zoom slider with a preview of a document and a slide, the two checks, and
+the status](docs/images/settings-window.png)
+
 **Zoom.** File Explorer fits every thumbnail into a square, so a portrait page leaves empty bands
 on both sides. The zoom crops the longer side evenly, so the page fills more of the square:
 
@@ -52,6 +55,15 @@ on both sides. The zoom crops the longer side evenly, so the page fills more of 
 | 100 % | nothing | the whole page (the default) |
 | 120 % | about 8 % | mostly margins and running headers |
 | 142 % | about 15 % | a square crop; higher values crop no further for A4 |
+
+The same document at 100 % and at 130 %, and a folder at 130 %:
+
+![A document's thumbnail at zoom 100 %: the whole page with white bands at the
+sides](docs/images/zoom-100.png)
+![The same thumbnail at zoom 130 %: the page fills the square](docs/images/zoom-130.png)
+
+![Eight PDF thumbnails in File Explorer at zoom 130 %: four documents and four
+slides](docs/images/thumbnails-130.png)
 
 Save applies a new zoom to the thumbnails File Explorer already made, for PDFs in open folder
 windows, on the desktop and in the Windows Search index. **Rebuild thumbnails** starts the whole
