@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest something PdfThumbnails could do.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        PdfThumbnails does one thing: first-page thumbnails of PDFs in File Explorer. It never
+        uses the network. Ideas that fit that are most welcome.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The problem, in your own words, before any solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: How you imagine it working, in the window or on the command line.
+  - type: textarea
+    id: other
+    attributes:
+      label: Anything else
+      description: Workarounds you use now, or other programs that do it well.

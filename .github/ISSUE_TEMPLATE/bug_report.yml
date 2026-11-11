@@ -1,0 +1,67 @@
+name: Bug report
+description: Thumbnails missing or wrong, a command or the settings window misbehaving.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Security problems go to the Security tab instead** (Report a
+        vulnerability), never into a public issue.
+
+        **Don't attach your own PDFs or screenshots of them.** Everything here is public. If one
+        file matters, make a PDF that shows the same problem with nothing private in it, or
+        describe the file (page size, how it was made, its size).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Install for all users with PdfThumbnailsCli.exe --install --machine
+        2. Set the zoom to 130
+        3. Open a folder of PDFs
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics report
+      description: |
+        The output of `PdfThumbnailsCli.exe --diagnostics`, run from a normal (not
+        administrator) prompt. It masks your user name, PC name and profile folder, and holds no
+        PDF names; read it before you paste it. `PdfThumbnailsCli.exe --diagnostics --copy` puts
+        it on the clipboard.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installed for
+      options:
+        - All users (--install --machine)
+        - One user (--install --user)
+        - Not installed
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and build
+      description: From `winver`, for example "Windows 11 24H2, build 26100.4652". The report has it too.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you send it
+      options:
+        - label: Nothing attached or pasted here is a private document or shows one.
+          required: true
+        - label: I read the diagnostics report and it holds nothing I don't want public.
+          required: true
