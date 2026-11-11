@@ -113,9 +113,12 @@ in a short-lived separate process. The zoom lives in
 ## More
 
 - [The command line](docs/CLI.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md): what to check when thumbnails don't show
+- [How it is built](docs/ARCHITECTURE.md), [what comes next](docs/ROADMAP.md)
 - [Building and testing](docs/BUILDING.md), [manual tests](docs/TESTING.md)
 - [Changes since 1.x](CHANGELOG.md): what behaves differently, and what happens to a 1.x install
-- [Contributing](CONTRIBUTING.md), [reporting security problems](SECURITY.md)
+- [Contributing](CONTRIBUTING.md), [code of conduct](CODE_OF_CONDUCT.md),
+  [reporting security problems](SECURITY.md)
 - [Maintaining the project](docs/MAINTAINING.md)
 
 ## Licenses

@@ -4,6 +4,23 @@ How to build and test is in [docs/BUILDING.md](docs/BUILDING.md): `scripts\build
 plain Command Prompt in the repository root. Format C++ with clang-format 23.x (the repository's
 `.clang-format`); every preset builds with warnings as errors.
 
+## Pull requests
+
+- Open an issue first for anything bigger than a fix, so we can agree on the approach.
+- Presets and test labels are in [docs/BUILDING.md](docs/BUILDING.md#presets) and
+  [docs/BUILDING.md](docs/BUILDING.md#tests): `x64-release` (and `x64-debug` for C++ changes) must
+  pass. Never run the `system` tests or the writing commands on a PC you use (see below); CI runs
+  them on throw-away runners. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is the map of the code,
+  and [docs/TESTING.md](docs/TESTING.md) has the manual passes.
+- One change per commit, with a message that says what and why in plain words ("Keep the command
+  line's own text ASCII"), in the imperative.
+- No sign-off (DCO) or CLA is needed. By contributing you agree that your change is under the
+  project's MIT license.
+- Everything you push is public: keep personal names, e-mail addresses, profile paths and private
+  PDFs out of code, tests, screenshots and commit messages. GitHub's no-reply address keeps your
+  e-mail out of the history.
+- Please follow the [code of conduct](CODE_OF_CONDUCT.md).
+
 ## Code rules
 
 These apply to the settings app (`src/app`) and to the tests that drive it.
