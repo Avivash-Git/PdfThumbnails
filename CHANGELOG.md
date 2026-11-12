@@ -52,6 +52,7 @@ These are the places where 2.0 behaves differently from 1.1 on purpose.
   Control's state or log instead of counting no blocks.
 - **The build.** MSVC instead of MinGW, with Control Flow Guard, CET on x64 and a static C
   runtime. The version is 2.0.0.0, so build folders are named `app\2.0.0.0-<build id>`.
+- **PDFium** is `chromium/8152` (PDFium 159), newer than 1.1's `chromium/8125`.
 
 ### Fixed
 

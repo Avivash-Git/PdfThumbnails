@@ -7,7 +7,7 @@ source; the paths below are relative to the package root.
 
 ## PDFium (in `PdfThumbnails-pdfium.dll`)
 
-`PdfThumbnails-pdfium.dll` is `pdfium.dll` from the PDFium build `chromium/8125` published by
+`PdfThumbnails-pdfium.dll` is `pdfium.dll` from the PDFium build `chromium/8152` published by
 [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) (non-V8, non-XFA),
 renamed so that no other program's PDFium can be mixed up with it. It is not modified.
 
