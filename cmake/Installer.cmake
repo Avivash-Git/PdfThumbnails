@@ -4,10 +4,13 @@
 #
 #   cmake -DRUNTIME_X64=<folder> -DRUNTIME_ARM64=<folder> -DOUTPUT_DIR=<folder>
 #         [-DOUTPUT_BASE=<file name without .exe>] [-DVERSION_TEXT=<text>] [-DISCC=<ISCC.exe>]
-#         -P cmake/Installer.cmake
+#         [-DSIGN=ON] -P cmake/Installer.cmake
 #
 # (-D options go before -P.) Run it after code signing, since signing changes the DLLs' bytes and
-# so their build folder names (BuildId.cmake). It
+# so their build folder names (BuildId.cmake). With SIGN=ON (signed builds: the runtimes signed
+# with cmake/Sign.cmake -DDIR=<runtime>, and its PDFT_SIGNING environment set) it first checks
+# that every binary in both runtimes is signed and timestamped, and Inno Setup signs the setup,
+# its uninstaller and its temporary copies through cmake/Sign.cmake. It
 #   1. checks that both runtimes are complete, built for their architecture, and of one version;
 #   2. computes each build's folder name, <FileVersion>-<build id>, from the final DLLs;
 #   3. finds the Inno Setup compiler (-DISCC, else Inno Setup 7, else 6, else ISCC on PATH) and
@@ -83,6 +86,20 @@ if(NOT count EQUAL 1)
   message(FATAL_ERROR "The two runtimes are not of one version: ${versions}")
 endif()
 
+if(SIGN)
+  if("$ENV{PDFT_SIGNING}" STREQUAL "")
+    message(FATAL_ERROR "SIGN=ON needs PDFT_SIGNING and its settings in the environment "
+                        "(cmake/Sign.cmake)")
+  endif()
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" "-DPATHS=${runtime_x64};${runtime_arm64}" -DREQUIRE=ON
+            -P "${CMAKE_CURRENT_LIST_DIR}/VerifySignatures.cmake"
+    RESULT_VARIABLE result)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR "SIGN=ON: the runtimes must be signed first (cmake/Sign.cmake -DDIR=...)")
+  endif()
+endif()
+
 if(NOT VERSION_TEXT)
   set(VERSION_TEXT "${product_version}")
 endif()
@@ -154,7 +171,16 @@ set(defines
   "/DSetupIcon=${icon_native}"
   "/DOutputDir=${output_dir_native}"
   "/DOutputBase=${OUTPUT_BASE}")
-execute_process(COMMAND "${ISCC}" /Qp ${defines} "${iss_native}"
+set(sign_tool "")
+if(SIGN)
+  # Inno Setup runs this command for each file it signs: $f is the file's name, quoted, and $q a
+  # quote. The signing identity reaches cmake/Sign.cmake through the environment.
+  file(TO_NATIVE_PATH "${CMAKE_COMMAND}" cmake_native)
+  file(TO_NATIVE_PATH "${CMAKE_CURRENT_LIST_DIR}/Sign.cmake" sign_native)
+  set(sign_tool "/Spdftsign=$q${cmake_native}$q -DFILES=$f -P $q${sign_native}$q")
+  list(APPEND defines "/DSignToolName=pdftsign")
+endif()
+execute_process(COMMAND "${ISCC}" /Qp ${defines} ${sign_tool} "${iss_native}"
                 COMMAND_ECHO STDOUT RESULT_VARIABLE result)
 if(NOT result EQUAL 0)
   message(FATAL_ERROR "ISCC failed (${result})")
@@ -164,6 +190,15 @@ endif()
 set(setup "${output_dir}/${OUTPUT_BASE}.exe")
 if(NOT EXISTS "${setup}")
   message(FATAL_ERROR "ISCC made no ${setup}")
+endif()
+if(SIGN)
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" "-DPATHS=${setup}" -DREQUIRE=ON
+            -P "${CMAKE_CURRENT_LIST_DIR}/VerifySignatures.cmake"
+    RESULT_VARIABLE result)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR "The setup is not signed and timestamped")
+  endif()
 endif()
 file(SHA256 "${setup}" hash)
 message(STATUS "Setup: ${setup}")

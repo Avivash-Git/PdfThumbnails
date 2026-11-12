@@ -74,6 +74,13 @@ Compression=lzma2/max
 SolidCompression=yes
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputBase}
+#ifdef SignToolName
+; Signed builds: the Sign Tool that cmake/Installer.cmake -DSIGN=ON defines (cmake/Sign.cmake)
+; signs Setup, its uninstaller and Setup's temporary copies of itself, each one checked as soon as
+; it is signed. The files Setup installs were signed before this script was compiled.
+SignTool={#SignToolName}
+SignedUninstaller=yes
+#endif
 
 [Dirs]
 ; The install folder may be there before Setup (a developer install, 1.x): the uninstaller then
