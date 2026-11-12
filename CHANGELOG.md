@@ -17,6 +17,10 @@
   Silent: `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
 - Every user of the PC is set up at their next sign-in (Active Setup), not only the one who
   installed it. In 1.x each user had to run `install` for themselves.
+- Code signing, ready for a certificate: the build can sign both DLLs, both programs, the setup
+  and its uninstaller, with a timestamp, and checks every signature
+  ([Code signing](docs/BUILDING.md#code-signing)). Builds stay unsigned until the project has a
+  certificate.
 
 ### Changed
 

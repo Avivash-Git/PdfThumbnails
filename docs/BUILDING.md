@@ -743,9 +743,10 @@ don't keep the token.
 | `test-arm64` | ARM64 | not on pull requests, unless called | the ARM64 test bundle, run natively with `ctest --test-dir` |
 | `system-x64` | x64 | not on pull requests, unless called; informational (never fails the run) | the `system` tests from the `tests-x64` bundle against the `PdfThumbnails-x64-unsigned` artifact: a real install, use and uninstall on the throw-away runner (see [Tests](#tests)) |
 | `release (x64)`, `release (arm64)` | x64 | always | `scripts\build.cmd release-<arch>`: the runtime the installer ships |
-| `installer` | x64 | always | the setup from both release runtimes with the image's Inno Setup (`cmake/Installer.cmake`), and an earlier setup of another build for the upgrade test |
+| `installer` | x64 | always | the setup from both release runtimes with the image's Inno Setup (`cmake/Installer.cmake`), and an earlier setup of another build for the upgrade test; in a [signed run](#code-signing) it signs first; it checks the signatures (required in a signed run, only reported otherwise) |
 | `installer-x64` | x64 | not on pull requests, unless called | the [installer's system tests](#tests-1) (`Installer.*` from the `tests-x64` bundle) on the throw-away runner; a skipped test fails the job |
 | `installer-arm64` | ARM64 | not on pull requests, unless called; informational | the same on a native ARM64 runner, which installs the setup's ARM64 files |
+| `signing-rehearsal` | x64 | not on pull requests, unless called | the [signing steps](#code-signing) with a throw-away certificate that only that runner trusts: both runtimes and the setup signed and checked, the setup installed and every installed file checked, then uninstalled; nothing it signs is uploaded |
 
 It runs on pushes to `main` and on pull requests (except when only Markdown files or `docs\`
 changed), by hand (`workflow_dispatch`), and when another workflow calls it (`workflow_call`;
@@ -818,7 +819,7 @@ Details:
   | `symbols-x64`, `symbols-arm64` | the `symbols` component | 14 days |
   | `tests-x64`, `tests-arm64` | the `tests` component (`test-arm64` downloads it) | 3 days |
   | `release-x64`, `release-arm64` | the `runtime` component of the release presets | 3 days |
-  | `PdfThumbnails-setup-unsigned` | the setup, `PdfThumbnails-<version>-setup.exe` | 14 days |
+  | `PdfThumbnails-setup-unsigned` | the setup, `PdfThumbnails-<version>-setup.exe` (`PdfThumbnails-setup-signed` in a [signed run](#code-signing)) | 14 days |
   | `setup-earlier` | the upgrade test's earlier setup | 3 days |
   | `logs-<job>` | test logs, configure log and `buildinfo.txt`, only when a job fails (`logs-system-x64`, `logs-installer-x64` and `logs-installer-arm64`: the system tests' logs, always) | 7 days |
 
@@ -833,6 +834,9 @@ Repository variables (Settings > Secrets and variables > Actions > Variables), a
 | `PDFT_VS_VERSION` | empty (newest 18.11 or later) | Passed to `scripts\build.cmd`, e.g. `[18.11,19.0)` to stay on Visual Studio 2026. |
 | `PDFT_ARM64_RUNNER` | `windows-11-arm` | The ARM64 runner label (`windows-11-vs2026-arm` works too; the job needs only CTest). |
 | `PDFT_ARM64_TESTS` | on | Set to `off` to skip `test-arm64` and `installer-arm64`, for example when the account's plan has no ARM64 runners. |
+| `PDFT_SIGNING` | empty | How a [signed run](#code-signing) signs: `certificate` or `artifact-signing`. Empty, a run with `sign` fails. |
+| `PDFT_SIGN_PDFIUM` | on | `off` leaves the PDFium DLL unsigned, for a signing service that signs only the project's own files. |
+| `PDFT_SIGN_SUBJECT` | empty | Text the signing certificate's subject must contain, such as the publisher's name; checked on every signed file. |
 
 ### `format.yml`
 
@@ -872,6 +876,76 @@ after a 7-day cooldown.
   than Linux ones. A pull request costs two Windows builds; a push to `main` costs three
   builds plus the ARM64 test job and the x64 system job (it builds nothing, but its tests may
   take up to 40 minutes, the thumbnail refresh experiment up to 30 of them).
+
+## Code signing
+
+Smart App Control blocks unsigned programs and DLLs that came from the internet, with no way for
+the user to allow them, and SmartScreen warns about them. So releases are signed: Authenticode
+with SHA-256 and an RFC 3161 timestamp (the signatures stay valid after the certificate
+expires), on every file that runs: both DLLs and both executables of each architecture, the
+setup, its uninstaller and Setup's temporary copies of itself. Signing changes the DLLs' bytes,
+so it comes before the build folder names are computed (`cmake/BuildId.cmake`), which
+`cmake/Installer.cmake` does.
+
+The project has no signing certificate yet (see [ROADMAP.md](ROADMAP.md)). Until it has, every
+build is unsigned, and the steps below are in place but do nothing.
+
+### The scripts
+
+| Script | What it does |
+|---|---|
+| `cmake -DDIR=<runtime> -P cmake/Sign.cmake` | Signs every `.exe` and `.dll` in the folder that has no valid signature yet, and checks each signature as soon as it is made. `-DFILES=<file>;...` signs the files named, signed or not. |
+| `cmake/Installer.cmake` with `-DSIGN=ON` | Checks that both runtimes are signed, then builds the setup with Inno Setup's `SignTool` set to `cmake/Sign.cmake`, which signs the setup, the uninstaller and Setup's temporary copies; then checks the setup's signature. |
+| `cmake -DPATHS=<files or folders> [-DREQUIRE=ON] [-DSUBJECT=<text>] -P cmake/VerifySignatures.cmake` | One line per `.exe` and `.dll`: signed and timestamped or not, and by whom. With `REQUIRE=ON` it fails unless every one is signed, trusted by Windows for code (SignTool's `verify /pa`, the Authenticode policy) and timestamped, by a certificate whose subject contains `SUBJECT` when given. |
+
+`Sign.cmake` reads how to sign from the environment, never from its command line, so nothing about
+the signing identity shows in Inno Setup's or CI's logs:
+
+| Variable | Use |
+|---|---|
+| `PDFT_SIGNING` | `certificate`: a certificate in the current user's Personal store whose private key Windows can use (a hardware token, or a signing service's tool that puts its certificate there). `artifact-signing`: Microsoft's Artifact Signing service, through its SignTool plug-in. |
+| `PDFT_SIGN_CERT_SHA1` | `certificate`: the certificate's SHA-1 thumbprint. |
+| `PDFT_SIGN_DLIB`, `PDFT_SIGN_METADATA` | `artifact-signing`: the plug-in (`Azure.CodeSigning.Dlib.dll`, x64) and its `metadata.json` (endpoint, account and certificate profile). |
+| `PDFT_SIGN_TIMESTAMP_URL` | The timestamp server. Needed with `certificate` (the certificate authority's); `artifact-signing` defaults to `http://timestamp.acs.microsoft.com`. |
+| `PDFT_SIGN_PDFIUM` | `off`: `-DDIR` leaves the PDFium DLL unsigned, and the check allows it. |
+| `PDFT_SIGNTOOL` | The `signtool.exe` to use. Default: the x64 one of the newest Windows SDK, which signs ARM64 files too. |
+
+To sign a local build with a certificate of your own (on a hardware token, say), stage both
+release runtimes as in [Building it](#building-it), then:
+
+```bat
+set PDFT_SIGNING=certificate
+set PDFT_SIGN_CERT_SHA1=<thumbprint>
+set PDFT_SIGN_TIMESTAMP_URL=<your certificate authority's timestamp server>
+cmake -DDIR=out\stage\release-x64 -P cmake\Sign.cmake
+cmake -DDIR=out\stage\release-arm64 -P cmake\Sign.cmake
+cmake -DRUNTIME_X64=out\stage\release-x64 -DRUNTIME_ARM64=out\stage\release-arm64 -DOUTPUT_DIR=out\setup -DSIGN=ON -P cmake\Installer.cmake
+```
+
+### On CI
+
+- **When.** Only a run started by hand (Actions > build > Run workflow, with **sign** ticked) or
+  by another workflow with the input `sign: true` signs. Pushes and pull requests never do, so
+  the artifacts of every commit stay unsigned, and pull requests from forks never see a secret.
+- **Where.** Only the `installer` job signs. In a signed run it runs in the GitHub environment
+  `signing`, whose secrets no other job gets: it signs both release runtimes, builds the setup
+  with `-DSIGN=ON`, checks every signature (required), and uploads `PdfThumbnails-setup-signed`.
+  `installer-x64` then also installs the signed setup and requires every installed file to be
+  signed, the uninstaller included, before it uninstalls.
+- **The service's own steps.** How the signing identity reaches the runner depends on the
+  signing service (a cloud signing tool that puts its certificate in the store, or Artifact
+  Signing's plug-in with an Azure sign-in). Those steps come with the choice of a service; until
+  then, a run with `sign` stops at "Make the signing identity available" instead of producing
+  unsigned files. The service's secrets go into the `signing` environment, never into the
+  repository's files or logs.
+- **Rehearsal.** On every push, `signing-rehearsal` runs the same signing steps with a
+  certificate made on the runner for that job and trusted only there (added to the runner's
+  trusted roots; the runner is thrown away afterwards), with timestamps from a public timestamp
+  server. It signs both runtimes and the setup, checks every signature, checks that the check
+  refuses a DLL changed after signing and files of another signer, installs the setup, checks
+  every installed file, the uninstaller included, and uninstalls. Nothing it signs is uploaded.
+- **The earlier setup** of the upgrade test is never signed (its PDFium DLL has bytes appended,
+  which would break a signature anyway).
 
 ## Updating PDFium
 

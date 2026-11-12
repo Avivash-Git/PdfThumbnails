@@ -9,6 +9,8 @@ need someone at the PC: what they do, what they change on it, and how to stop th
 - [The installer](#the-installer): Setup and its uninstaller on a real PC.
 - [The whole pass before a release](#the-whole-pass-before-a-release): install, use, take-over,
   uninstall and reinstall on a real PC.
+- [With Smart App Control on](#with-smart-app-control-on-signed-builds): a signed setup,
+  downloaded as a user would, on a PC that enforces Smart App Control.
 
 ## The thumbnail refresh experiment
 
@@ -300,7 +302,9 @@ taken from a CI run's `PdfThumbnails-setup-unsigned` artifact.
 1. **Before.** `"C:\Program Files\PdfThumbnails\PdfThumbnailsCli.exe" --status` and `--zoom`:
    note the zoom. A developer install, 1.x or nothing is fine.
 2. **Setup.** Double-click `<setup>`. An unsigned setup shows SmartScreen's "Windows protected
-   your PC" (More info, then Run anyway). One administrator prompt; the wizard asks no folder and
+   your PC" (More info, then Run anyway); with Smart App Control on, an unsigned setup that was
+   downloaded is blocked (see
+   [With Smart App Control on](#with-smart-app-control-on-signed-builds)). One administrator prompt; the wizard asks no folder and
    no Start menu group; it closes PdfThumbnails' own programs if they are running; the last page
    offers to open the settings.
 3. **Installed apps** (Settings > Apps > Installed apps) lists PdfThumbnails once, with its
@@ -359,3 +363,42 @@ command from a normal prompt (not an administrator one).
 
 With Smart App Control on, steps 2 and 8 also show whether Windows lets the unsigned build run:
 the status then has a Smart App Control line, and it says whether PdfThumbnails is being blocked.
+
+## With Smart App Control on (signed builds)
+
+Smart App Control is strictest with files that came from the internet: it blocks a program or DLL
+unless Microsoft's cloud knows it or it is signed with a certificate Windows trusts, and the user
+gets no way to allow it. Files built on the PC, or copied there without the download mark, may
+run anyway, so this pass must download the setup the way a user does. Use a PC or a virtual
+machine with a current Windows 11 where Smart App Control is **On** (Windows Security > App &
+browser control > Smart App Control), not one where it is only evaluating. A throw-away virtual
+machine is best: the pass installs and uninstalls for all users.
+
+`<signed>` is the setup of a signed run (`PdfThumbnails-setup-signed`, or a release), and
+`<unsigned>` the setup of an ordinary run (`PdfThumbnails-setup-unsigned`) of the same commit.
+
+1. **Download both with a browser** on the test PC, not through a shared folder, the clipboard,
+   `curl` or `Invoke-WebRequest`. A ZIP downloaded from GitHub's artifacts carries the mark onto
+   what Explorer extracts from it. In PowerShell,
+   `Get-Content <setup> -Stream Zone.Identifier` shows `ZoneId=3` for each.
+2. **The control.** Run `<unsigned>`: Smart App Control must block it (a notification that it
+   blocked an app; Event Viewer > Applications and Services Logs > Microsoft > Windows >
+   CodeIntegrity > Operational has an event 3077 or 3033 for it). If it runs, Smart App Control is
+   not enforcing on this PC, and the rest of the pass proves nothing.
+3. **Signature.** `Get-AuthenticodeSignature <signed>` shows `Valid` and the publisher's
+   certificate; the file's Properties > Digital Signatures shows a timestamp.
+4. **Install.** Run `<signed>`. SmartScreen may still say the publisher is new ("unrecognized
+   app") while the certificate has little reputation; the publisher's name must show there.
+   Smart App Control must not block Setup, its temporary files or the uninstaller it writes.
+5. **Every installed file signed.** In PowerShell:
+   `Get-ChildItem 'C:\Program Files\PdfThumbnails' -Recurse -Include *.exe,*.dll | Get-AuthenticodeSignature | Format-Table Status, Path`:
+   every line `Valid`, `unins000.exe` and both DLLs in `app\<build folder>` included.
+6. **Thumbnails.** Open a folder of PDFs (downloaded ones too) with large icons: thumbnails show.
+   `PdfThumbnailsCli.exe --status` ends with `Result: healthy`, and its Smart App Control line
+   says PdfThumbnails is not being blocked. No new CodeIntegrity 3077 or 3033 event names a file
+   in `C:\Program Files\PdfThumbnails`.
+7. **The check task and the window.** Sign out and in: the log has a `check` line from the task.
+   The window opens from the Start menu; Check now and Save with a new zoom work.
+8. **Upgrade.** Download a newer signed setup the same way and run it over the first: healthy,
+   the zoom kept, no block.
+9. **Uninstall** from Installed apps: no block, `C:\Program Files\PdfThumbnails` gone.
