@@ -14,7 +14,9 @@ set(PDFT_VERSION_SUFFIX        "" CACHE STRING
     "Appended to the ProductVersion string only (e.g. -dev+g1a2b3c4); FileVersion never changes")
 set(PDFT_DESCRIPTION           "PDF thumbnails for Windows Explorer (PDFium)")
 set(PDFT_COPYRIGHT             "Copyright (c) 2026 ${PDFT_PRODUCT_NAME} contributors")
-# PDFT_HOMEPAGE is added once the project's public repository exists.
+# Shown in Installed apps by the installer (cmake/Installer.cmake).
+set(PDFT_PUBLISHER             "${PDFT_PRODUCT_NAME} contributors")
+set(PDFT_HOMEPAGE              "https://github.com/Avivash-Git/PdfThumbnails")
 
 # ---- COM and file names -----------------------------------------------------------------
 set(PDFT_HANDLER_CLSID         "{0C3534C4-5B7A-48AB-828D-1CD660DC447F}")   # NEVER changes
@@ -34,7 +36,7 @@ set(PDFT_TASK_PREFIX           "Check ")
 # right to create folders in the root): "<this><user SID>" in the root folder.
 set(PDFT_TASK_ROOT_PREFIX      "${PDFT_PRODUCT_NAME} check ")
 set(PDFT_OBJECT_PREFIX         "${PDFT_PRODUCT_NAME}")    # mutexes, window class, messages
-set(PDFT_INNO_APPID            "{B4584E00-A586-4C24-996D-6032BFDEDE2F}")   # reserved for M3
+set(PDFT_INNO_APPID            "{B4584E00-A586-4C24-996D-6032BFDEDE2F}")   # NEVER changes
 set(PDFT_AUMID                 "${PDFT_PRODUCT_NAME}.Settings")            # reserved (toasts)
 # Developer tools only (pdft-run-outside): the task folder of its temporary tasks, and the start
 # of the name of each run's private folder under %TEMP%. Never used by what ships.
