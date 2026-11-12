@@ -4,9 +4,11 @@
 
 #include <utility>
 
+#include "build_folder.h"
 #include "file_ops.h"
 #include "instance.h"
 #include "log.h"
+#include "pe_info.h"
 #include "project_config.h"
 #include "settings.h"
 #include "status_format.h"
@@ -263,6 +265,34 @@ CATCH_RETURN();
 
 // ---- --setup-machine ------------------------------------------------------------------------
 
+HRESULT FindBuildToRegister(const std::filesystem::path& machineRoot, std::wstring_view name,
+                            Arch osArch, std::filesystem::path* dll) noexcept try {
+  dll->clear();
+  const std::optional<BuildFolderNameParts> parts = ParseBuildFolderName(name);
+  RETURN_HR_IF(E_INVALIDARG, !parts || CompareFileVersions(parts->version, L"2") < 0);
+  const std::filesystem::path folder = machineRoot / kBuildsFolderName / std::wstring(name);
+  const DWORD attributes = GetFileAttributesW(folder.c_str());
+  RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND),
+               attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY));
+  RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK),
+               (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0);
+  RETURN_IF_FAILED(CheckNoReparsePoints(folder, machineRoot));
+  const std::filesystem::path handler = folder / kHandlerDll;
+  const std::filesystem::path pdfium = folder / kPdfiumDll;
+  RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND),
+               !FileExists(handler) || !FileExists(pdfium));
+  USHORT machine = IMAGE_FILE_MACHINE_UNKNOWN;
+  RETURN_IF_FAILED(ReadPeMachine(handler, &machine));
+  RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_BAD_EXE_FORMAT),
+               osArch == Arch::kOther || MachineToArch(machine) != osArch);
+  std::wstring computed;
+  RETURN_IF_FAILED(ComputeBuildId(handler, pdfium, &computed));
+  RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_INVALID_DATA), !IEquals(computed, name));
+  *dll = handler;
+  return S_OK;
+}
+CATCH_RETURN();
+
 HRESULT SetupMachine(const SetupMachineOptions& options, const RegistryRoots& roots,
                      SetupMachineResult* result) noexcept try {
   *result = SetupMachineResult{};
@@ -299,6 +329,25 @@ HRESULT SetupMachine(const SetupMachineOptions& options, const RegistryRoots& ro
   }
   std::vector<std::wstring>& failures = result->failures;
 
+  // The build the installer just laid down, first: the rest goes on without it, but the old
+  // builds stay then, since the class may still name one of them.
+  if (!options.build.empty()) {
+    Arch osArch = options.osArch;
+    if (osArch == Arch::kOther) {
+      USHORT process = IMAGE_FILE_MACHINE_UNKNOWN;
+      USHORT native = IMAGE_FILE_MACHINE_UNKNOWN;
+      if (IsWow64Process2(GetCurrentProcess(), &process, &native)) {
+        osArch = ArchFromMachine(native);
+      }
+    }
+    std::filesystem::path dll;
+    result->buildClass = FindBuildToRegister(paths.machineRoot, options.build, osArch, &dll);
+    if (SUCCEEDED(result->buildClass)) {
+      result->buildClass = WriteMachineClass(roots, paths.machineRoot, dll);
+    }
+    if (FAILED(result->buildClass)) Failed(&failures, L"class", result->buildClass);
+  }
+
   result->taskFolder = EnsureTaskFolder(options.taskFolder);
   if (FAILED(result->taskFolder)) Failed(&failures, L"task-folder", result->taskFolder);
 
@@ -310,13 +359,15 @@ HRESULT SetupMachine(const SetupMachineOptions& options, const RegistryRoots& ro
   }
   if (FAILED(result->v1.firstError)) Failed(&failures, L"migrate-v1", result->v1.firstError);
 
-  const std::filesystem::path trash =
-      options.trashParent.empty() ? paths.machineRoot.parent_path() : options.trashParent;
-  if (const HRESULT hr = RemoveOldMachineBuilds(roots, paths.machineRoot, trash, &result->old);
-      FAILED(hr)) {
-    Failed(&failures, L"old-builds", hr);
+  if (SUCCEEDED(result->buildClass)) {
+    const std::filesystem::path trash =
+        options.trashParent.empty() ? paths.machineRoot.parent_path() : options.trashParent;
+    if (const HRESULT hr = RemoveOldMachineBuilds(roots, paths.machineRoot, trash, &result->old);
+        FAILED(hr)) {
+      Failed(&failures, L"old-builds", hr);
+    }
+    if (FAILED(result->old.firstError)) Failed(&failures, L"old-builds", result->old.firstError);
   }
-  if (FAILED(result->old.firstError)) Failed(&failures, L"old-builds", result->old.firstError);
 
   if (!failures.empty()) {
     result->code = ExitCode::kFailed;

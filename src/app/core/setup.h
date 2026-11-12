@@ -22,14 +22,19 @@
 //   8. Explorer is told that associations changed.
 //   Exit 0, or 5 when a step failed (the others still ran).
 //
-// --setup-machine (the installer's step for all users; run elevated): refused without the
-// administrator rights the elevated side requires of its own token (7: elevated, the
+// --setup-machine [--build <folder>] (the installer's step for all users; run elevated): refused
+// without the administrator rights the elevated side requires of its own token (7: elevated, the
 // Administrators group enabled, an integrity level of High; ReadAdministratorRights), and below
 // an app package (or where the processes above it cannot be read) unless test values it writes
 // under HKEY_LOCAL_MACHINE\Software\Classes and in its own user's registry come back through WMI
-// (8, context.h); no operation lock (see SetupMachine); then the shared task folder
-// (EnsureTaskFolder), the machine part of the 1.x clean-up and the old 2.x builds. Exit 0, 1 when
-// files wait for a restart, 5 when a step failed.
+// (8, context.h); no operation lock (see SetupMachine); then
+//   1. with --build, the class for all users, pointed at <install folder>\app\<folder>: the
+//      build the installer just put there (FindBuildToRegister checks it). The installer names
+//      it because two builds of one version cannot be told apart by their names. When this
+//      fails, the old builds stay (the class may still need one of them);
+//   2. the shared task folder (EnsureTaskFolder), the machine part of the 1.x clean-up and the
+//      old 2.x builds (every build folder but the one the class names).
+// Exit 0, 1 when files wait for a restart, 5 when a step failed.
 //
 // --migrate-v1 [--user-only | --machine-only]: refused like --setup-user; needs an installed
 // program (6), and leaves 1.x as it is without one. The user part runs here; the machine part, when
@@ -48,6 +53,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "check.h"
@@ -132,6 +138,10 @@ std::vector<std::filesystem::path> OldBuildDlls(const Snapshot& snapshot,
 
 struct SetupMachineOptions {
   std::optional<EnginePaths> paths;  // when absent, GetEnginePaths
+  // --build: the build folder's name; empty leaves the class for all users as it is.
+  std::wstring build;
+  // What the build's DLL must be made for; Arch::kOther: this Windows' own architecture.
+  Arch osArch = Arch::kOther;
   std::wstring taskFolder = kTaskFolder;
   // Where in-use files go; when empty, the folder that holds the install folder.
   std::filesystem::path trashParent;
@@ -144,11 +154,26 @@ struct SetupMachineResult {
   ExitCode code = ExitCode::kFailed;
   SetupRefusal refusal = SetupRefusal::kNone;
   MachineWriteCheck machineWrites;  // what it judged its context by (with kPackaged, why)
-  HRESULT taskFolder = S_OK;        // EnsureTaskFolder's answer
-  MachineRemoval v1;                // 1.x's build folders
-  MachineRemoval old;               // old 2.x builds
+  // The class for all users: S_FALSE without --build, S_OK once written, else why not (then the
+  // old builds were left as they were).
+  HRESULT buildClass = S_FALSE;
+  HRESULT taskFolder = S_OK;  // EnsureTaskFolder's answer
+  MachineRemoval v1;          // 1.x's build folders
+  MachineRemoval old;         // old 2.x builds
   std::vector<std::wstring> failures;
 };
+
+// The handler DLL of the build folder <machineRoot>\app\<name> that --setup-machine --build
+// registers: |name| must be a build folder name of version 2 or later
+// (E_INVALIDARG otherwise); the folder must be a real folder, not a link
+// (HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND) when it is missing); both DLLs must be files in it
+// (HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)); the handler DLL must be made for |osArch|
+// (HRESULT_FROM_WIN32(ERROR_BAD_EXE_FORMAT)); and the name computed from the two DLLs' bytes
+// (ComputeBuildId) must be |name| (HRESULT_FROM_WIN32(ERROR_INVALID_DATA)), so the folder holds
+// the build it is named after. Never throws.
+[[nodiscard]] HRESULT FindBuildToRegister(const std::filesystem::path& machineRoot,
+                                          std::wstring_view name, Arch osArch,
+                                          std::filesystem::path* dll) noexcept;
 
 // Runs --setup-machine. Never throws.
 [[nodiscard]] HRESULT SetupMachine(const SetupMachineOptions& options, const RegistryRoots& roots,

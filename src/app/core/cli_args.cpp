@@ -97,6 +97,7 @@ enum class Option {
   kOut,
   kUserOnly,
   kMachineOnly,
+  kBuild,
   kRelaunched,
 };
 
@@ -143,6 +144,8 @@ constexpr OptionInfo kOptions[] = {
     {Option::kUserOnly, L"--user-only", kNone, L"", false, 3, false, false, Bit(Verb::kMigrateV1)},
     {Option::kMachineOnly, L"--machine-only", kNone, L"", false, 3, false, false,
      Bit(Verb::kMigrateV1)},
+    {Option::kBuild, L"--build", kRequired, L"<folder>", false, 0, false, false,
+     Bit(Verb::kSetupMachine)},
     {Option::kRelaunched, L"--relaunched", kNone, L"", false, 0, true, true,
      Bit(Verb::kNone) | kWorkingVerbs},
 };
@@ -297,6 +300,9 @@ std::optional<std::wstring> ApplyOption(Option option, std::wstring_view value, 
       break;
     case Option::kMachineOnly:
       args->migrateScope = MigrateScope::kMachineOnly;
+      break;
+    case Option::kBuild:
+      args->build = std::wstring(value);
       break;
     case Option::kRelaunched:
       args->relaunched = true;

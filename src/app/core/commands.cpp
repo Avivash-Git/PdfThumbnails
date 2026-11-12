@@ -485,8 +485,9 @@ int RunSetupUserCommand(const CliArgs& args, const ProcessContext& context, Outp
 
 int RunSetupMachineCommand(const CliArgs& args, const ProcessContext& context, Output& out) {
   SetupMachineResult result;
-  if (const HRESULT hr = SetupMachine(SetupMachineOptions{}, RegistryRoots{}, &result);
-      FAILED(hr)) {
+  SetupMachineOptions options;
+  options.build = args.build;
+  if (const HRESULT hr = SetupMachine(options, RegistryRoots{}, &result); FAILED(hr)) {
     out.Error(L"Cannot set up this PC: " + HResultText(hr));
     return Code(ExitCode::kFailed);
   }
@@ -497,6 +498,10 @@ int RunSetupMachineCommand(const CliArgs& args, const ProcessContext& context, O
       out.Error(L"  " + MachineWriteCheckText(result.machineWrites));
     }
     return code;
+  }
+  // The step runs elevated and logs nothing: the installer's log keeps these lines.
+  if (result.buildClass == S_OK) {
+    out.Line(L"The class for all users now names app\\" + args.build + L".");
   }
   PrintFailures(result.failures, out);
   if (result.v1.restartPending || result.old.restartPending) {

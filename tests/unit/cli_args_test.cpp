@@ -115,6 +115,8 @@ const std::vector<Case>& Cases() {
          true),
       // Machine steps: the per-user canary does not guard them.
       Ok("SetupMachine", kGui, {L"--setup-machine"}, kSetupMachine, false),
+      Ok("SetupMachineBuild", kGui, {L"--setup-machine", L"--build", L"2.0.0.0-1a2b3c4d"},
+         kSetupMachine, false),
       Ok("UninstallCleanup", kGui, {L"--uninstall-cleanup"}, kUninstallCleanup, false),
       Ok("ElevatedRepairClass", kGui, {L"--elevated", L"machine-repair-class"}, kElevated, false),
       Ok("ElevatedUninstallEquals", kGui, {L"--elevated=machine-uninstall"}, kElevated, false),
@@ -155,6 +157,9 @@ const std::vector<Case>& Cases() {
       Fails("ValueEmptyEquals", kCli, {L"--status", L"--test-file="}, L"--test-file needs a value"),
       Fails("ValueEmptySeparate", kCli, {L"--diagnostics", L"--out", L""}, L"--out needs a value"),
       Fails("FolderMissing", kCli, {L"--refresh", L"--folder"}, L"--folder needs a value"),
+      Fails("BuildMissing", kGui, {L"--setup-machine", L"--build"}, L"--build needs a value"),
+      Fails("BuildOnlyForSetupMachine", kCli, {L"--setup-user", L"--build", L"x"},
+            L"--setup-user does not take --build"),
       Fails("GivenTwice", kCli, {L"--status", L"--json", L"--json"}, L"--json is given twice"),
       Fails("FlagGivenTwice", kCli, {L"--refresh", L"--full", L"--full"}, L"--full is given twice"),
       // Numbers: complete and in range.
@@ -291,6 +296,12 @@ TEST(CliArgs, RefreshFoldersRepeat) {
   EXPECT_TRUE(full.folders.empty());
   EXPECT_TRUE(full.full);
   EXPECT_TRUE(full.yes);
+}
+
+TEST(CliArgs, SetupMachineBuild) {
+  EXPECT_TRUE(ParseOk(kGui, {L"--setup-machine"}).build.empty());
+  EXPECT_EQ(ParseOk(kGui, {L"--setup-machine", L"--build=2.0.0.0-1a2b3c4d"}).build,
+            L"2.0.0.0-1a2b3c4d");
 }
 
 TEST(CliArgs, InstallValues) {

@@ -29,7 +29,7 @@ PdfThumbnailsCli.exe <command> [options]
 | `--migrate-v1 [--user-only \| --machine-only]` | Removes what version 1.x left behind, keeping its zoom. | 0, 1, 3, 5, 7, 8 |
 | `--version`, `--help` | Print the version, or the help. | 0 |
 
-Installers use `--setup-user [--checks <list>] [--zoom <100-200>]`, `--setup-machine` and
+Installers use `--setup-user [--checks <list>] [--zoom <100-200>]`, `--setup-machine [--build <folder>]` and
 `--uninstall-cleanup`. Developer builds also have
 `--install [--machine | --user] [--checks <list>] [--zoom <100-200>] [--force]`, which installs
 from the folder the program is in ([Building](BUILDING.md#installing-a-build-developer-install)).

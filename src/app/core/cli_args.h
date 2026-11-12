@@ -150,6 +150,8 @@ struct CliArgs {
   std::optional<std::wstring> out;
   // --migrate-v1
   MigrateScope migrateScope = MigrateScope::kBoth;
+  // --setup-machine: the build folder the installer laid down (empty: none given)
+  std::wstring build;
   // --elevated
   std::optional<ElevatedStep> elevatedStep;
   // --render-preview (the command's value)

@@ -917,5 +917,112 @@ TEST_F(Setup, SetupMachineInTestPlaces) {
       options.taskFolder, std::wstring(kProductName) + L"-Test-" + tail + L" "));
 }
 
+// The architecture of this Windows, as --setup-machine --build reads it.
+Arch ThisWindowsArch() {
+  USHORT process = IMAGE_FILE_MACHINE_UNKNOWN;
+  USHORT native = IMAGE_FILE_MACHINE_UNKNOWN;
+  if (!IsWow64Process2(GetCurrentProcess(), &process, &native)) return Arch::kOther;
+  return ArchFromMachine(native);
+}
+
+// The folder name of the built DLLs, as the installer computes it (cmake/BuildId.cmake).
+std::wstring BuiltBuildName() {
+  std::wstring name;
+  EXPECT_HRESULT_SUCCEEDED(ComputeBuildId(BuiltFile(kHandlerDll), BuiltFile(kPdfiumDll), &name));
+  return name;
+}
+
+// Everywhere: the build --setup-machine --build registers must be the folder it is named after,
+// complete, made for this Windows, and of version 2 or later. Nothing is written.
+TEST_F(Setup, FindBuildToRegisterChecksTheFolder) {
+  const std::wstring name = BuiltBuildName();
+  ASSERT_FALSE(name.empty());
+  const Arch arch = ThisWindowsArch();
+  ASSERT_NE(arch, Arch::kOther);
+  path dll;
+  EXPECT_EQ(FindBuildToRegister(paths_.machineRoot, name, arch, &dll),
+            HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND));
+  EXPECT_TRUE(dll.empty());
+  const path build = MakeBuild(paths_.machineRoot, name);
+  ASSERT_HRESULT_SUCCEEDED(FindBuildToRegister(paths_.machineRoot, name, arch, &dll));
+  EXPECT_EQ(dll, build / kHandlerDll);
+  EXPECT_TRUE(IsMachineClassPath(paths_.machineRoot, dll));
+
+  const Arch other = arch == Arch::kArm64 ? Arch::kX64 : Arch::kArm64;
+  EXPECT_EQ(FindBuildToRegister(paths_.machineRoot, name, other, &dll),
+            HRESULT_FROM_WIN32(ERROR_BAD_EXE_FORMAT));
+  EXPECT_TRUE(dll.empty());
+  for (const wchar_t* bad :
+       {L"", L"app", L"..", L"2.0.0.0-1a2b3c4d\\..", L"2.0.0.0-xyz", L"1.1.0.0-67a1323e"}) {
+    EXPECT_EQ(FindBuildToRegister(paths_.machineRoot, bad, arch, &dll), E_INVALIDARG)
+        << WideToUtf8Lossy(bad);
+  }
+  // A folder whose name is not its DLLs' build id.
+  const std::wstring wrong = L"2.0.0.0-1a2b3c4d";
+  ASSERT_NE(name, wrong);
+  MakeBuild(paths_.machineRoot, wrong);
+  EXPECT_EQ(FindBuildToRegister(paths_.machineRoot, wrong, arch, &dll),
+            HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
+  // An incomplete one.
+  ASSERT_TRUE(DeleteFileW((build / kPdfiumDll).c_str()));
+  EXPECT_EQ(FindBuildToRegister(paths_.machineRoot, name, arch, &dll),
+            HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND));
+}
+
+// Elevated (CI): --setup-machine --build points the class for all users at the named build and
+// then removes the build the class named before; with a build that does not check out it lists
+// "class" and keeps every build.
+TEST_F(Setup, SetupMachineRegistersTheNamedBuild) {
+  if (!Elevated()) GTEST_SKIP() << "needs elevation; runs on CI";
+  MachineWriteCheck writes;
+  CheckMachineWrites(&writes);
+  if (RefusesMachineWrites(writes)) {
+    GTEST_SKIP() << "the step would refuse here: "
+                 << WideToUtf8Lossy(MachineWriteCheckText(writes));
+  }
+  const path before = InstallForAllUsers();
+  const std::wstring name = BuiltBuildName();
+  ASSERT_NE(before.filename().native(), name);
+  const path build = MakeBuild(paths_.machineRoot, name);
+  GUID guid = {};
+  ASSERT_HRESULT_SUCCEEDED(CoCreateGuid(&guid));
+  wchar_t id[40] = {};
+  StringFromGUID2(guid, id, ARRAYSIZE(id));
+  const std::wstring tail =
+      std::to_wstring(GetCurrentProcessId()) + L"-" + std::wstring(id + 1, 36);
+  SetupMachineOptions options;
+  options.paths = paths_;
+  options.taskFolder = L"\\" + std::wstring(kProductName) + L"-Test-" + tail;
+  options.trashParent = temp_.path();
+  const auto deleteTaskFolder = wil::scope_exit([&] {
+    (void)DeleteTaskFolderAllUsers(options.taskFolder,
+                                   std::wstring(kProductName) + L"-Test-" + tail + L" ");
+  });
+
+  options.build = L"2.0.0.0-00000002";
+  SetupMachineResult result;
+  ASSERT_HRESULT_SUCCEEDED(SetupMachine(options, roots_, &result));
+  EXPECT_EQ(result.buildClass, HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND));
+  EXPECT_EQ(result.code, ExitCode::kFailed);
+  EXPECT_TRUE(Exists(before));
+  EXPECT_TRUE(Exists(build));
+  std::optional<ClassReg> reg;
+  ASSERT_HRESULT_SUCCEEDED(ReadClass(roots_, Scope::kMachine, &reg));
+  ASSERT_TRUE(reg);
+  EXPECT_TRUE(IEquals(reg->dll, (before / kHandlerDll).native()));
+
+  options.build = name;
+  ASSERT_HRESULT_SUCCEEDED(SetupMachine(options, roots_, &result));
+  std::printf("[ setup ] --setup-machine --build in test places (elevated) -> exit %d, class %s\n",
+              static_cast<int>(result.code),
+              WideToUtf8Lossy(HResultText(result.buildClass)).c_str());
+  EXPECT_EQ(result.buildClass, S_OK);
+  ASSERT_HRESULT_SUCCEEDED(ReadClass(roots_, Scope::kMachine, &reg));
+  ASSERT_TRUE(reg);
+  EXPECT_TRUE(IEquals(reg->dll, (build / kHandlerDll).native()));
+  EXPECT_FALSE(Exists(before));
+  EXPECT_TRUE(Exists(build));
+}
+
 }  // namespace
 }  // namespace pdft
