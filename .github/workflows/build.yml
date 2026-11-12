@@ -27,6 +27,18 @@
 #                     unless called)
 #   installer-arm64   informational, never blocks: the same tests on a native ARM64 runner (not
 #                     on pull requests, unless called)
+#   signing-rehearsal the signing steps with a throw-away certificate that only that runner
+#                     trusts: both release runtimes and the setup signed with cmake/Sign.cmake,
+#                     every signature checked, the setup installed and its files (the uninstaller
+#                     included) checked, then uninstalled. Nothing it signs is uploaded (not on
+#                     pull requests, unless called)
+#
+# Code signing (docs/BUILDING.md, "Code signing") happens only in a run started by hand or by
+# another workflow with the input sign: true, and only in the installer job, which then runs in
+# the "signing" environment: it signs both release runtimes, then the setup, its uninstaller and
+# Setup's temporary copies, and checks every signature. Pushes and pull requests never sign, and
+# forks have none of the secrets. Repository variable PDFT_SIGNING picks how (cmake/Sign.cmake);
+# empty, a run with sign: true fails rather than producing unsigned files.
 #
 # Repository variables (Settings > Secrets and variables > Actions > Variables), all optional:
 #   PDFT_WIN_X64_RUNNER  x64 runner label. Default windows-2025, which serves Visual Studio 2026
@@ -37,12 +49,18 @@
 #                        too: the job needs only CTest).
 #   PDFT_ARM64_TESTS     "off" skips test-arm64, for when no ARM64 runner is available to the
 #                        repository's plan.
+#   PDFT_SIGNING         how signed runs sign: certificate or artifact-signing (cmake/Sign.cmake).
+#   PDFT_SIGN_PDFIUM     "off" leaves the PDFium DLL unsigned, for a service that signs only the
+#                        project's own files.
+#   PDFT_SIGN_SUBJECT    text the signing certificate's subject must contain (e.g. the
+#                        publisher's name), checked on every signed file.
 #
-# Artifacts are unsigned developer builds, not releases: PdfThumbnails-<arch>-unsigned (the
-# runtime staging tree), symbols-<arch> (its PDBs), tests-<arch> (test bundle for test-arm64),
-# release-<arch> (the release runtime), PdfThumbnails-setup-unsigned (the setup) and
-# setup-earlier (the upgrade test's earlier setup). Each runtime carries BUILDINFO.txt (runner
-# image, Visual Studio, cl, link, CMake and Ninja versions).
+# Artifacts are developer builds, not releases: PdfThumbnails-<arch>-unsigned (the runtime
+# staging tree), symbols-<arch> (its PDBs), tests-<arch> (test bundle for test-arm64),
+# release-<arch> (the release runtime, unsigned), PdfThumbnails-setup-unsigned (the setup; in a
+# signed run PdfThumbnails-setup-signed) and setup-earlier (the upgrade test's earlier setup,
+# never signed). Each runtime carries BUILDINFO.txt (runner image, Visual Studio, cl, link, CMake
+# and Ninja versions).
 
 name: build
 
@@ -61,12 +79,21 @@ on:
       - "!docs/**"
       - "THIRD-PARTY-NOTICES.md"
   workflow_dispatch:
-  workflow_call:   # for later release workflows (M3/M4)
+    inputs:
+      sign:
+        description: Sign the setup and every file in it (needs the signing set-up in docs/BUILDING.md)
+        type: boolean
+        default: false
+  workflow_call:   # for later release workflows
     inputs:
       called:
         description: Leave at the default; it gives a called run a concurrency group of its own.
         type: boolean
         default: true
+      sign:
+        description: Sign the setup and every file in it (needs the signing set-up in docs/BUILDING.md)
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -639,13 +666,39 @@ jobs:
   # download). Also an earlier setup of another build for the upgrade test: the same runtimes with
   # 16 bytes appended to the PDFium DLL (Windows ignores data after a DLL's sections), which gives
   # it another build id and so another build folder.
+  #
+  # A signed run (input sign: true) runs this job in the "signing" environment, whose secrets only
+  # it gets: it signs both runtimes first (the build folder names come from the signed bytes),
+  # then Inno Setup signs the setup, its uninstaller and its temporary copies, and every signature
+  # is checked. In other runs the files stay unsigned and the check only reports.
   installer:
     needs: release
     runs-on: ${{ vars.PDFT_WIN_X64_RUNNER || 'windows-2025' }}
     timeout-minutes: 20
+    environment: ${{ inputs.sign && 'signing' || '' }}
     permissions:
       contents: read
+    env:
+      PDFT_SIGNING: ${{ inputs.sign && vars.PDFT_SIGNING || '' }}
+      PDFT_SIGN_PDFIUM: ${{ vars.PDFT_SIGN_PDFIUM }}
+      SIGN: ${{ inputs.sign && 'ON' || 'OFF' }}
     steps:
+      - name: Signing on or off
+        run: |
+          if "%SIGN%"=="OFF" (echo Signing is off: the setup and its files are unsigned.& exit /b 0)
+          if not defined PDFT_SIGNING (echo ::error::sign is true, but the repository variable PDFT_SIGNING is empty: docs/BUILDING.md, "Code signing"& exit /b 1)
+          echo Signing with %PDFT_SIGNING%.
+
+      # The signing service's own steps, which make its identity usable by SignTool on this runner,
+      # come with the choice of a service (docs/BUILDING.md, "Code signing"). Until then a signed
+      # run stops here instead of producing unsigned files.
+      - name: Make the signing identity available
+        if: env.SIGN == 'ON'
+        run: |
+          echo ::error::PDFT_SIGNING=%PDFT_SIGNING%: this workflow has no steps yet that make a signing identity available on the runner
+          exit /b 1
+
+
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -663,10 +716,23 @@ jobs:
           name: release-arm64
           path: release/arm64
 
+      - name: Sign both runtimes (cmake/Sign.cmake)
+        if: env.SIGN == 'ON'
+        run: |
+          cmake -DDIR=release\x64 -P cmake\Sign.cmake || exit /b 1
+          cmake -DDIR=release\arm64 -P cmake\Sign.cmake || exit /b 1
+
       - name: Build the setup (cmake/Installer.cmake)
         run: |
           cmake --version
-          cmake -DRUNTIME_X64=release\x64 -DRUNTIME_ARM64=release\arm64 -DOUTPUT_DIR=out\setup -P cmake\Installer.cmake
+          cmake -DRUNTIME_X64=release\x64 -DRUNTIME_ARM64=release\arm64 -DOUTPUT_DIR=out\setup -DSIGN=%SIGN% -P cmake\Installer.cmake
+
+      # Required in a signed run: every binary in both runtimes and the setup signed (by the
+      # expected signer, with PDFT_SIGN_SUBJECT) and timestamped. Otherwise it only reports.
+      - name: Check the signatures (cmake/VerifySignatures.cmake)
+        env:
+          SUBJECT: ${{ vars.PDFT_SIGN_SUBJECT }}
+        run: cmake "-DPATHS=release\x64;release\arm64;out\setup" -DREQUIRE=%SIGN% "-DSUBJECT=%SUBJECT%" -P cmake\VerifySignatures.cmake
 
       - name: Build the earlier setup for the upgrade test
         shell: powershell
@@ -682,10 +748,10 @@ jobs:
             -P cmake\Installer.cmake
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Upload PdfThumbnails-setup-unsigned
+      - name: Upload PdfThumbnails-setup-${{ inputs.sign && 'signed' || 'unsigned' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: PdfThumbnails-setup-unsigned
+          name: PdfThumbnails-setup-${{ inputs.sign && 'signed' || 'unsigned' }}
           path: out/setup/
           if-no-files-found: error
           retention-days: 14
@@ -722,10 +788,10 @@ jobs:
           name: PdfThumbnails-x64-unsigned
           path: runtime
 
-      - name: Download PdfThumbnails-setup-unsigned
+      - name: Download PdfThumbnails-setup-${{ inputs.sign && 'signed' || 'unsigned' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: PdfThumbnails-setup-unsigned
+          name: PdfThumbnails-setup-${{ inputs.sign && 'signed' || 'unsigned' }}
           path: setup
 
       - name: Download setup-earlier
@@ -761,6 +827,37 @@ jobs:
           findstr /l /c:"[ system ] nothing left" installer-tests.log >nul || (echo ::error::The installer tests did not reach their end& exit /b 1)
           exit /b 0
 
+      # A signed run: what Setup installs, the uninstaller it writes included, must be signed too.
+      - name: Check out (signed runs)
+        if: inputs.sign
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: src
+
+      - name: Install the signed setup and check the installed files' signatures (signed runs)
+        if: inputs.sign
+        env:
+          SETUP_DIR: setup
+          SCRIPTS: src\cmake
+          SUBJECT: ${{ vars.PDFT_SIGN_SUBJECT }}
+          PDFT_SIGN_PDFIUM: ${{ vars.PDFT_SIGN_PDFIUM }}
+        run: |
+          set "APP=%ProgramFiles%\PdfThumbnails"
+          for %%F in (%SETUP_DIR%\*.exe) do set "SETUP=%%~fF"
+          "%SETUP%" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="%RUNNER_TEMP%\signed-setup.log"
+          set "RC=%ERRORLEVEL%"
+          echo setup -^> exit %RC%
+          rem This runner's account is elevated, so Setup leaves the user's own part to them (208).
+          if not "%RC%"=="0" if not "%RC%"=="208" (type "%RUNNER_TEMP%\signed-setup.log"& exit /b 1)
+          if not exist "%APP%\unins000.exe" (echo ::error::Setup wrote no uninstaller& exit /b 1)
+          cmake "-DPATHS=%APP%" -DREQUIRE=ON "-DSUBJECT=%SUBJECT%" -P %SCRIPTS%\VerifySignatures.cmake
+          set "RC=%ERRORLEVEL%"
+          "%APP%\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+          rem The uninstaller carries on in a copy of itself: wait for the install folder to go.
+          powershell -NoProfile -Command "for ($i = 0; $i -lt 120 -and (Test-Path -LiteralPath $env:APP); $i++) { Start-Sleep 1 }; if (Test-Path -LiteralPath $env:APP) { 'The install folder is still there'; exit 1 }; 'Uninstalled.'"
+          if not "%RC%"=="0" (echo ::error::An installed file is not signed and timestamped& exit /b 1)
+
       - name: Upload logs
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -793,10 +890,10 @@ jobs:
           name: PdfThumbnails-arm64-unsigned
           path: runtime
 
-      - name: Download PdfThumbnails-setup-unsigned
+      - name: Download PdfThumbnails-setup-${{ inputs.sign && 'signed' || 'unsigned' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: PdfThumbnails-setup-unsigned
+          name: PdfThumbnails-setup-${{ inputs.sign && 'signed' || 'unsigned' }}
           path: setup
 
       - name: Download setup-earlier
@@ -827,3 +924,104 @@ jobs:
           path: installer-tests.log
           if-no-files-found: ignore
           retention-days: 7
+  # The signing steps for real, with a certificate made on the runner for this job and trusted
+  # only there (it is added to the runner's trusted roots; the runner is thrown away afterwards),
+  # so the signing plumbing is proven before any signing service is set up: both release
+  # runtimes signed with cmake/Sign.cmake, the setup built with -DSIGN=ON (Inno Setup signs the
+  # setup, its uninstaller and its temporary copies), every signature checked, the setup
+  # installed and every installed file checked, the uninstaller included, then uninstalled.
+  # Timestamps come from a public timestamp server. Nothing it signs is uploaded.
+  signing-rehearsal:
+    needs: release
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || inputs.called) }}
+    runs-on: ${{ vars.PDFT_WIN_X64_RUNNER || 'windows-2025' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      PDFT_SIGNING: certificate
+      PDFT_SIGN_TIMESTAMP_URL: http://timestamp.digicert.com
+      SUBJECT: CN=PdfThumbnails signing rehearsal
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download release-x64
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-x64
+          path: release/x64
+
+      - name: Download release-arm64
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-arm64
+          path: release/arm64
+
+      - name: Make a throw-away certificate that only this runner trusts
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $env:SUBJECT `
+            -CertStoreLocation Cert:\CurrentUser\My -KeyAlgorithm RSA -KeyLength 3072 `
+            -HashAlgorithm SHA256 -KeyExportPolicy NonExportable -NotAfter (Get-Date).AddDays(1)
+          $cer = Join-Path $env:RUNNER_TEMP 'rehearsal.cer'
+          Export-Certificate -Cert $cert -FilePath $cer | Out-Null
+          Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "PDFT_SIGN_CERT_SHA1=$($cert.Thumbprint)`n")
+          "Certificate $($cert.Subject), thumbprint $($cert.Thumbprint), until $($cert.NotAfter)"
+
+      - name: Sign both runtimes (cmake/Sign.cmake)
+        run: |
+          cmake -DDIR=release\x64 -P cmake\Sign.cmake || exit /b 1
+          cmake -DDIR=release\arm64 -P cmake\Sign.cmake || exit /b 1
+          rem A second run keeps the signatures that are there.
+          cmake -DDIR=release\x64 -P cmake\Sign.cmake > sign-again.log || (type sign-again.log& exit /b 1)
+          type sign-again.log
+          findstr /l /c:"-- signed and timestamped:" sign-again.log >nul && (echo ::error::Sign.cmake -DDIR signed a file that was signed already& exit /b 1)
+          exit /b 0
+
+      - name: Build the signed setup (cmake/Installer.cmake -DSIGN=ON)
+        run: cmake -DRUNTIME_X64=release\x64 -DRUNTIME_ARM64=release\arm64 -DOUTPUT_DIR=out\setup -DSIGN=ON -P cmake\Installer.cmake
+
+      - name: Check the signatures (cmake/VerifySignatures.cmake)
+        run: cmake "-DPATHS=release\x64;release\arm64;out\setup" -DREQUIRE=ON "-DSUBJECT=%SUBJECT%" -P cmake\VerifySignatures.cmake
+
+      # The check must catch a file whose signature no longer matches its bytes, and one signed by
+      # another signer.
+      - name: Check that the check fails where it should
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path tampered | Out-Null
+          Copy-Item -LiteralPath release\x64\PdfThumbnails.dll -Destination tampered\
+          $file = [IO.File]::Open("tampered\PdfThumbnails.dll", 'Append', 'Write')
+          try { $file.Write([byte[]](1..16), 0, 16) } finally { $file.Close() }
+          cmake -DPATHS=tampered -DREQUIRE=ON -P cmake\VerifySignatures.cmake
+          if ($LASTEXITCODE -eq 0) { '::error::A DLL with bytes appended after signing passed the check'; exit 1 }
+          cmake -DPATHS=release\x64 -DREQUIRE=ON '-DSUBJECT=CN=Someone else' -P cmake\VerifySignatures.cmake
+          if ($LASTEXITCODE -eq 0) { '::error::Files of another signer passed the check'; exit 1 }
+          'Both refused, as they should be.'
+          exit 0
+
+      - name: Install the signed setup and check the installed files' signatures
+        env:
+          SETUP_DIR: out\setup
+          SCRIPTS: cmake
+        run: |
+          set "APP=%ProgramFiles%\PdfThumbnails"
+          for %%F in (%SETUP_DIR%\*.exe) do set "SETUP=%%~fF"
+          "%SETUP%" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="%RUNNER_TEMP%\signed-setup.log"
+          set "RC=%ERRORLEVEL%"
+          echo setup -^> exit %RC%
+          rem This runner's account is elevated, so Setup leaves the user's own part to them (208).
+          if not "%RC%"=="0" if not "%RC%"=="208" (type "%RUNNER_TEMP%\signed-setup.log"& exit /b 1)
+          if not exist "%APP%\unins000.exe" (echo ::error::Setup wrote no uninstaller& exit /b 1)
+          cmake "-DPATHS=%APP%" -DREQUIRE=ON "-DSUBJECT=%SUBJECT%" -P %SCRIPTS%\VerifySignatures.cmake
+          set "RC=%ERRORLEVEL%"
+          "%APP%\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+          rem The uninstaller carries on in a copy of itself: wait for the install folder to go.
+          powershell -NoProfile -Command "for ($i = 0; $i -lt 120 -and (Test-Path -LiteralPath $env:APP); $i++) { Start-Sleep 1 }; if (Test-Path -LiteralPath $env:APP) { 'The install folder is still there'; exit 1 }; 'Uninstalled.'"
+          if not "%RC%"=="0" (echo ::error::An installed file is not signed and timestamped& exit /b 1)
