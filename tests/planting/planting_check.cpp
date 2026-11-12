@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -98,9 +99,12 @@ std::vector<std::wstring> ListMarkers(const std::wstring& folder) {
   if (find == INVALID_HANDLE_VALUE) return found;
   do {
     const std::wstring marker = data.cFileName;
+    // The canary writes the program's path as UTF-16 (canary.cpp); copied, not cast, since the
+    // bytes need not be aligned for wchar_t.
     const std::string bytes = ReadBytes(folder + L"\\" + marker);
-    const std::wstring program(reinterpret_cast<const wchar_t*>(bytes.data()),
-                               bytes.size() / sizeof(wchar_t));
+    std::wstring program(bytes.size() / sizeof(wchar_t), L'\0');
+    if (!program.empty())
+      std::memcpy(program.data(), bytes.data(), program.size() * sizeof(wchar_t));
     found.push_back(marker + L" (loaded by " + (program.empty() ? L"?" : program) + L")");
   } while (FindNextFileW(find, &data));
   FindClose(find);
