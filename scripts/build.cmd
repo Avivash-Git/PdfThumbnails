@@ -1,8 +1,10 @@
 @echo off
 rem Configures, builds and tests one CMake preset with MSVC (CI runs the same script):
 rem   scripts\build.cmd <preset>      x64-release | x64-debug | arm64-release | arm64-debug |
-rem                                   x64-asan | ci-x64 | ci-arm64 | ci-x64-build
-rem (ci-x64-build: ci-x64 configured and built, no tests; for CodeQL.)
+rem                                   x64-asan | ci-x64 | ci-arm64 | ci-x64-build |
+rem                                   release-x64 | release-arm64
+rem (ci-x64-build: ci-x64 configured and built, no tests; for CodeQL. release-*: the runtime the
+rem installer ships, configured and built: no developer install commands, no tests, no tools.)
 rem Finds Visual Studio with vswhere, sets up the compiler environment with vcvarsall, then runs
 rem "cmake --workflow --preset <preset>" in the repository root. Needs Visual Studio 2026 18.11 or
 rem later (MSVC v145) and CMake 4.3 or later: vcvarsall appends Visual Studio's CMake to PATH, so
@@ -27,9 +29,10 @@ if /i "%PROCESSOR_ARCHITEW6432%"=="ARM64" set "HOST=arm64"
 set "VCARCH=%HOST%_%TARGET%"
 if "%HOST%"=="%TARGET%" set "VCARCH=%TARGET%"
 
-rem ci-* presets require the Spectre-mitigated runtime (PDFT_SPECTRE=ON): pick an install that has it.
+rem ci-* and release-* presets require the Spectre-mitigated runtime (PDFT_SPECTRE=ON): pick an
+rem install that has it.
 set "CIPRESET="
-echo(%PRESET%| findstr /b /i "ci-" >nul && set "CIPRESET=1"
+echo(%PRESET%| findstr /b /i "ci- release-" >nul && set "CIPRESET=1"
 set "REQUIRES=Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
 if "%TARGET%"=="arm64" set "REQUIRES=%REQUIRES% Microsoft.VisualStudio.Component.VC.Tools.ARM64"
 if defined CIPRESET if "%TARGET%"=="x64" set "REQUIRES=%REQUIRES% Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre"
@@ -86,7 +89,7 @@ exit /b %RESULT%
 :usage
 echo usage: scripts\build.cmd ^<preset^>
 echo   presets: x64-release, x64-debug, arm64-release, arm64-debug, x64-asan, ci-x64, ci-arm64,
-echo            ci-x64-build
+echo            ci-x64-build, release-x64, release-arm64
 exit /b 2
 
 :novs

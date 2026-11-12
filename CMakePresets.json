@@ -61,6 +61,20 @@
       "description": "What CI builds: Release, Spectre-mitigated runtime required, deterministic output.",
       "inherits": [ "base", "arm64", "release" ],
       "cacheVariables": { "PDFT_SPECTRE": "ON", "PDFT_REPRODUCIBLE": "ON" }
+    },
+    {
+      "name": "release-x64",
+      "displayName": "Release x64 (what the installer ships)",
+      "description": "ci-x64 without the developer install commands, the tests and the tools: the runtime only.",
+      "inherits": [ "ci-x64" ],
+      "cacheVariables": { "PDFT_DEV_INSTALL": "OFF", "BUILD_TESTING": "OFF", "PDFT_BUILD_TOOLS": "OFF" }
+    },
+    {
+      "name": "release-arm64",
+      "displayName": "Release ARM64 (what the installer ships)",
+      "description": "ci-arm64 without the developer install commands, the tests and the tools: the runtime only.",
+      "inherits": [ "ci-arm64" ],
+      "cacheVariables": { "PDFT_DEV_INSTALL": "OFF", "BUILD_TESTING": "OFF", "PDFT_BUILD_TOOLS": "OFF" }
     }
   ],
   "buildPresets": [
@@ -70,7 +84,9 @@
     { "name": "arm64-release", "configurePreset": "arm64-release" },
     { "name": "x64-asan", "configurePreset": "x64-asan" },
     { "name": "ci-x64", "configurePreset": "ci-x64" },
-    { "name": "ci-arm64", "configurePreset": "ci-arm64" }
+    { "name": "ci-arm64", "configurePreset": "ci-arm64" },
+    { "name": "release-x64", "configurePreset": "release-x64" },
+    { "name": "release-arm64", "configurePreset": "release-arm64" }
   ],
   "testPresets": [
     {
@@ -170,6 +186,20 @@
       "steps": [
         { "type": "configure", "name": "ci-x64" },
         { "type": "build", "name": "ci-x64" }
+      ]
+    },
+    {
+      "name": "release-x64",
+      "steps": [
+        { "type": "configure", "name": "release-x64" },
+        { "type": "build", "name": "release-x64" }
+      ]
+    },
+    {
+      "name": "release-arm64",
+      "steps": [
+        { "type": "configure", "name": "release-arm64" },
+        { "type": "build", "name": "release-arm64" }
       ]
     }
   ]
