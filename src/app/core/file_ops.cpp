@@ -199,6 +199,8 @@ struct RemoveState {
   std::vector<std::filesystem::path> held;  // in use
   HRESULT heldError = S_OK;                 // the first entry in use's error
   HRESULT otherError = S_OK;                // the first other failure
+  KeepAtTop keep = nullptr;                 // files directly in the folder that stay
+  size_t kept = 0;                          // how many stayed
 };
 
 // One pass over |dir|: deletes what it can, without following links, and notes in |state| what
@@ -242,6 +244,8 @@ HRESULT RemovePass(const std::filesystem::path& dir, int depth, RemoveState* sta
         if (!removed) note(child, LastErrorOr(E_FAIL));
       } else if (attributes & FILE_ATTRIBUTE_DIRECTORY) {
         RETURN_IF_FAILED(RemovePass(child, depth + 1, state));
+      } else if (depth == 0 && state->keep && state->keep(name)) {
+        ++state->kept;
       } else {
         const HRESULT hr = DeletePlainFile(child, attributes);
         if (FAILED(hr)) note(child, hr);
@@ -251,7 +255,10 @@ HRESULT RemovePass(const std::filesystem::path& dir, int depth, RemoveState* sta
   }
   if (!RemoveDirectoryW(dir.c_str())) {
     const HRESULT hr = LastErrorOr(E_FAIL);
-    if (hr == HRESULT_FROM_WIN32(ERROR_DIR_NOT_EMPTY) && !state->held.empty()) return S_OK;
+    if (hr == HRESULT_FROM_WIN32(ERROR_DIR_NOT_EMPTY) &&
+        (!state->held.empty() || (depth == 0 && state->kept > 0))) {
+      return S_OK;
+    }
     // In use: a folder some program has open (as its current folder, say).
     if (!IsMissingError(HRESULT_CODE(hr))) note(dir, hr);
   }
@@ -994,7 +1001,7 @@ HRESULT ScheduleDeleteAtRestart(const std::filesystem::path& path) noexcept {
 
 HRESULT RemoveTreeOrTrash(const std::filesystem::path& dir,
                           const std::filesystem::path& trashParent, DWORD retryMs,
-                          RemoveOutcome* outcome) noexcept try {
+                          RemoveOutcome* outcome, KeepAtTop keep) noexcept try {
   *outcome = RemoveOutcome{};
   RETURN_HR_IF(E_INVALIDARG,
                !dir.is_absolute() || (!trashParent.empty() && !trashParent.is_absolute()));
@@ -1016,6 +1023,7 @@ HRESULT RemoveTreeOrTrash(const std::filesystem::path& dir,
   const ULONGLONG deadline = GetTickCount64() + retryMs;
   for (;;) {
     state = RemoveState{};
+    state.keep = keep;
     RETURN_IF_FAILED(RemovePass(folder, 0, &state));
     const ULONGLONG now = GetTickCount64();
     if (state.held.empty() || now >= deadline) break;
@@ -1039,6 +1047,7 @@ HRESULT RemoveTreeOrTrash(const std::filesystem::path& dir,
       }
       // What is left of |dir| now holds nothing in use, except what could not be moved.
       state = RemoveState{};
+      state.keep = keep;
       RETURN_IF_FAILED(RemovePass(folder, 0, &state));
       NoteFailure(state.otherError, &other);
       if (trashed.empty()) {
@@ -1056,6 +1065,7 @@ HRESULT RemoveTreeOrTrash(const std::filesystem::path& dir,
   }
   if (!state.held.empty()) outcome->restartPending = true;
   outcome->left = std::move(state.held);
+  outcome->kept = state.kept;
   outcome->removed = !Exists(folder);
   return other;
 }

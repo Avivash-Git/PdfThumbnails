@@ -85,7 +85,11 @@ struct RemoveOutcome {
   bool restartPending = false;
   std::filesystem::path trash;              // the trash folder, when one was made
   std::vector<std::filesystem::path> left;  // files left in place, in use
+  size_t kept = 0;  // files directly in |dir| that its |keep| left (then |dir| stays too)
 };
+
+// Which files directly in a folder RemoveTreeOrTrash leaves (pure): those whose name it accepts.
+using KeepAtTop = bool (*)(std::wstring_view name) noexcept;
 
 // Removes the real folder |dir| (never a link or junction itself: that fails with
 // HRESULT_FROM_WIN32(ERROR_STOPPED_ON_SYMLINK)) with everything in it, without following links
@@ -96,10 +100,11 @@ struct RemoveOutcome {
 //   restart, and |dir| removed;
 // - otherwise left in place (outcome->left), with |dir| and the folders that hold them.
 // A missing |dir| counts as removed. Fails for other errors (access denied to a file that is not
-// in use, for example), after removing what it could.
+// in use, for example), after removing what it could. With |keep|, the plain files directly in
+// |dir| whose names it accepts stay where they are, and so does |dir| (outcome->kept).
 [[nodiscard]] HRESULT RemoveTreeOrTrash(const std::filesystem::path& dir,
                                         const std::filesystem::path& trashParent, DWORD retryMs,
-                                        RemoveOutcome* outcome) noexcept;
+                                        RemoveOutcome* outcome, KeepAtTop keep = nullptr) noexcept;
 
 // ---- The clean-up at the next sign-in (HKCU RunOnce) ----------------------------------------
 // A folder that cannot be removed now (a program in it is running, a DLL in it is loaded) is

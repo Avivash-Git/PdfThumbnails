@@ -31,14 +31,15 @@
 //
 // machine-uninstall (elevated): the class for all users; every user's check task (the shared task
 // folder) and 1.x's task; the install folder for all users, files in use (its own executable
-// among them) moved into a trash folder and deleted at the next restart; then, in every user hive
-// that is loaded (HKEY_USERS\S-1-5-21-..., and its _Classes hive), the slots that name the
-// handler, the handler's class key and the product key. Those keys are deleted without following
-// any link and within DeleteRegistryTree's bounds (registry_roots.h): a link or a tree past them
-// is left as it is and reported ("left"). Each part that fails is reported as not done and the
-// step goes on; it exits with the first one's HRESULT. Users who are not signed in keep their
-// slots and settings; a slot naming a class that is gone shows no thumbnail and hides only other
-// handlers registered for .pdf for all users.
+// among them) moved into a trash folder and deleted at the next restart (while the installer has
+// an install for all users, its uninstaller's own files and the folder are left to it); then, in
+// every user hive that is loaded (HKEY_USERS\S-1-5-21-..., and its _Classes hive), the slots that
+// name the handler, the handler's class key and the product key. Those keys are deleted without
+// following any link and within DeleteRegistryTree's bounds (registry_roots.h): a link or a tree
+// past them is left as it is and reported ("left"). Each part that fails is reported as not done
+// and the step goes on; it exits with the first one's HRESULT. Users who are not signed in keep
+// their slots and settings; a slot naming a class that is gone shows no thumbnail and hides only
+// other handlers registered for .pdf for all users.
 //
 // --uninstall-cleanup (the installer's uninstall step): the machine-uninstall steps when it runs
 // elevated with the administrator rights the elevated side requires of its own token
@@ -155,6 +156,9 @@ struct MachineUninstallResult {
   // Hives in which a key was left as it was (kRegistryTreeLeftHr: a link, or a tree past the
   // bounds). Also listed in |failures| as "hive left".
   size_t hivesLeft = 0;
+  // The installer has an install for all users: its own files in the install folder were left
+  // to its uninstaller (IsInnoUninstallerFileName), and so was the folder.
+  bool installerFiles = false;
   RemoveOutcome root;
   RemoveOutcome legacyRoot;
   bool restartPending = false;

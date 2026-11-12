@@ -885,6 +885,18 @@ TEST(Inno, UninstallString) {
   }
 }
 
+TEST(Inno, UninstallerFileNames) {
+  for (const wchar_t* name :
+       {L"unins000.exe", L"unins000.dat", L"unins000.msg", L"UNINS001.EXE", L"unins999.Dat"}) {
+    EXPECT_TRUE(IsInnoUninstallerFileName(name)) << name;
+  }
+  for (const wchar_t* name :
+       {L"", L"unins.exe", L"unins00.exe", L"unins0000.exe", L"unins00a.exe", L"unins000.dll",
+        L"unins000.exe.bak", L"xunins000.exe", L"unins000", L"PdfThumbnailsSettings.exe"}) {
+    EXPECT_FALSE(IsInnoUninstallerFileName(name)) << name;
+  }
+}
+
 TEST(Inno, Arguments) {
   EXPECT_EQ(InnoUninstallArguments(true), L"/SILENT");
   EXPECT_EQ(InnoUninstallArguments(false), L"");

@@ -74,6 +74,16 @@ HRESULT ParseInnoUninstallString(std::wstring_view text, std::filesystem::path* 
   return S_OK;
 }
 
+bool IsInnoUninstallerFileName(std::wstring_view name) noexcept {
+  constexpr std::wstring_view kStart = L"unins";
+  if (name.size() != kStart.size() + 3 + 4 || !IStartsWith(name, kStart)) return false;
+  for (size_t i = kStart.size(); i < kStart.size() + 3; ++i) {
+    if (name[i] < L'0' || name[i] > L'9') return false;
+  }
+  const std::wstring_view extension = name.substr(kStart.size() + 3);
+  return IEquals(extension, L".exe") || IEquals(extension, L".dat") || IEquals(extension, L".msg");
+}
+
 std::wstring InnoUninstallArguments(bool silent) { return silent ? L"/SILENT" : L""; }
 
 }  // namespace pdft

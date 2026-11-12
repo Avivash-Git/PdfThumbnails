@@ -42,6 +42,11 @@ struct InnoInstall {
 // std::bad_alloc.
 [[nodiscard]] HRESULT ParseInnoUninstallString(std::wstring_view text, std::filesystem::path* exe);
 
+// Inno Setup's own files in the folder it installed to (pure): "unins<3 digits>" with .exe, .dat
+// or .msg, in any case. The uninstall's part for all users leaves them, and so the folder, to the
+// uninstaller, which still has them open and deletes them last.
+bool IsInnoUninstallerFileName(std::wstring_view name) noexcept;
+
 // The uninstaller's arguments (pure): "/SILENT" when the user already said yes (no questions,
 // only a progress window), else none.
 std::wstring InnoUninstallArguments(bool silent);

@@ -175,7 +175,11 @@ void CleanLoadedHives(HKEY users, MachineUninstallResult* result,
 
 // One report line about a folder removal.
 void ReportRoot(ElevatedReporter& report, const wchar_t* what, const RemoveOutcome& outcome) {
-  if (!outcome.trash.empty()) {
+  if (outcome.kept > 0) {
+    report.Line(std::wstring(what) + L" emptied but for the installer's own files, which its " +
+                L"uninstaller removes" +
+                (outcome.trash.empty() ? L"" : L"; files in use wait in a trash folder"));
+  } else if (!outcome.trash.empty()) {
     report.Line(std::wstring(what) + L" removed; files in use wait in a trash folder");
   } else if (!outcome.left.empty()) {
     report.Line(std::wstring(what) + L" left: " + std::to_wstring(outcome.left.size()) +
@@ -365,14 +369,20 @@ HRESULT UninstallForAllUsers(const MachineUninstallOptions& options, const Regis
   }
 
   // The install folders before the other users' hives: whatever those users made in their hives,
-  // nothing of the part for all users is left waiting for it.
+  // nothing of the part for all users is left waiting for it. While the installer has an install
+  // for all users, this runs from its uninstaller, which still has its own files open in the
+  // install folder and deletes them, and the folder, itself afterwards.
   const std::filesystem::path trashParent =
       options.trashParent.empty() ? options.machineRoot.parent_path() : options.trashParent;
+  std::optional<InnoInstall> inno;
+  if (const HRESULT hr = FindInnoInstall(roots, &inno); FAILED(hr)) note(L"installer", hr);
+  result->installerFiles = inno && inno->scope == Scope::kMachine;
   if (const HRESULT hr = CheckNoReparsePoints(options.machineRoot, {}); FAILED(hr)) {
     note(L"folder", hr);
   } else {
     note(L"folder",
-         RemoveTreeOrTrash(options.machineRoot, trashParent, options.retryMs, &result->root));
+         RemoveTreeOrTrash(options.machineRoot, trashParent, options.retryMs, &result->root,
+                           result->installerFiles ? IsInnoUninstallerFileName : nullptr));
   }
   if (!options.legacyMachineRoot.empty() && options.legacyMachineRoot.has_relative_path() &&
       !IEquals(options.legacyMachineRoot.lexically_normal().native(),

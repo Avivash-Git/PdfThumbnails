@@ -20,6 +20,7 @@
 #include <sddl.h>
 #include <wil/resource.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -31,6 +32,7 @@
 
 #include "child_process.h"
 #include "fake_probes.h"
+#include "inno.h"
 #include "instance.h"
 #include "migrate_v1.h"
 #include "pe_info.h"
@@ -596,6 +598,58 @@ TEST_F(Registration, TheStepForAllUsersLeavesALinkInAUsersHive) {
             std::vector<std::wstring>{L"hive left: " + HResultText(kRegistryTreeLeftHr)});
   EXPECT_FALSE(KeyExists(hive.get(), ClassKeyPath()));
   EXPECT_EQ(GetDword(hive.get(), L"Software\\Policies\\Rules", L"rule"), 7u);
+}
+
+// While the installer has an install for all users (its record under HKLM), the part for all
+// users leaves its uninstaller's own files in the install folder, and so the folder, to it: the
+// uninstaller runs this step and deletes them itself afterwards. Without the record they go too.
+TEST_F(Registration, ThePartForAllUsersLeavesTheInstallersFiles) {
+  test::TempDir temp(L"registration");
+  ASSERT_TRUE(temp.ok());
+  const std::filesystem::path root = std::filesystem::path(temp.path()) / L"machine";
+  const auto plant = [&root] {
+    for (const std::filesystem::path& dir :
+         {root, root / L"app", root / L"app" / L"2.0.0.0-1a2b3c4d"}) {
+      CreateDirectoryW(dir.c_str(), nullptr);
+    }
+    for (const std::filesystem::path& file :
+         {root / kSettingsExe, root / kCliExe, root / L"unins000.exe", root / L"unins000.dat",
+          root / L"app" / L"2.0.0.0-1a2b3c4d" / kHandlerDll}) {
+      wil::unique_hfile made(CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                         FILE_ATTRIBUTE_NORMAL, nullptr));
+      ASSERT_TRUE(made) << file.string();
+    }
+  };
+  plant();
+  SetString(sandbox_.machine(), InnoUninstallKey(), L"UninstallString",
+            L"\"" + (root / L"unins000.exe").native() + L"\"");
+  MachineUninstallOptions options;
+  options.machineRoot = root;
+  options.taskFolder.clear();
+  options.users = nullptr;
+  options.retryMs = 0;
+  MachineUninstallResult result;
+  ASSERT_HRESULT_SUCCEEDED(UninstallForAllUsers(options, roots_, &result));
+  EXPECT_EQ(result.firstError, S_OK);
+  EXPECT_TRUE(result.installerFiles);
+  EXPECT_EQ(result.root.kept, 2u);
+  EXPECT_FALSE(result.root.removed);
+  std::vector<std::wstring> names;
+  for (const auto& entry : std::filesystem::directory_iterator(root)) {
+    names.push_back(entry.path().filename().native());
+  }
+  std::sort(names.begin(), names.end());
+  EXPECT_EQ(names, (std::vector<std::wstring>{L"unins000.dat", L"unins000.exe"}));
+
+  // A record of an install for one user does not count.
+  ASSERT_EQ(RegDeleteTreeW(sandbox_.machine(), InnoUninstallKey().c_str()), ERROR_SUCCESS);
+  SetString(sandbox_.user(), InnoUninstallKey(), L"UninstallString", L"\"C:\\x\\unins000.exe\"");
+  plant();
+  ASSERT_HRESULT_SUCCEEDED(UninstallForAllUsers(options, roots_, &result));
+  EXPECT_FALSE(result.installerFiles);
+  EXPECT_EQ(result.root.kept, 0u);
+  EXPECT_TRUE(result.root.removed);
+  EXPECT_FALSE(std::filesystem::exists(root));
 }
 
 TEST_F(Registration, TheCleanupStepGathersNothingForTheUsersPartWhenElevated) {

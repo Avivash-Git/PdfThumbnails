@@ -251,6 +251,35 @@ TEST(RemoveTree, RemovesEverythingButFollowsNoLink) {
   EXPECT_EQ(names, std::vector<std::wstring>{L"outside"});  // no trash folder either
 }
 
+// Only plain files directly in the folder are kept, the folder with them; the same names deeper
+// down go.
+bool KeepTheKeepers(std::wstring_view name) noexcept { return name.starts_with(L"keep"); }
+
+TEST(RemoveTree, KeepsWhatItIsToldToKeepAtTheTop) {
+  test::TempDir dir(L"remove");
+  ASSERT_TRUE(dir.ok());
+  const path tree = path(dir.path()) / L"tree";
+  ASSERT_TRUE(MakeDir(tree));
+  ASSERT_TRUE(MakeDir(tree / L"sub"));
+  ASSERT_TRUE(MakeDir(tree / L"keep-folder"));
+  ASSERT_TRUE(WriteFileText(tree / L"keep.dat", "k"));
+  ASSERT_TRUE(WriteFileText(tree / L"keep.exe", "k"));
+  ASSERT_TRUE(WriteFileText(tree / L"other.exe", "o"));
+  ASSERT_TRUE(WriteFileText(tree / L"sub" / L"keep.dat", "s"));
+  RemoveOutcome outcome;
+  EXPECT_EQ(RemoveTreeOrTrash(tree, {}, 0, &outcome, KeepTheKeepers), S_OK);
+  EXPECT_FALSE(outcome.removed);
+  EXPECT_EQ(outcome.kept, 2u);
+  EXPECT_FALSE(outcome.restartPending);
+  EXPECT_TRUE(outcome.left.empty());
+  EXPECT_EQ(Listing(tree), (std::vector<std::wstring>{L"keep.dat", L"keep.exe"}));
+  // Without them, the folder goes.
+  EXPECT_EQ(RemoveTreeOrTrash(tree, {}, 0, &outcome), S_OK);
+  EXPECT_TRUE(outcome.removed);
+  EXPECT_EQ(outcome.kept, 0u);
+  EXPECT_FALSE(Exists(tree));
+}
+
 TEST(RemoveTree, NeverAJunctionItself) {
   test::TempDir dir(L"remove");
   ASSERT_TRUE(dir.ok());
