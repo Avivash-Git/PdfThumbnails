@@ -61,6 +61,19 @@ The message says why, and nothing has been changed:
 Exit code 4 means another check or change was still running; try again in a moment. The other
 codes are in [CLI.md](CLI.md#exit-codes).
 
+## Setup did not finish
+
+Setup's log is in `%TEMP%`, named `Setup Log <date> #<n>.txt`; it has the output and exit codes
+of the two steps Setup runs. Its own exit codes:
+
+- **200 + n, with a message that Setup was started as administrator** (208). The part for all
+  users is installed, but your own account is not set up. From a normal (not administrator)
+  prompt, run `"C:\Program Files\PdfThumbnails\PdfThumbnailsCli.exe" --setup-user`.
+- **Another 200 + n.** Your own account's step failed. Open PdfThumbnails from the Start menu: the
+  status says what is missing, and Fix repairs it.
+- **100 + n.** The part for all users is not complete. Run Setup again; if that fails too, open
+  a bug report with the log.
+
 ## Garbled characters in PowerShell
 
 The program's own words are plain ASCII. A path with other characters (Greek, Hebrew, Japanese,

@@ -6,6 +6,7 @@ need someone at the PC: what they do, what they change on it, and how to stop th
 - [The thumbnail refresh experiment](#the-thumbnail-refresh-experiment): how `--refresh` was
   chosen, and its results.
 - [The settings window](#the-settings-window): what only a person can judge.
+- [The installer](#the-installer): Setup and its uninstaller on a real PC.
 - [The whole pass before a release](#the-whole-pass-before-a-release): install, use, take-over,
   uninstall and reinstall on a real PC.
 
@@ -286,6 +287,33 @@ the product.
   open the settings from File Explorer instead.
 - **Save** with a new zoom refreshes thumbnails with progress; Cancel stops it and keeps the zoom.
 - **Closing** with unsaved changes asks; closing during a refresh asks whether to stop it.
+
+## The installer
+
+CI runs the setup for real on a throw-away account (`Installer.*`, see
+[The installer](BUILDING.md#tests-1)). These checks need a person: the wizard, Installed apps and
+the Start menu as Windows shows them, and the upgrade of the build already on the PC. Setup asks
+for administrator rights once; the uninstall once more. `<setup>` is
+`PdfThumbnails-<version>-setup.exe`, built as [The installer](BUILDING.md#the-installer) says or
+taken from a CI run's `PdfThumbnails-setup-unsigned` artifact.
+
+1. **Before.** `"C:\Program Files\PdfThumbnails\PdfThumbnailsCli.exe" --status` and `--zoom`:
+   note the zoom. A developer install, 1.x or nothing is fine.
+2. **Setup.** Double-click `<setup>`. An unsigned setup shows SmartScreen's "Windows protected
+   your PC" (More info, then Run anyway). One administrator prompt; the wizard asks no folder and
+   no Start menu group; it closes PdfThumbnails' own programs if they are running; the last page
+   offers to open the settings.
+3. **Installed apps** (Settings > Apps > Installed apps) lists PdfThumbnails once, with its
+   version, publisher and icon. The Start menu has **PdfThumbnails**, which opens the window.
+4. **Status.** `--status` ends with `Result: healthy` and shows the zoom from step 1. Thumbnails
+   in a folder of PDFs show at that zoom.
+5. **Again over itself.** Run `<setup>` once more: it finishes without asking to close anything
+   File Explorer uses, and the status stays healthy.
+6. **Uninstall** from Installed apps: one administrator prompt, no question about a restart.
+   `C:\Program Files\PdfThumbnails` is gone (or holds only a trash folder next to it until the
+   restart), the Start menu entry and the Installed apps entry are gone, and PDFs show their
+   app's icon once File Explorer makes their thumbnails again.
+7. **Reinstall** with `<setup>` and set the zoom again (`--zoom <n>`): the uninstall removed it.
 
 ## The whole pass before a release
 

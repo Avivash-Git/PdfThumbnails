@@ -11,6 +11,10 @@
 - `--diagnostics` and Copy diagnostics: a report for bug reports with personal details masked.
 - `--status --json`, for scripts.
 - An ARM64 build.
+- An installer: one setup for x64 and ARM64 PCs that installs for all users, with an entry in
+  Installed apps and a Start menu shortcut. It upgrades an earlier 2.x in place and keeps every
+  user's settings, and its uninstaller removes the product for every user who is signed in.
+  Silent: `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
 
 ### Changed
 
@@ -19,6 +23,8 @@ These are the places where 2.0 behaves differently from 1.1 on purpose.
 - **The manager.** The PowerShell manager (`PdfThumbnails.cmd` and `PdfThumbnails.ps1`) is
   replaced by `PdfThumbnailsSettings.exe` and `PdfThumbnailsCli.exe`.
   [The command line](docs/CLI.md) lists the commands and how the 1.x ones map to them.
+- **Installing.** 1.x was installed with `PdfThumbnails.cmd install`; 2.0 has an installer (or
+  `--install` in a developer build), and appears in Installed apps.
 - **Upgrading.** Installing 2.0 over 1.x keeps the zoom and removes 1.x: its build folders, its
   task, its sign-in clean-up, and the files it copied into
   `%LOCALAPPDATA%\Programs\PdfThumbnails` (each only while its contents are still 1.x's own).

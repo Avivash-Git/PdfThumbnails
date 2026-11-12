@@ -129,6 +129,7 @@ outside a terminal whose registry is virtualized.
 | `ci-x64` | x64 Release as CI builds it: Spectre mitigations required, deterministic output (`/Brepro`) | the same as `x64-release` |
 | `ci-arm64` | ARM64 Release as CI builds it | `gate` only |
 | `ci-x64-build` | `ci-x64`, configured and built in its folder | none (CodeQL's build) |
+| `release-x64`, `release-arm64` | what the [installer](#the-installer) ships: `ci-x64` and `ci-arm64` without the developer install commands (`PDFT_DEV_INSTALL=OFF`), the tests and the tools; only the two DLLs and the two executables | none |
 
 All presets use Ninja, `cl.exe` and the static C runtime, and treat compiler and linker warnings
 as errors in the project's own code. Each preset has its own folder, `out\build\<preset>`. Don't
@@ -433,7 +434,7 @@ account and its profile were deleted.
 ## Installing a build (developer install)
 
 Developer builds (`PDFT_DEV_INSTALL=ON`, the default) install themselves from the folder the
-executables are in, laid out like the installer will lay them out:
+executables are in, laid out the way the [installer](#the-installer) lays them out:
 
 ```bat
 cmake --install out\build\x64-release --prefix out\stage\runtime --component runtime
@@ -604,6 +605,109 @@ the first `--install --machine` replaces it for real, so back up 1.1's state fir
    users and that whole folder too. Remove 1.1 with its own `PdfThumbnails.cmd uninstall`, from
    the same release folder.
 
+## The installer
+
+`installer\PdfThumbnails.iss` is an [Inno Setup](https://jrsoftware.org/isinfo.php) script for
+one setup that installs on x64 and ARM64 PCs, for all users of the PC: into
+`C:\Program Files\PdfThumbnails` (always there: the administrator steps run only from that
+folder), with an entry in Installed apps and a Start menu shortcut. There is no install for one
+user only: on current Windows 11 builds the thumbnail process loads only what is installed for
+all users. Installing over an earlier 2.x, from the installer or a developer install, upgrades it
+in place and keeps every user's settings; installing over 1.x replaces it and keeps its zoom, as
+[`--install`](#installing-a-build-developer-install) does.
+
+### Building it
+
+You need Inno Setup 6.3 or later (GitHub's Windows runners have it) and the runtimes of both
+architectures from the release presets:
+
+```bat
+scripts\build.cmd release-x64
+scripts\build.cmd release-arm64
+cmake --install out\build\release-x64 --prefix out\stage\release-x64 --component runtime
+cmake --install out\build\release-arm64 --prefix out\stage\release-arm64 --component runtime
+cmake -DRUNTIME_X64=out\stage\release-x64 -DRUNTIME_ARM64=out\stage\release-arm64 -DOUTPUT_DIR=out\setup -P cmake\Installer.cmake
+```
+
+The last command (`cmake/Installer.cmake`):
+
+1. checks both runtimes: every file there, each binary made for its architecture, one version;
+2. computes each build's folder name, `<FileVersion>-<build id>`, from its DLLs
+   (`cmake/BuildId.cmake`), so for signed releases it must run after signing;
+3. finds the Inno Setup compiler: `-DISCC=<path to ISCC.exe>`, else Inno Setup 7, else 6, else
+   `ISCC` on `PATH`, and prints its version;
+4. compiles the script with every name, version and path passed as `/D` values (the names come
+   from `cmake/ProjectInfo.cmake`; the script holds none of them);
+5. prints the setup's path and SHA-256: `out\setup\PdfThumbnails-<version>-setup.exe`.
+
+`-DOUTPUT_BASE=<file name>` names the setup differently, and `-DVERSION_TEXT=<text>` replaces the
+version Installed apps shows (the programs' `ProductVersion`).
+
+### What it does
+
+- **Files.** The two executables and the notices go into the install folder, the two DLLs into
+  `app\<build folder>`, as `--install` lays them out. A DLL that is already there is the same
+  build (its folder is named after the DLLs' bytes) and File Explorer's thumbnail process may have
+  it loaded, so it is never replaced. Nothing is ever queued for deletion at a restart.
+- **The registry.** Setup writes none of the product's values. After the files it runs the
+  settings program's own steps from System32: `--setup-machine --build <build folder>` as
+  administrator (the class for all users pointed at the new build, the task folder, what 1.x and
+  older builds left; the old build folders go, or wait in a trash folder for the restart while
+  they are in use), then `--setup-user` as the user who started Setup (the `.pdf` settings, the
+  zoom, the check task, what 1.x left in their profile). Setup's log holds the first step's output
+  and both exit codes.
+- **Other users of the PC.** The `.pdf` settings and the check task are each user's own, and Setup
+  sets up only the user who started it, as `--install` does. Another user gets thumbnails once
+  they run `PdfThumbnailsCli.exe --setup-user`, or open the settings window, choose Fix and turn
+  the checks on.
+- **Programs that are running.** Setup closes the product's own programs in the install folder
+  through the Restart Manager, and nothing else: never File Explorer or its thumbnail process.
+  There is no AppMutex, since a scheduled check holds the app's names for up to 30 seconds while
+  it waits for another one, which would stop Setup on a question even when it runs silently.
+- **Uninstall.** The uninstaller first runs `--uninstall-cleanup` as administrator: the class,
+  every user's check task, the settings and `.pdf` slots of every user who is signed in, and
+  everything in the install folder except the uninstaller's own files (`unins000.*`), which it
+  then deletes with the folder. Files in use wait in a trash folder for the restart. It does not
+  rebuild the thumbnail cache, so thumbnails File Explorer already made stay until it makes them
+  again. Each user's data folder (the log) goes at their next sign-in.
+
+| Task | Command |
+|---|---|
+| Install silently | `PdfThumbnails-<version>-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART` (add `/LOG=<file>` for a log of your choice) |
+| Uninstall | Settings > Apps > Installed apps; the settings window's Uninstall or `PdfThumbnailsCli.exe --uninstall`, which run the same uninstaller |
+| Uninstall silently | `"C:\Program Files\PdfThumbnails\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART` |
+
+Setup's exit codes are Inno Setup's own (0 when it installed), and two of its own:
+
+| Code | Meaning |
+|---|---|
+| 100 + n | The files are installed, but `--setup-machine` exited n (not 0 or 1): the part for all users is not complete. Setup's log says why. |
+| 200 + n | The part for all users is done, but `--setup-user` exited n. 208: Setup was started as administrator ("Run as administrator", or a tool that installs as administrator), so it could not set up the signed-in user's own account; that user runs `"C:\Program Files\PdfThumbnails\PdfThumbnailsCli.exe" --setup-user` from a normal prompt. (Every other user of the PC needs that too, or the window's Fix and Checks, since Setup sets up only the user who started it.) |
+
+Setup writes its log to `%TEMP%\Setup Log <date> #<n>.txt` every time.
+
+### Tests
+
+The system tests' `Installer.*` cases (CI's `installer-x64` job, and `installer-arm64` on an ARM64
+runner, informationally) run a setup for real, started by the test account with its limited
+token, so Setup asks for administrator rights through UAC and runs the user's step as that
+account: an install and the uninstall from Installed apps, the uninstall from the program, an
+upgrade over an earlier setup of another build (which keeps the zoom and checks the user set) and
+over a developer install, 1.1 replaced for all users, and Setup started as administrator (exit
+code 208). Each checks the record in Installed apps, the Start menu shortcut, the class, the
+user's part, the status, and that nothing is left after the uninstall. Like the other system
+tests, run them only on CI or on a throw-away virtual machine, with the variables of
+[Staging](#staging-install-components) and:
+
+- `PDFT_SYSTEM_SETUP`: the setup to test. Without it, `Installer.*` skips.
+- `PDFT_SYSTEM_SETUP_EARLIER`: an earlier setup of another build, for the upgrade test. CI makes
+  one from the same runtimes with 16 bytes appended to the PDFium DLL, which gives it another
+  build id.
+
+```bat
+pdft_system_tests.exe --gtest_filter=Installer.*
+```
+
 ## Formatting
 
 The C++ code follows `.clang-format` (Google style, 100 columns). Any clang-format 23.x gives
@@ -631,6 +735,10 @@ don't keep the token.
 | `build (x64-debug)` | x64 | not on pull requests, unless called | `scripts\build.cmd x64-debug` |
 | `test-arm64` | ARM64 | not on pull requests, unless called | the ARM64 test bundle, run natively with `ctest --test-dir` |
 | `system-x64` | x64 | not on pull requests, unless called; informational (never fails the run) | the `system` tests from the `tests-x64` bundle against the `PdfThumbnails-x64-unsigned` artifact: a real install, use and uninstall on the throw-away runner (see [Tests](#tests)) |
+| `release (x64)`, `release (arm64)` | x64 | always | `scripts\build.cmd release-<arch>`: the runtime the installer ships |
+| `installer` | x64 | always | the setup from both release runtimes with the image's Inno Setup (`cmake/Installer.cmake`), and an earlier setup of another build for the upgrade test |
+| `installer-x64` | x64 | not on pull requests, unless called | the [installer's system tests](#tests-1) (`Installer.*` from the `tests-x64` bundle) on the throw-away runner; a skipped test fails the job |
+| `installer-arm64` | ARM64 | not on pull requests, unless called; informational | the same on a native ARM64 runner, which installs the setup's ARM64 files |
 
 It runs on pushes to `main` and on pull requests (except when only Markdown files or `docs\`
 changed), by hand (`workflow_dispatch`), and when another workflow calls it (`workflow_call`;
@@ -702,7 +810,10 @@ Details:
   | `PdfThumbnails-x64-unsigned`, `PdfThumbnails-arm64-unsigned` | the `runtime` component | 14 days |
   | `symbols-x64`, `symbols-arm64` | the `symbols` component | 14 days |
   | `tests-x64`, `tests-arm64` | the `tests` component (`test-arm64` downloads it) | 3 days |
-  | `logs-<job>` | test logs, configure log and `buildinfo.txt`, only when a job fails (`logs-system-x64`: the system tests' log, always) | 7 days |
+  | `release-x64`, `release-arm64` | the `runtime` component of the release presets | 3 days |
+  | `PdfThumbnails-setup-unsigned` | the setup, `PdfThumbnails-<version>-setup.exe` | 14 days |
+  | `setup-earlier` | the upgrade test's earlier setup | 3 days |
+  | `logs-<job>` | test logs, configure log and `buildinfo.txt`, only when a job fails (`logs-system-x64`, `logs-installer-x64` and `logs-installer-arm64`: the system tests' logs, always) | 7 days |
 
   Each artifact contains `BUILDINFO.txt`: the commit, the runner image, and the Visual Studio,
   MSVC, `cl`, `link`, CMake and Ninja versions.
@@ -714,7 +825,7 @@ Repository variables (Settings > Secrets and variables > Actions > Variables), a
 | `PDFT_WIN_X64_RUNNER` | `windows-2025` | The x64 runner label. `windows-2025` has Visual Studio 2026 (MSVC v145), private repositories included; the build uses the image's own CMake 4.x, which comes first on `PATH`. |
 | `PDFT_VS_VERSION` | empty (newest 18.11 or later) | Passed to `scripts\build.cmd`, e.g. `[18.11,19.0)` to stay on Visual Studio 2026. |
 | `PDFT_ARM64_RUNNER` | `windows-11-arm` | The ARM64 runner label (`windows-11-vs2026-arm` works too; the job needs only CTest). |
-| `PDFT_ARM64_TESTS` | on | Set to `off` to skip `test-arm64`, for example when the account's plan has no ARM64 runners. |
+| `PDFT_ARM64_TESTS` | on | Set to `off` to skip `test-arm64` and `installer-arm64`, for example when the account's plan has no ARM64 runners. |
 
 ### `format.yml`
 

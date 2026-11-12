@@ -3,8 +3,8 @@
 First-page thumbnails for PDF files in Windows File Explorer, working alongside
 [PdfCraft](https://github.com/storytold/pdfcraft) or any other PDF app.
 
-**Status: pre-release.** There is no installer or signed download yet, so for now you build it
-from source. See [Limits](#limits) for what that means with Smart App Control.
+**Status: pre-release.** There is an installer, but no signed download yet, so for now you build
+it from source. See [Limits](#limits) for what that means with Smart App Control.
 
 ## What you get
 
@@ -25,10 +25,18 @@ registered for the `.pdf` file type, and the PDF app never even runs while a fol
 PdfCraft doesn't ship a handler, so PDFs show a plain icon. This project is that handler. It
 leaves PdfCraft's own settings alone, so PdfCraft updates don't disturb it.
 
-## Install from source
+## Install
 
-You need Visual Studio 2026, version 18.11 or later (the Build Tools are enough), with the
-components in `.vsconfig`. From a Command Prompt in the repository folder:
+**The installer**, `PdfThumbnails-<version>-setup.exe`, installs for all users of the PC (it asks
+for administrator rights once) and puts PdfThumbnails in Settings > Apps > Installed apps and the
+Start menu. The same setup serves x64 and ARM64 PCs. It replaces a 1.x install and keeps its zoom,
+and a newer setup installs over an older one and keeps your settings. Until the first release
+there is no download: [build the installer](docs/BUILDING.md#the-installer) from source, or install
+straight from a build as below. For a silent install: `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
+
+**From source**, without the installer: you need Visual Studio 2026, version 18.11 or later (the
+Build Tools are enough), with the components in `.vsconfig`. From a Command Prompt in the
+repository folder:
 
 ```bat
 scripts\build.cmd x64-release
@@ -42,7 +50,8 @@ details, including ARM64 builds and installing for one user only.
 
 ## Use it
 
-Start `PdfThumbnailsSettings.exe` from `C:\Program Files\PdfThumbnails`.
+Start **PdfThumbnails** from the Start menu (after a developer install: `PdfThumbnailsSettings.exe`
+in `C:\Program Files\PdfThumbnails`).
 
 ![The settings window: a zoom slider with a preview of a document and a slide, the two checks, and
 the status](docs/images/settings-window.png)
@@ -73,7 +82,10 @@ thumbnail cache afresh, which restarts File Explorer and reopens its folder wind
 per-user pieces. If another program has taken over `.pdf` thumbnails it leaves that alone, because
 you may have chosen it, and the window offers to take them back.
 
-**Uninstall** from the window, or with `PdfThumbnailsCli.exe --uninstall`.
+**Uninstall** from Settings > Apps > Installed apps, from the window, or with
+`PdfThumbnailsCli.exe --uninstall`. Thumbnails File Explorer already made can stay in its cache
+after an uninstall until it makes them again; `--uninstall --rebuild-thumbnails` clears them for a
+developer install.
 
 ## Limits
 

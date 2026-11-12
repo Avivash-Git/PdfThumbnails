@@ -45,6 +45,7 @@ An install for all users:
 C:\Program Files\PdfThumbnails\
   PdfThumbnailsSettings.exe, PdfThumbnailsCli.exe, LICENSE.txt, THIRD-PARTY-NOTICES.md, licenses\
   app\<file version>-<build id>\PdfThumbnails.dll, PdfThumbnails-pdfium.dll
+  unins000.exe, unins000.dat (only when the installer installed it)
 ```
 
 The thumbnail process keeps the DLLs it loaded open, so every build goes into a folder of its own
@@ -61,6 +62,7 @@ An install for one user goes to `%LOCALAPPDATA%\Programs\PdfThumbnails` with the
 | The zoom and the last check | `HKCU\Software\PdfThumbnails` |
 | The log | `%LOCALAPPDATA%\PdfThumbnails\Logs\PdfThumbnails.log` (never PDF names) |
 | The scheduled check | Task Scheduler, `\PdfThumbnails\Check <user SID>`, one task per user |
+| The entry in Installed apps | `HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\{B4584E00-A586-4C24-996D-6032BFDEDE2F}_is1`, written by the installer |
 
 ## The check engine
 
@@ -116,15 +118,28 @@ real work before that. The build adds the usual mitigations (`/sdl`, Control Flo
 with high entropy, DEP, CET shadow stack compatibility on x64, Spectre mitigations on CI), and the
 `gate` tests check every binary's imports and hardening flags.
 
-## Rules for the installer (milestone 3)
+## The installer
 
-- **Never queue the `app\<id>` files for deletion at their install path** (no Inno Setup
-  `uninsrestartdelete` or `restartreplace` on them). If the same build is installed again before
-  the restart, Windows would delete the new files at boot and thumbnails would stop working. Files
-  in use are moved to the trash folder first, and only that folder is queued, which is what
-  `--uninstall-cleanup` does.
-- The installer is meant to call the app's own steps (`--setup-machine`, `--setup-user`,
-  `--uninstall-cleanup`) rather than write the registry itself, so the two cannot drift apart.
+`installer/PdfThumbnails.iss` (Inno Setup), compiled by `cmake/Installer.cmake`, which passes it
+every name from `cmake/ProjectInfo.cmake` and each architecture's build folder name. It installs
+for all users only, and its rules:
+
+- **It writes none of the product's registry values.** It lays the files down and calls the
+  app's own steps: `--setup-machine --build <folder>` (elevated) and `--setup-user` (as the user
+  who started Setup); its uninstaller calls `--uninstall-cleanup` first. Setup and the developer
+  `--install` therefore cannot drift apart.
+- **Never queue the `app\<id>` files for deletion at their install path** (no
+  `uninsrestartdelete` or `restartreplace`). If the same build is installed again before the
+  restart, Windows would delete the new files at boot and thumbnails would stop working. Files in
+  use are moved to the trash folder first, and only that folder is queued, which is what the
+  app's steps do. A DLL already in its build folder is never replaced (`onlyifdoesntexist`): its
+  folder name says it is the same build.
+- **No AppMutex.** The app holds its named objects while it waits for the operation lock, so a
+  scheduled check would stop Setup or the uninstaller on a question. Running programs in the
+  install folder are closed through the Restart Manager instead, and only `*.exe`, never the
+  thumbnail process.
+- **The uninstaller's own files stay** for it to delete: `--uninstall-cleanup` empties the
+  install folder but for `unins000.*` while the installer's record exists.
 
 ## Tests
 

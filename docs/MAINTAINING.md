@@ -4,7 +4,10 @@
 
 1. CI is green on the commit, including the window tests in `build (ci-x64)` and in `system-x64`.
    `system-x64` is allowed to fail without failing the run, so read its steps.
-2. [The whole pass before a release](TESTING.md#the-whole-pass-before-a-release) passes on a real PC.
+2. [The whole pass before a release](TESTING.md#the-whole-pass-before-a-release) and
+   [the installer's checks](TESTING.md#the-installer) pass on a real PC, with the setup from the
+   commit's CI run (`installer-x64` green; `installer-arm64` read, since it may fail without
+   failing the run).
 3. `CHANGELOG.md` says what changed.
 4. The version is raised in `cmake/ProjectInfo.cmake` (`PDFT_VERSION`). Build folders are named after it and the build id.
 
