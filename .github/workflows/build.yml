@@ -15,6 +15,18 @@
 #                     and the cache after the uninstall; then, on a runner GitHub hosts only,
 #                     what the thumbnail-cache rebuild finds on the runner and the rebuild for
 #                     real (not on pull requests, unless called)
+#   release (x64|arm64) the runtime the installer ships: the release-* presets (no developer
+#                     install commands, no tests, no tools), x64 and ARM64 built on the x64 runner
+#   installer         Inno Setup on the x64 runner: one setup for both architectures from the two
+#                     release runtimes (cmake/Installer.cmake), and an earlier setup of another
+#                     build for the upgrade test
+#   installer-x64     the installer's system tests (Installer.* in pdft_system_tests): Setup and
+#                     its uninstaller for real as a throw-away administrator account with a
+#                     limited token, an upgrade over an earlier setup and over a developer
+#                     install, 1.1 replaced, Setup run as administrator (not on pull requests,
+#                     unless called)
+#   installer-arm64   informational, never blocks: the same tests on a native ARM64 runner (not
+#                     on pull requests, unless called)
 #
 # Repository variables (Settings > Secrets and variables > Actions > Variables), all optional:
 #   PDFT_WIN_X64_RUNNER  x64 runner label. Default windows-2025, which serves Visual Studio 2026
@@ -27,8 +39,10 @@
 #                        repository's plan.
 #
 # Artifacts are unsigned developer builds, not releases: PdfThumbnails-<arch>-unsigned (the
-# runtime staging tree), symbols-<arch> (its PDBs), tests-<arch> (test bundle for test-arm64).
-# Each carries BUILDINFO.txt (runner image, Visual Studio, cl, link, CMake and Ninja versions).
+# runtime staging tree), symbols-<arch> (its PDBs), tests-<arch> (test bundle for test-arm64),
+# release-<arch> (the release runtime), PdfThumbnails-setup-unsigned (the setup) and
+# setup-earlier (the upgrade test's earlier setup). Each runtime carries BUILDINFO.txt (runner
+# image, Visual Studio, cl, link, CMake and Ninja versions).
 
 name: build
 
@@ -563,3 +577,253 @@ jobs:
           findstr /l /c:" refresh full " "%LOG%"
           t\pdft-run-medium.exe -- t\thumbtest.exe shellinfo --windows --holders
           exit /b 0
+
+  # The runtime the installer ships: no developer install commands, no tests, no tools. Built like
+  # build's legs (scripts\build.cmd, the same pinned downloads and version suffix), so the DLLs are
+  # the bytes the CI legs test.
+  release:
+    name: release (${{ matrix.arch }})
+    runs-on: ${{ vars.PDFT_WIN_X64_RUNNER || 'windows-2025' }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    env:
+      PDFT_ARCH: ${{ matrix.arch }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore the download cache
+        id: downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/downloads
+          key: pdft-downloads-${{ env.PDFT_ARCH }}-${{ hashFiles('cmake/Pins.cmake') }}
+
+      - name: Fetch PDFium and verify its attestation (new pins only)
+        if: steps.downloads.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cmake -DARCH=%PDFT_ARCH% -DVERIFY_ATTESTATION=ON -P cmake/FetchPdfium.cmake
+
+      - name: Configure and build (scripts\build.cmd release-${{ matrix.arch }})
+        env:
+          PDFT_VS_VERSION: ${{ vars.PDFT_VS_VERSION }}
+        run: |
+          set "PDFT_VERSION_SUFFIX=-ci+g%GITHUB_SHA:~0,8%"
+          call scripts\build.cmd release-%PDFT_ARCH% || exit /b 1
+
+      - name: Stage the runtime
+        run: |
+          cmake --install "out\build\release-%PDFT_ARCH%" --prefix out\stage\release --component runtime || exit /b 1
+          copy /y "out\build\release-%PDFT_ARCH%\buildinfo.txt" out\stage\release\BUILDINFO.txt >nul || exit /b 1
+          >> out\stage\release\BUILDINFO.txt echo(commit: %GITHUB_SHA%
+          >> out\stage\release\BUILDINFO.txt echo(runner_image: %ImageOS% %ImageVersion%
+          dir /s /b out\stage\release
+
+      - name: Upload release-${{ matrix.arch }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.arch }}
+          path: out/stage/release/
+          if-no-files-found: error
+          retention-days: 3
+
+  # One setup for x64 and ARM64 PCs, compiled with the Inno Setup the runner image carries (no
+  # download). Also an earlier setup of another build for the upgrade test: the same runtimes with
+  # 16 bytes appended to the PDFium DLL (Windows ignores data after a DLL's sections), which gives
+  # it another build id and so another build folder.
+  installer:
+    needs: release
+    runs-on: ${{ vars.PDFT_WIN_X64_RUNNER || 'windows-2025' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download release-x64
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-x64
+          path: release/x64
+
+      - name: Download release-arm64
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-arm64
+          path: release/arm64
+
+      - name: Build the setup (cmake/Installer.cmake)
+        run: |
+          cmake --version
+          cmake -DRUNTIME_X64=release\x64 -DRUNTIME_ARM64=release\arm64 -DOUTPUT_DIR=out\setup -P cmake\Installer.cmake
+
+      - name: Build the earlier setup for the upgrade test
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($arch in 'x64', 'arm64') {
+            Copy-Item -Recurse -LiteralPath "release\$arch" -Destination "release-earlier\$arch"
+            $file = [IO.File]::Open("release-earlier\$arch\PdfThumbnails-pdfium.dll", 'Append', 'Write')
+            try { $file.Write([byte[]](1..16), 0, 16) } finally { $file.Close() }
+          }
+          cmake -DRUNTIME_X64=release-earlier\x64 -DRUNTIME_ARM64=release-earlier\arm64 `
+            -DOUTPUT_DIR=out\setup-earlier -DOUTPUT_BASE=earlier-setup -DVERSION_TEXT=earlier-build `
+            -P cmake\Installer.cmake
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload PdfThumbnails-setup-unsigned
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: PdfThumbnails-setup-unsigned
+          path: out/setup/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload setup-earlier
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: setup-earlier
+          path: out/setup-earlier/
+          if-no-files-found: error
+          retention-days: 3
+
+  # The installer for real on a runner that is thrown away afterwards, with the system tests'
+  # harness (a throw-away administrator account with a limited token, UAC without a prompt): the
+  # tests Installer.* of pdft_system_tests, from build (ci-x64)'s x64 test bundle. They also need
+  # the developer runtime (the developer install the setup goes over, and the copy every system
+  # test makes). Skipped tests count as a failure here.
+  installer-x64:
+    needs: [build, installer]
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || inputs.called) }}
+    runs-on: ${{ vars.PDFT_WIN_X64_RUNNER || 'windows-2025' }}
+    timeout-minutes: 60
+    permissions: {}
+    steps:
+      - name: Download tests-x64
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tests-x64
+          path: t
+
+      - name: Download PdfThumbnails-x64-unsigned
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: PdfThumbnails-x64-unsigned
+          path: runtime
+
+      - name: Download PdfThumbnails-setup-unsigned
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: PdfThumbnails-setup-unsigned
+          path: setup
+
+      - name: Download setup-earlier
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: setup-earlier
+          path: setup-earlier
+
+      - name: Runner image, UAC and token
+        run: |
+          echo Runner image: %ImageOS% %ImageVersion%
+          reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLUA
+          reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v ConsentPromptBehaviorAdmin
+          whoami /groups | findstr /i /c:"Mandatory Label" /c:"S-1-5-32-544"
+          dir setup setup-earlier
+          exit /b 0
+
+      # Every line of the tests' own starts with "[ installer ]" or "[ system ]".
+      - name: Installer tests (install, uninstall, upgrades, 1.1 replaced)
+        env:
+          PDFT_SYSTEM_TESTS: "1"
+        run: |
+          set "PDFT_SYSTEM_RUNTIME=%GITHUB_WORKSPACE%\runtime"
+          for %%F in (setup\*.exe) do set "PDFT_SYSTEM_SETUP=%%~fF"
+          for %%F in (setup-earlier\*.exe) do set "PDFT_SYSTEM_SETUP_EARLIER=%%~fF"
+          if not defined PDFT_SYSTEM_SETUP (echo ::error::No setup was downloaded& exit /b 1)
+          t\pdft_system_tests.exe --gtest_filter=Installer.* --gtest_color=no > installer-tests.log 2>&1
+          set "RESULT=%ERRORLEVEL%"
+          type installer-tests.log
+          if not "%RESULT%"=="0" (echo ::error::The installer tests exited %RESULT%& exit /b 1)
+          findstr /l /c:"[  SKIPPED ]" installer-tests.log >nul && (echo ::error::An installer test was skipped& exit /b 1)
+          findstr /l /c:"[ installer ] setup -> exit 0" installer-tests.log >nul || (echo ::error::The setup did not run& exit /b 1)
+          findstr /l /c:"[ system ] nothing left" installer-tests.log >nul || (echo ::error::The installer tests did not reach their end& exit /b 1)
+          exit /b 0
+
+      - name: Upload logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: logs-installer-x64
+          path: installer-tests.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Informational (continue-on-error): the same tests on a native ARM64 runner, so the setup's
+  # ARM64 files are installed and used for real. The ARM64 runners have no desktop the shell can
+  # reach, so the Explorer test is expected to fail there (the tests treat it as informational).
+  installer-arm64:
+    needs: [build, installer]
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || inputs.called) && vars.PDFT_ARM64_TESTS != 'off' }}
+    runs-on: ${{ vars.PDFT_ARM64_RUNNER || 'windows-11-arm' }}
+    timeout-minutes: 60
+    continue-on-error: true
+    permissions: {}
+    steps:
+      - name: Download tests-arm64
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tests-arm64
+          path: t
+
+      - name: Download PdfThumbnails-arm64-unsigned
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: PdfThumbnails-arm64-unsigned
+          path: runtime
+
+      - name: Download PdfThumbnails-setup-unsigned
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: PdfThumbnails-setup-unsigned
+          path: setup
+
+      - name: Download setup-earlier
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: setup-earlier
+          path: setup-earlier
+
+      - name: Installer tests (native ARM64)
+        env:
+          PDFT_SYSTEM_TESTS: "1"
+        run: |
+          echo Runner image: %ImageOS% %ImageVersion%
+          set "PDFT_SYSTEM_RUNTIME=%GITHUB_WORKSPACE%\runtime"
+          for %%F in (setup\*.exe) do set "PDFT_SYSTEM_SETUP=%%~fF"
+          for %%F in (setup-earlier\*.exe) do set "PDFT_SYSTEM_SETUP_EARLIER=%%~fF"
+          t\pdft_system_tests.exe --gtest_filter=Installer.* --gtest_color=no > installer-tests.log 2>&1
+          set "RESULT=%ERRORLEVEL%"
+          type installer-tests.log
+          if not "%RESULT%"=="0" (echo ::warning::The installer tests on ARM64 exited %RESULT%& exit /b 1)
+          exit /b 0
+
+      - name: Upload logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: logs-installer-arm64
+          path: installer-tests.log
+          if-no-files-found: ignore
+          retention-days: 7
