@@ -33,7 +33,8 @@
 //   1. with --build, the class for all users, pointed at <install folder>\app\<folder>: the
 //      build the installer just put there (FindBuildToRegister checks it). The installer names
 //      it because two builds of one version cannot be told apart by their names. When this
-//      fails, the old builds stay (the class may still need one of them);
+//      fails, the old builds stay (the class may still need one of them). Then the Active Setup
+//      component, so every other user of the PC runs --setup-user at their next sign-in;
 //   2. the shared task folder (EnsureTaskFolder), the machine part of the 1.x clean-up and the
 //      old 2.x builds (every build folder but the one the class names).
 // Exit 0, 1 when files wait for a restart, 5 when a step failed.
@@ -160,6 +161,9 @@ struct SetupMachineResult {
   // The class for all users: S_FALSE without --build, S_OK once written, else why not (then the
   // old builds were left as they were).
   HRESULT buildClass = S_FALSE;
+  // The Active Setup component that runs --setup-user for every other user at their next sign-in
+  // (registration.h): S_FALSE without --build, else WriteActiveSetup's answer.
+  HRESULT activeSetup = S_FALSE;
   HRESULT taskFolder = S_OK;  // EnsureTaskFolder's answer
   MachineRemoval v1;          // 1.x's build folders
   MachineRemoval old;         // old 2.x builds

@@ -603,6 +603,32 @@ TEST_F(Registration, TheStepForAllUsersLeavesALinkInAUsersHive) {
 // While the installer has an install for all users (its record under HKLM), the part for all
 // users leaves its uninstaller's own files in the install folder, and so the folder, to it: the
 // uninstaller runs this step and deletes them itself afterwards. Without the record they go too.
+// The Active Setup component for all users, and its removal from HKLM and from a user's hive
+// (where Windows records the version it ran for that user).
+TEST_F(Registration, ActiveSetupComponent) {
+  const std::filesystem::path exe = L"C:\\Program Files\\PdfThumbnails\\PdfThumbnailsSettings.exe";
+  ASSERT_HRESULT_SUCCEEDED(WriteActiveSetup(roots_, exe, L"2.0.0.0"));
+  const std::wstring key = ActiveSetupKeyPath();
+  EXPECT_EQ(GetSz(sandbox_.machine(), key, nullptr), std::optional<std::wstring>(kProductName));
+  EXPECT_EQ(GetSz(sandbox_.machine(), key, L"StubPath"),
+            std::optional<std::wstring>(L"\"" + exe.native() + L"\" --setup-user"));
+  EXPECT_EQ(GetSz(sandbox_.machine(), key, L"Version"), std::optional<std::wstring>(L"2,0,0,0"));
+  EXPECT_EQ(GetDword(sandbox_.machine(), key, L"IsInstalled"), std::optional<DWORD>(1));
+  EXPECT_EQ(WriteActiveSetup(roots_, L"relative.exe", L"2.0.0.0"), E_INVALIDARG);
+  EXPECT_EQ(WriteActiveSetup(roots_, exe, L"x"), E_INVALIDARG);
+
+  SetString(sandbox_.user(), key, L"Version", L"2,0,0,0");
+  bool deleted = false;
+  ASSERT_HRESULT_SUCCEEDED(DeleteActiveSetup(sandbox_.machine(), &deleted));
+  EXPECT_TRUE(deleted);
+  ASSERT_HRESULT_SUCCEEDED(DeleteActiveSetup(sandbox_.user(), &deleted));
+  EXPECT_TRUE(deleted);
+  EXPECT_FALSE(KeyExists(sandbox_.machine(), key));
+  EXPECT_FALSE(KeyExists(sandbox_.user(), key));
+  ASSERT_HRESULT_SUCCEEDED(DeleteActiveSetup(sandbox_.machine(), &deleted));
+  EXPECT_FALSE(deleted);
+}
+
 TEST_F(Registration, ThePartForAllUsersLeavesTheInstallersFiles) {
   test::TempDir temp(L"registration");
   ASSERT_TRUE(temp.ok());

@@ -491,6 +491,15 @@ HRESULT InstallForAllUsers(const MachineInstallOptions& options, const RegistryR
     result->taskFolder = EnsureTaskFolder(options.taskFolder);
     if (FAILED(result->taskFolder)) Failed(&failures, L"task-folder", result->taskFolder);
   }
+  // Every other user of the PC is set up at their next sign-in.
+  {
+    const std::optional<BuildFolderNameParts> parts =
+        ParseBuildFolderName(result->copy.buildDir.filename().native());
+    const HRESULT hr =
+        parts ? WriteActiveSetup(roots, options.machineRoot / kSettingsExe, parts->version)
+              : E_INVALIDARG;
+    if (FAILED(hr)) Failed(&failures, L"active-setup", hr);
+  }
   // Last: the old builds, once the class points at the new one.
   if (!options.legacyMachineRoot.empty()) {
     if (const HRESULT hr =

@@ -378,6 +378,14 @@ HRESULT SetupMachine(const SetupMachineOptions& options, const RegistryRoots& ro
       result->buildClass = WriteMachineClass(roots, paths.machineRoot, dll);
     }
     if (FAILED(result->buildClass)) Failed(&failures, L"class", result->buildClass);
+    // Every other user of the PC is set up at their next sign-in.
+    if (SUCCEEDED(result->buildClass)) {
+      const std::optional<BuildFolderNameParts> parts = ParseBuildFolderName(options.build);
+      result->activeSetup =
+          parts ? WriteActiveSetup(roots, paths.machineRoot / kSettingsExe, parts->version)
+                : E_INVALIDARG;
+      if (FAILED(result->activeSetup)) Failed(&failures, L"active-setup", result->activeSetup);
+    }
   }
 
   result->taskFolder = EnsureTaskFolder(options.taskFolder);

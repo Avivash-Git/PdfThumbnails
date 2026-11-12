@@ -1039,6 +1039,12 @@ TEST_F(Setup, SetupMachineRegistersTheNamedBuild) {
               static_cast<int>(result.code),
               WideToUtf8Lossy(HResultText(result.buildClass)).c_str());
   EXPECT_EQ(result.buildClass, S_OK);
+  EXPECT_EQ(result.activeSetup, S_OK);
+  std::optional<std::wstring> stub;
+  ASSERT_HRESULT_SUCCEEDED(
+      ReadRegistryString(sandbox_.machine(), ActiveSetupKeyPath(), L"StubPath", &stub));
+  EXPECT_EQ(stub, std::optional<std::wstring>(L"\"" + (paths_.machineRoot / kSettingsExe).native() +
+                                              L"\" --setup-user"));
   ASSERT_HRESULT_SUCCEEDED(ReadClass(roots_, Scope::kMachine, &reg));
   ASSERT_TRUE(reg);
   EXPECT_TRUE(IEquals(reg->dll, (build / kHandlerDll).native()));

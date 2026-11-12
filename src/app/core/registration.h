@@ -94,6 +94,27 @@ bool IsMachineClassPath(const std::filesystem::path& machineRoot,
                                         const std::filesystem::path& machineRoot,
                                         const std::filesystem::path& dll) noexcept;
 
+// ---- Active Setup ---------------------------------------------------------------------------
+// Windows runs a component's StubPath once for each user, at their next sign-in, when that
+// user's own copy of the key (HKCU) is missing or has a lower Version. An install for all users
+// registers --setup-user there, so every user of the PC gets the .pdf settings and the check
+// task, not only the one who installed it.
+
+// "Software\Microsoft\Active Setup\Installed Components\<kActiveSetupId>" (pure).
+std::wstring ActiveSetupKeyPath();
+// The Version Active Setup compares (pure): "a,b,c,d" from a FileVersion "a.b.c.d" (missing
+// parts are 0); empty when |fileVersion| is not IsBuildVersion.
+std::wstring ActiveSetupVersion(std::wstring_view fileVersion);
+// The component under roots.machine, in a fresh key: its name, StubPath
+// "<settingsExe>" --setup-user, Version and IsInstalled 1. E_INVALIDARG for a relative program
+// or a version that is not one. Elevated steps only.
+[[nodiscard]] HRESULT WriteActiveSetup(const RegistryRoots& roots,
+                                       const std::filesystem::path& settingsExe,
+                                       std::wstring_view fileVersion) noexcept;
+// Deletes the component's key below |root| (HKLM, or a user's hive, where Windows keeps the
+// Version it ran for that user); nothing there is not an error.
+[[nodiscard]] HRESULT DeleteActiveSetup(HKEY root, bool* deleted = nullptr) noexcept;
+
 // Deletes the machine-wide class key with everything below it (elevated steps only); nothing
 // there is not an error. |deleted| (optional) says whether there was one.
 [[nodiscard]] HRESULT DeleteMachineClass(const RegistryRoots& roots,

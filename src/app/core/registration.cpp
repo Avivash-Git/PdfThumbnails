@@ -221,6 +221,49 @@ HRESULT WriteMachineClass(const RegistryRoots& roots, const std::filesystem::pat
 }
 CATCH_RETURN();
 
+std::wstring ActiveSetupKeyPath() {
+  return std::wstring(L"Software\\Microsoft\\Active Setup\\Installed Components\\") +
+         kActiveSetupId;
+}
+
+std::wstring ActiveSetupVersion(std::wstring_view fileVersion) {
+  if (!IsBuildVersion(fileVersion)) return {};
+  std::wstring version(fileVersion);
+  size_t parts = 1;
+  for (wchar_t& c : version) {
+    if (c == L'.') {
+      c = L',';
+      ++parts;
+    }
+  }
+  for (; parts < 4; ++parts) version += L",0";
+  return version;
+}
+
+HRESULT WriteActiveSetup(const RegistryRoots& roots, const std::filesystem::path& settingsExe,
+                         std::wstring_view fileVersion) noexcept try {
+  const std::wstring version = ActiveSetupVersion(fileVersion);
+  RETURN_HR_IF(E_INVALIDARG, roots.machine == nullptr || !settingsExe.is_absolute() ||
+                                 version.empty() ||
+                                 settingsExe.native().find(L'"') != std::wstring::npos);
+  const std::wstring key = ActiveSetupKeyPath();
+  RETURN_IF_FAILED(DeleteRegistryTree(roots.machine, key));
+  RETURN_IF_FAILED(WriteRegistryString(roots.machine, key, L"", kProductName));
+  RETURN_IF_FAILED(WriteRegistryString(roots.machine, key, L"StubPath",
+                                       L"\"" + settingsExe.native() + L"\" --setup-user"));
+  RETURN_IF_FAILED(WriteRegistryString(roots.machine, key, L"Version", version));
+  RETURN_IF_FAILED(WriteRegistryDword(roots.machine, key, L"IsInstalled", 1));
+  return S_OK;
+}
+CATCH_RETURN();
+
+HRESULT DeleteActiveSetup(HKEY root, bool* deleted) noexcept try {
+  if (deleted) *deleted = false;
+  RETURN_HR_IF(E_INVALIDARG, root == nullptr);
+  return DeleteRegistryTree(root, ActiveSetupKeyPath(), deleted);
+}
+CATCH_RETURN();
+
 HRESULT DeleteMachineClass(const RegistryRoots& roots, bool* deleted) noexcept try {
   if (deleted) *deleted = false;
   RETURN_HR_IF(E_INVALIDARG, roots.machine == nullptr);

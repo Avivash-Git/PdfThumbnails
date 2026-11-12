@@ -37,6 +37,8 @@ set(PDFT_TASK_PREFIX           "Check ")
 set(PDFT_TASK_ROOT_PREFIX      "${PDFT_PRODUCT_NAME} check ")
 set(PDFT_OBJECT_PREFIX         "${PDFT_PRODUCT_NAME}")    # mutexes, window class, messages
 set(PDFT_INNO_APPID            "{B4584E00-A586-4C24-996D-6032BFDEDE2F}")   # NEVER changes
+# The Active Setup component that sets up each user of the PC at their next sign-in.
+set(PDFT_ACTIVE_SETUP_ID       "{77ADCA92-2D3C-47B0-ADA3-D17102A7576B}")   # NEVER changes
 set(PDFT_AUMID                 "${PDFT_PRODUCT_NAME}.Settings")            # reserved (toasts)
 # Developer tools only (pdft-run-outside): the task folder of its temporary tasks, and the start
 # of the name of each run's private folder under %TEMP%. Never used by what ships.
@@ -108,7 +110,8 @@ endfunction()
 function(pdft_generate_project_config)
   foreach(name IN ITEMS PRODUCT_NAME DESCRIPTION COPYRIGHT HANDLER_CLSID HANDLER_CLASS_NAME
                         PREVIEW_IID HANDLER_DLL PDFIUM_DLL SETTINGS_EXE CLI_EXE REG_KEY TASK_FOLDER
-                        TASK_PREFIX TASK_ROOT_PREFIX OBJECT_PREFIX INNO_APPID AUMID DEV_TASK_FOLDER DEV_RUN_PREFIX
+                        TASK_PREFIX TASK_ROOT_PREFIX OBJECT_PREFIX INNO_APPID ACTIVE_SETUP_ID AUMID
+                        DEV_TASK_FOLDER DEV_RUN_PREFIX
                         LEGACY_ROOT_NAME LEGACY_TASK
                         LEGACY_RUNONCE LEGACY_SETTINGS_ENV LEGACY_SETTINGS_INI
                         PDFCRAFT_PRODUCT_NAME PDFCRAFT_UPGRADE_CODE PDFCRAFT_SUBSCRIPTION
