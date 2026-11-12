@@ -12,7 +12,9 @@
 ; - The registry: none of the product's values are written here. After the files, the settings
 ;   program's own steps run: --setup-machine --build <folder> as administrator (the class for all
 ;   users, the task folder, what 1.x and older builds left), then --setup-user as the user who
-;   started Setup (the .pdf settings, the zoom, the check task, 1.x's per-user leftovers).
+;   started Setup (the .pdf settings, the zoom, the check task, 1.x's per-user leftovers). Every
+;   other user of the PC is set up at their next sign-in: --setup-machine registers an Active
+;   Setup component that runs --setup-user once for each of them.
 ; - Uninstall: --uninstall-cleanup runs first, as administrator. It removes the product for every
 ;   signed-in user and everything in the install folder except the uninstaller's own files, which
 ;   the uninstaller then deletes with the folder.

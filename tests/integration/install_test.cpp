@@ -29,6 +29,7 @@
 #include <sstream>
 #include <stop_token>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "build_folder.h"
@@ -352,10 +353,13 @@ class Install : public ::testing::Test {
     options.dataDir = dataDir_;
     options.lockWaitMs = 5000;
     options.launcher = MachineUninstallLauncher();
-    options.runner = [this](const path& exe, const std::wstring& arguments, DWORD* exitCode) {
+    options.runner = [this](const path& exe, const std::wstring& arguments, const ProgramWait& wait,
+                            DWORD* exitCode) {
       runs_.push_back(exe.native() + L" " + arguments);
-      *exitCode = 0;
-      return S_OK;
+      runLimitMs_ = wait.limitMs;
+      if (runEffect_) runEffect_();
+      *exitCode = runExit_;
+      return runHr_;
     };
     // Never the real rebuild: a test that asks for one gets the fake.
     options.rebuildSystem = &rebuild_;
@@ -385,6 +389,11 @@ class Install : public ::testing::Test {
   test::FakeRebuildSystem rebuild_;
   std::vector<ElevationRequest> requests_;
   std::vector<std::wstring> runs_;
+  // What the fake uninstaller does while it "runs", and how it ends.
+  std::function<void()> runEffect_;
+  DWORD runExit_ = 0;
+  HRESULT runHr_ = S_OK;
+  DWORD runLimitMs_ = 0;
 };
 
 // ---- A build's folder and copying it ----------------------------------------------------------
@@ -1467,29 +1476,208 @@ TEST_F(Install, UninstallRefusalsAndTheInstallersUninstaller) {
   EXPECT_EQ(result.refusal, UninstallRefusal::kElevated);
   EXPECT_EQ(result.code, ExitCode::kWrongContext);
   options.context->elevated = false;
+}
 
-  // The installer's install: its uninstaller runs instead, silently with --yes, and does not
-  // rebuild the thumbnail cache.
-  const std::wstring uninstaller = (path(temp_.path()) / L"unins000.exe").native();
-  ASSERT_HRESULT_SUCCEEDED(WriteRegistryString(sandbox_.machine(), InnoUninstallKey(),
+// ---- --uninstall with the installer's install ------------------------------------------------
+
+// The installer's install for all users in the sandbox: its record, the class at a build, this
+// user's slots. Returns the uninstaller its record names.
+std::wstring PlantInstallersInstall(test::ScopedRegistrySandbox& sandbox,
+                                    const RegistryRoots& roots, const path& temp) {
+  const std::wstring uninstaller = (temp / L"unins000.exe").native();
+  EXPECT_HRESULT_SUCCEEDED(WriteRegistryString(sandbox.machine(), InnoUninstallKey(),
                                                L"UninstallString", L"\"" + uninstaller + L"\""));
-  ASSERT_HRESULT_SUCCEEDED(WriteSlots(roots_, SlotWrite::kTakeBack));
-  options.rebuildThumbnails = true;
+  const std::wstring inproc = ClassKeyPath() + L"\\InprocServer32";
+  EXPECT_HRESULT_SUCCEEDED(
+      WriteRegistryString(sandbox.machine(), ClassKeyPath(), L"", kHandlerClassName));
+  EXPECT_HRESULT_SUCCEEDED(
+      WriteRegistryString(sandbox.machine(), inproc, L"", L"C:\\x\\app\\2.0.0.0-1a2b3c4d\\x.dll"));
+  EXPECT_HRESULT_SUCCEEDED(WriteSlots(roots, SlotWrite::kTakeBack));
+  return uninstaller;
+}
+
+// What the installer's uninstaller removes for real: its record and the class (its clean-up step
+// removes the class; this user's slots are this command's to remove).
+void RemoveRecordAndClass(test::ScopedRegistrySandbox& sandbox, bool record, bool machineClass) {
+  if (record)
+    EXPECT_EQ(RegDeleteTreeW(sandbox.machine(), InnoUninstallKey().c_str()), ERROR_SUCCESS);
+  if (machineClass) {
+    EXPECT_EQ(RegDeleteTreeW(sandbox.machine(), ClassKeyPath().c_str()), ERROR_SUCCESS);
+  }
+}
+
+// Its uninstaller runs instead (silently with --yes, waited for at most 10 minutes, 30 without),
+// and once it has removed its record and the class, this command removes this user's slots.
+TEST_F(Install, UninstallByTheInstallersUninstaller) {
+  const std::wstring uninstaller = PlantInstallersInstall(sandbox_, roots_, temp_.path());
+  int hooks = 0;
+  bool hookRebuild = true;
+  bool slotsDuringRun = false;
+  runEffect_ = [&] {
+    SlotValues slots;
+    slotsDuringRun = SUCCEEDED(ReadSlots(roots_, &slots)) && slots[0].has_value();
+    RemoveRecordAndClass(sandbox_, true, true);
+  };
+  UninstallOptions options = MakeUninstallOptions();
+  options.beforeUninstaller = [&](bool rebuildAfter) {
+    ++hooks;
+    hookRebuild = rebuildAfter;
+    EXPECT_EQ(runs_.size(), static_cast<size_t>(hooks - 1));  // before its uninstaller
+  };
+  UninstallResult result;
   ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
+  for (const std::wstring& failure : result.failures) ADD_FAILURE() << WideToUtf8Lossy(failure);
+  EXPECT_EQ(result.innoOutcome, InstallerOutcome::kRemoved);
   EXPECT_EQ(result.code, ExitCode::kOk);
-  EXPECT_FALSE(result.rebuild);
-  EXPECT_EQ(rebuild_.Calls(), 0);
-  ASSERT_EQ(runs_, std::vector<std::wstring>{uninstaller + L" /SILENT"});
+  EXPECT_EQ(runs_, std::vector<std::wstring>{uninstaller + L" /SILENT"});
+  EXPECT_EQ(runLimitMs_, kInstallerWaitYesMs);
+  EXPECT_EQ(hooks, 1);
+  EXPECT_FALSE(hookRebuild);
+  EXPECT_TRUE(slotsDuringRun);
   SlotValues slots;
   ASSERT_HRESULT_SUCCEEDED(ReadSlots(roots_, &slots));
-  EXPECT_TRUE(slots[0]);  // the uninstaller's to remove, not this command's
+  EXPECT_FALSE(slots[0]);
+  EXPECT_FALSE(slots[1]);
+  EXPECT_FALSE(result.rebuild);
+  EXPECT_EQ(rebuild_.Calls(), 0);
+  const std::vector<std::wstring> lines = InstallerUninstallReport(result, false);
+  ASSERT_EQ(lines.size(), 2u);
+  EXPECT_EQ(lines[0], L"The installer's uninstaller has finished.");
+  EXPECT_NE(lines[1].find(L"stay until it makes them again"), std::wstring::npos);
+
   options.yes = false;
-  options.runner = [](const path&, const std::wstring&, DWORD* exitCode) {
-    *exitCode = 0;
-    return HRESULT_FROM_WIN32(ERROR_CANCELLED);
-  };
+  PlantInstallersInstall(sandbox_, roots_, temp_.path());
   ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
-  EXPECT_EQ(result.code, ExitCode::kCancelled);
+  EXPECT_EQ(runs_.back(), uninstaller + L" ");
+  EXPECT_EQ(runLimitMs_, kInstallerWaitMs);
+  EXPECT_EQ(hooks, 2);
+}
+
+// --rebuild-thumbnails: the lock is taken before the uninstaller starts, and the cache is
+// rebuilt once it has finished and nothing of the handler is left.
+TEST_F(Install, UninstallByTheInstallersUninstallerThenRebuilds) {
+  PlantInstallersInstall(sandbox_, roots_, temp_.path());
+  ShellAndSurrogateHoldTheCache(&rebuild_);
+  rebuild_.Prime();
+  int callsDuringRun = -1;
+  runEffect_ = [&] {
+    callsDuringRun = rebuild_.Calls();
+    RemoveRecordAndClass(sandbox_, true, true);
+  };
+  bool hookRebuild = false;
+  UninstallOptions options = MakeUninstallOptions();
+  options.rebuildThumbnails = true;
+  options.beforeUninstaller = [&](bool rebuildAfter) { hookRebuild = rebuildAfter; };
+  UninstallResult result;
+  ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
+  for (const std::wstring& failure : result.failures) ADD_FAILURE() << WideToUtf8Lossy(failure);
+  EXPECT_TRUE(hookRebuild);
+  EXPECT_TRUE(result.rebuildPlanned);
+  EXPECT_EQ(result.code, ExitCode::kOk);
+  ASSERT_TRUE(result.rebuild);
+  EXPECT_EQ(RebuildExitCode(*result.rebuild), ExitCode::kOk);
+  EXPECT_GT(rebuild_.Calls(), callsDuringRun);  // the rebuild itself came after the uninstaller
+  EXPECT_EQ(rebuild_.Ended(), (std::vector<DWORD>{kFakeSurrogatePid, kFakeShellPid}));
+  const std::vector<std::wstring> lines = InstallerUninstallReport(result, true);
+  ASSERT_GE(lines.size(), 3u);
+  EXPECT_EQ(lines[1], L"Thumbnail cache cleared: 2 of 2 cache files deleted.");
+  EXPECT_EQ(lines.back(),
+            std::wstring(kProductName) + L" removed. PDF files show their app's icon again.");
+}
+
+// Every other ending: no rebuild, and an exit code and a line of its own.
+TEST_F(Install, UninstallByTheInstallersUninstallerThatDidNotFinish) {
+  struct Case {
+    const char* name;
+    HRESULT hr;
+    DWORD exit;
+    bool removeRecord;
+    bool removeClass;
+    InstallerOutcome outcome;
+    ExitCode code;
+    const wchar_t* line;
+  };
+  const Case cases[] = {
+      {"cancelled", HRESULT_FROM_WIN32(ERROR_CANCELLED), 0, false, false,
+       InstallerOutcome::kCancelled, ExitCode::kCancelled, L"it was cancelled"},
+      {"not started", E_ACCESSDENIED, 0, false, false, InstallerOutcome::kNotStarted,
+       ExitCode::kFailed, L"could not be started"},
+      {"stopped waiting", kStoppedWaitingHr, 0, false, false, InstallerOutcome::kStoppedWaiting,
+       ExitCode::kProblems, L"Stopped waiting"},
+      {"limit", kWaitLimitHr, 0, false, false, InstallerOutcome::kTimedOut, ExitCode::kProblems,
+       L"still running after 10 minutes"},
+      {"nothing removed", S_OK, 1, false, false, InstallerOutcome::kNothingRemoved,
+       ExitCode::kCancelled, L"without removing anything"},
+      {"part-way, record gone", S_OK, 1, true, false, InstallerOutcome::kStoppedPartWay,
+       ExitCode::kFailed, L"before it had finished"},
+      {"part-way, class gone", S_OK, 2, false, true, InstallerOutcome::kStoppedPartWay,
+       ExitCode::kFailed, L"before it had finished"},
+      {"record left", S_OK, 0, false, true, InstallerOutcome::kRecordLeft, ExitCode::kProblems,
+       L"still listed in Installed apps"},
+      {"class left", S_OK, 0, true, false, InstallerOutcome::kHandlerLeft, ExitCode::kProblems,
+       L"still registered for all users"},
+  };
+  ShellAndSurrogateHoldTheCache(&rebuild_);
+  rebuild_.Prime();
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.name);
+    PlantInstallersInstall(sandbox_, roots_, temp_.path());
+    runEffect_ = [&] { RemoveRecordAndClass(sandbox_, c.removeRecord, c.removeClass); };
+    runHr_ = c.hr;
+    runExit_ = c.exit;
+    const int calls = rebuild_.Calls();
+    UninstallOptions options = MakeUninstallOptions();
+    options.rebuildThumbnails = true;
+    UninstallResult result;
+    ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
+    EXPECT_EQ(result.innoOutcome, c.outcome);
+    EXPECT_EQ(result.code, c.code);
+    EXPECT_FALSE(result.rebuild);
+    const std::vector<std::wstring> lines = InstallerUninstallReport(result, true);
+    ASSERT_EQ(lines.size(), 2u);
+    EXPECT_NE(lines[0].find(c.line), std::wstring::npos) << WideToUtf8Lossy(lines[0]);
+    EXPECT_TRUE(lines[1].starts_with(L"The thumbnail cache was not rebuilt: "))
+        << WideToUtf8Lossy(lines[1]);
+    for (const std::wstring& line : lines) {
+      EXPECT_EQ(line.find(L"--"), std::wstring::npos) << WideToUtf8Lossy(line);
+    }
+    // The rebuild's check may have asked something; the rebuild itself never started.
+    EXPECT_EQ(rebuild_.Ended(), std::vector<DWORD>{});
+    (void)calls;
+    // A clean start for the next case.
+    RegDeleteTreeW(sandbox_.machine(), InnoUninstallKey().c_str());
+    RegDeleteTreeW(sandbox_.machine(), ClassKeyPath().c_str());
+  }
+}
+
+// --rebuild-thumbnails while another process holds the operation lock: busy (4) before the
+// uninstaller starts.
+TEST_F(Install, UninstallByTheInstallersUninstallerWaitsForTheLockFirst) {
+  PlantInstallersInstall(sandbox_, roots_, temp_.path());
+  wil::unique_event_nothrow locked;
+  wil::unique_event_nothrow done;
+  ASSERT_HRESULT_SUCCEEDED(locked.create(wil::EventOptions::ManualReset));
+  ASSERT_HRESULT_SUCCEEDED(done.create(wil::EventOptions::ManualReset));
+  HRESULT held = E_UNEXPECTED;
+  std::thread holder([&] {
+    std::optional<OperationLock> lock;
+    held = OperationLock::Acquire(5000, &lock);
+    locked.SetEvent();
+    done.wait();
+  });
+  const auto letGo = wil::scope_exit([&] {
+    done.SetEvent();
+    holder.join();
+  });
+  locked.wait();
+  ASSERT_HRESULT_SUCCEEDED(held);
+  UninstallOptions options = MakeUninstallOptions();
+  options.rebuildThumbnails = true;
+  options.lockWaitMs = 100;
+  UninstallResult result;
+  ASSERT_HRESULT_SUCCEEDED(Uninstall(options, roots_, probes_, &result));
+  EXPECT_EQ(result.code, ExitCode::kBusy);
+  EXPECT_TRUE(runs_.empty());
 }
 
 // --rebuild-thumbnails: the rebuild runs once this user's registration is gone and before the part

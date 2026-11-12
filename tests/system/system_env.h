@@ -61,9 +61,9 @@ std::vector<UserPlaces> TestedUsers();
 
 // Everything of 1.x or 2.x found on this PC, one line each: the classes, .pdf slots that name the
 // handler, the product's settings key, RunOnce values of the clean-up family, the check task
-// folder and each tested user's check task, 1.x's task, the install folders, the data folders and
-// an installer's uninstall record. Trash folders next to the machine root are not listed: they
-// wait for the restart (TrashFolders).
+// folder and each tested user's check task, 1.x's task, the install folders, the data folders, the
+// Active Setup component and an installer's uninstall record. Trash folders next to the machine
+// root are not listed: they wait for the restart (TrashFolders).
 std::vector<std::string> Leftovers();
 
 // The trash folders next to the machine-wide install folder.

@@ -297,6 +297,11 @@ std::vector<std::string> Leftovers() {
   if (SUCCEEDED(GetMachineRoot(&machineRoot)) && Exists(machineRoot)) {
     found.push_back("the folder for all users " + Text(machineRoot.native()));
   }
+  bool activeSetup = false;
+  if (FAILED(RegistryKeyExists(HKEY_LOCAL_MACHINE, ActiveSetupKeyPath(), &activeSetup)) ||
+      activeSetup) {
+    found.push_back("the Active Setup component " + Text(ActiveSetupKeyPath()));
+  }
   bool record = false;
   if (FAILED(RegistryKeyExists(HKEY_LOCAL_MACHINE, InnoUninstallKey(), &record)) || record) {
     found.push_back("an installer's uninstall record for all users " + Text(InnoUninstallKey()));
@@ -360,6 +365,7 @@ void ForceClean() {
   report("deleting the check tasks", DeleteTaskFolderAllUsers(kTaskFolder, kTaskRootPrefix));
   report("deleting 1.x's task", DeleteLegacyTask());
   report("deleting the HKLM class", DeleteRegistryTree(HKEY_LOCAL_MACHINE, ClassKeyPath()));
+  report("deleting the Active Setup component", DeleteActiveSetup(HKEY_LOCAL_MACHINE));
   for (const UserPlaces& user : TestedUsers()) {
     const RegistryRoots roots = RootsOf(user);
     const std::string of = " of " + user.who;

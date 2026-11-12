@@ -812,6 +812,16 @@ int RunUninstallCommand(const CliArgs& args, const ProcessContext& context, Outp
   options.context = context;
   options.launcher = LaunchElevatedWithShell;
   options.runner = RunProgramAndWait;
+  options.beforeUninstaller = [&out](bool rebuildAfter) {
+    // A current folder inside the install folder would keep the uninstaller from removing it.
+    wchar_t system[MAX_PATH] = {};
+    const UINT length = GetSystemDirectoryW(system, ARRAYSIZE(system));
+    if (length == 0 || length >= ARRAYSIZE(system) || !SetCurrentDirectoryW(system)) {
+      Log(LogLevel::kWarning, L"uninstall",
+          L"uninstall cwd hr=" + HResultText(HRESULT_FROM_WIN32(GetLastError())));
+    }
+    out.Line(InstallerWaitingLine(rebuildAfter));
+  };
   UninstallResult result;
   if (const HRESULT hr = Uninstall(options, RegistryRoots{}, RealSystemProbes(), &result);
       FAILED(hr)) {
@@ -837,17 +847,8 @@ int RunUninstallCommand(const CliArgs& args, const ProcessContext& context, Outp
   }
   if (ReportLockNotTaken(result.busy, result.namedObjectsRefused, out)) return Code(result.code);
   if (result.inno) {
-    if (SUCCEEDED(result.innoRun)) {
-      out.Line(std::wstring(kProductName) +
-               L" was installed by its installer, so its uninstaller ran (exit code " +
-               std::to_wstring(result.innoExit) + L").");
-    } else if (result.code == ExitCode::kCancelled) {
-      out.Line(L"The installer's uninstaller did not start: it was cancelled.");
-    }
-    if (args.rebuildThumbnails) {
-      out.Line(
-          L"The thumbnail cache was not rebuilt: the installer's uninstaller does not "
-          L"rebuild it.");
+    for (const std::wstring& line : InstallerUninstallReport(result, args.rebuildThumbnails)) {
+      out.Line(line);
     }
     PrintFailures(result.failures, out);
     return Code(result.code);
@@ -1500,6 +1501,86 @@ std::wstring RebuildNotDoneReason(const RebuildResult& rebuild) {
 }
 
 }  // namespace
+
+std::wstring InstallerWaitingLine(bool rebuildAfter) {
+  return std::wstring(kProductName) +
+         L" was installed by its installer, so its own uninstaller removes it. Waiting for it to " +
+         (rebuildAfter ? L"finish; then the thumbnail cache is rebuilt..." : L"finish...");
+}
+
+std::vector<std::wstring> InstallerUninstallReport(const UninstallResult& result,
+                                                   bool rebuildAsked) {
+  std::vector<std::wstring> lines;
+  const std::wstring product = kProductName;
+  const std::wstring minutes = std::to_wstring(result.innoLimitMs / 60000);
+  const std::wstring code = std::to_wstring(result.innoExit);
+  std::wstring noRebuild;  // why the planned rebuild did not follow
+  switch (result.innoOutcome) {
+    case InstallerOutcome::kNotRun:
+      break;
+    case InstallerOutcome::kCancelled:
+      lines.push_back(L"The installer's uninstaller did not start: it was cancelled.");
+      noRebuild = L"nothing was removed";
+      break;
+    case InstallerOutcome::kNotStarted:
+      lines.push_back(L"The installer's uninstaller could not be started.");
+      noRebuild = L"nothing was removed";
+      break;
+    case InstallerOutcome::kStoppedWaiting:
+      lines.push_back(L"Stopped waiting for the installer's uninstaller; it goes on by itself.");
+      noRebuild = L"this program stopped waiting before the uninstaller had finished";
+      break;
+    case InstallerOutcome::kTimedOut:
+      lines.push_back(L"The installer's uninstaller was still running after " + minutes +
+                      L" minutes; it goes on by itself.");
+      noRebuild = L"the uninstaller had not finished";
+      break;
+    case InstallerOutcome::kNothingRemoved:
+      lines.push_back(L"The installer's uninstaller stopped without removing anything (exit code " +
+                      code + L"): it was cancelled, or it failed. " + product +
+                      L" is still installed.");
+      noRebuild = L"nothing was removed";
+      break;
+    case InstallerOutcome::kStoppedPartWay:
+      lines.push_back(L"The installer's uninstaller stopped before it had finished (exit code " +
+                      code + L"): parts of " + product +
+                      L" may have been removed, and others left.");
+      noRebuild = L"the uninstall did not finish";
+      break;
+    case InstallerOutcome::kRecordLeft:
+      lines.push_back(L"The installer's uninstaller has finished, but " + product +
+                      L" is still listed in Installed apps.");
+      noRebuild = L"the uninstall did not complete";
+      break;
+    case InstallerOutcome::kHandlerLeft:
+      lines.push_back(
+          L"The installer's uninstaller has finished, but " + product + L" is still registered " +
+          (result.handlerLeft == Scope::kMachine ? L"for all users." : L"for this user."));
+      noRebuild = L"File Explorer could still use " + product;
+      break;
+    case InstallerOutcome::kRemoved:
+      lines.push_back(L"The installer's uninstaller has finished.");
+      break;
+  }
+  if (rebuildAsked) {
+    if (result.rebuild) {
+      if (const std::wstring reason = RebuildNotDoneReason(*result.rebuild); !reason.empty()) {
+        lines.push_back(L"The thumbnail cache was not rebuilt: " + reason + L".");
+      } else {
+        for (std::wstring& line : RebuildReport(*result.rebuild)) lines.push_back(std::move(line));
+      }
+    } else if (!noRebuild.empty()) {
+      lines.push_back(L"The thumbnail cache was not rebuilt: " + noRebuild + L".");
+    }
+  }
+  if (result.innoOutcome == InstallerOutcome::kRemoved && result.failures.empty()) {
+    const bool rebuilt = result.rebuild && RebuildNotDoneReason(*result.rebuild).empty();
+    lines.push_back(product + (rebuilt ? L" removed. PDF files show their app's icon again."
+                                       : L" removed. Thumbnails File Explorer already made stay "
+                                         L"until it makes them again."));
+  }
+  return lines;
+}
 
 std::vector<std::wstring> UninstallReport(const UninstallResult& result) {
   std::vector<std::wstring> lines;

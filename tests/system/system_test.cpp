@@ -1674,6 +1674,43 @@ class Installer : public System {
     ExpectStatusForAllUsers(status, zoom);
   }
 
+  // Every other user of the PC: Windows runs the Active Setup component's StubPath once for each
+  // user at their next sign-in. The tests cannot sign the standard account in, so they run that
+  // command as it, exactly as registered: it must set the account up (its check task in the
+  // protected folder, its slots), quietly.
+  void ExpectActiveSetupSetsUpAnotherUser() {
+    std::optional<std::wstring> stub;
+    ASSERT_HRESULT_SUCCEEDED(
+        ReadRegistryString(HKEY_LOCAL_MACHINE, ActiveSetupKeyPath(), L"StubPath", &stub));
+    ASSERT_TRUE(stub) << "no Active Setup component";
+    std::printf("[ installer ] Active Setup StubPath: %s\n", Text(*stub).c_str());
+    ASSERT_TRUE(stub->starts_with(L"\""));
+    const size_t close = stub->find(L'"', 1);
+    ASSERT_NE(close, std::wstring::npos);
+    const path exe = stub->substr(1, close - 1);
+    std::wstring arguments = stub->substr(close + 1);
+    while (!arguments.empty() && arguments.front() == L' ') arguments.erase(0, 1);
+    EXPECT_TRUE(IEquals(exe.native(), (machineRoot_ / kSettingsExe).native()));
+    EXPECT_EQ(arguments, L"--setup-user");
+    const TestAccount* standard = CurrentStandardAccount();
+    ASSERT_NE(standard, nullptr) << "no standard account";
+    const Outcome run = standard->Run(exe, arguments, kCommandTimeoutMs);
+    Print("standard account", exe, arguments, run);
+    EXPECT_EQ(run.exitCode, 0u) << run.Output();
+    TaskLocation location;
+    TaskState task;
+    EXPECT_HRESULT_SUCCEEDED(DefaultTaskLocation(standard->sid(), &location));
+    EXPECT_HRESULT_SUCCEEDED(ReadTask(location, &task));
+    EXPECT_TRUE(task.exists);
+    EXPECT_FALSE(task.atFallback);
+    SlotValues slots;
+    ASSERT_HRESULT_SUCCEEDED(
+        ReadSlots(RegistryRoots{standard->hive(), HKEY_LOCAL_MACHINE}, &slots));
+    for (const auto& slot : slots) EXPECT_TRUE(slot && IsOurClsid(*slot));
+    std::printf("[ installer ] Active Setup set up the standard account: %s\n",
+                task.exists && !task.atFallback ? "yes" : "no");
+  }
+
   // After the uninstaller: the record, the shortcut and everything else. The data folder of the
   // test account (the log of its commands) is left to a sign-in clean-up the uninstaller
   // scheduled; it is checked and removed here, since that sign-in never comes.
@@ -1711,19 +1748,30 @@ TEST_F(Installer, InstallAndUninstall) {
   // The developer install steps aside while the installer's install is there (and a release build
   // has no such command at all).
   EXPECT_NE(User(InstalledCli(), L"--install --machine").exitCode, 0u);
+  ExpectActiveSetupSetsUpAnotherUser();
 
   const Outcome uninstall = RunUninstaller();
   EXPECT_EQ(uninstall.exitCode, 0u);
+  RemoveStandardAccountsDataFolder();
   ExpectUninstalled();
 }
 
 // The uninstall from the program itself: --uninstall runs the installer's uninstaller, from the
-// install folder it is about to empty (the running program goes to a trash folder).
+// install folder it is about to empty (the running program goes to a trash folder), waits for it
+// and checks what it left. With --rebuild-thumbnails the rebuild would follow; here File Explorer
+// on the desktop is the runner's, so the rebuild's check refuses it before anything starts and
+// the uninstall goes on (as for a person whose administrator signed in to run it).
 TEST_F(Installer, UninstallFromTheProgram) {
   ASSERT_EQ(RunSetup(setup_, L"setup").exitCode, 0u);
   ASSERT_TRUE(Record());
-  const Outcome uninstall = User(InstalledCli(), L"--uninstall --yes");
+  const Outcome uninstall = User(InstalledCli(), L"--uninstall --yes --rebuild-thumbnails");
   EXPECT_EQ(uninstall.exitCode, 0u) << uninstall.Output();
+  const std::string output = uninstall.Output();
+  EXPECT_NE(output.find("Waiting for it to finish"), std::string::npos) << output;
+  EXPECT_NE(output.find("The installer's uninstaller has finished."), std::string::npos) << output;
+  EXPECT_NE(output.find("The thumbnail cache was not rebuilt: "), std::string::npos) << output;
+  EXPECT_NE(output.find(" removed."), std::string::npos) << output;
+  std::printf("[ installer ] --uninstall --rebuild-thumbnails -> exit %lu\n", uninstall.exitCode);
   WaitForUninstall();
   ExpectUninstalled();
 }

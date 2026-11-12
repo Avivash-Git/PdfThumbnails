@@ -233,6 +233,18 @@ std::wstring WindowNamedObjectsRefusedMessage();
 // throw std::bad_alloc.
 std::vector<std::wstring> UninstallReport(const UninstallResult& result);
 
+// What --uninstall prints just before the installer's uninstaller starts (pure): that it waits for
+// it, and with |rebuildAfter| that the thumbnail cache is rebuilt afterwards.
+std::wstring InstallerWaitingLine(bool rebuildAfter);
+
+// What --uninstall prints after the installer's uninstaller (pure): how it ended, and with
+// |rebuildAsked| (--rebuild-thumbnails) what the rebuild did or why there was none; then, when
+// everything is gone and nothing failed, that it is removed, and whether PDFs show their app's
+// icon again (after a rebuild) or keep thumbnails already made until File Explorer makes them
+// again. No line names a command or a path. May throw std::bad_alloc.
+std::vector<std::wstring> InstallerUninstallReport(const UninstallResult& result,
+                                                   bool rebuildAsked);
+
 // What --uninstall-cleanup writes to its error output (pure; it exits 0 whatever this says): that
 // it stopped early (|hr| failed), the part for all users it left out without full administrator
 // rights or below an app package, the part for this account it left out where the registry check

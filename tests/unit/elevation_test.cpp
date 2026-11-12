@@ -24,8 +24,10 @@
 #include "inno.h"
 #include "processes.h"
 #include "project_config.h"
+#include "registration.h"
 #include "registry_roots.h"
 #include "strings.h"
+#include "uninstall.h"
 
 namespace pdft {
 namespace {
@@ -894,6 +896,64 @@ TEST(Inno, UninstallerFileNames) {
        {L"", L"unins.exe", L"unins00.exe", L"unins0000.exe", L"unins00a.exe", L"unins000.dll",
         L"unins000.exe.bak", L"xunins000.exe", L"unins000", L"PdfThumbnailsSettings.exe"}) {
     EXPECT_FALSE(IsInnoUninstallerFileName(name)) << name;
+  }
+}
+
+TEST(Inno, WaitAndExitCodes) {
+  EXPECT_EQ(InstallerWaitMs(true), 600000u);
+  EXPECT_EQ(InstallerWaitMs(false), 1800000u);
+  using enum InstallerOutcome;
+  EXPECT_EQ(JudgeInstallerRun(HRESULT_FROM_WIN32(ERROR_CANCELLED), 0, true, false, Scope::kNone),
+            kCancelled);
+  EXPECT_EQ(JudgeInstallerRun(E_FAIL, 0, true, false, Scope::kNone), kNotStarted);
+  EXPECT_EQ(JudgeInstallerRun(kStoppedWaitingHr, 0, true, true, Scope::kNone), kStoppedWaiting);
+  EXPECT_EQ(JudgeInstallerRun(kWaitLimitHr, 0, true, true, Scope::kNone), kTimedOut);
+  EXPECT_EQ(JudgeInstallerRun(S_OK, 1, true, false, Scope::kMachine), kNothingRemoved);
+  EXPECT_EQ(JudgeInstallerRun(S_OK, 1, true, true, Scope::kMachine), kStoppedPartWay);
+  EXPECT_EQ(JudgeInstallerRun(S_OK, 1, false, false, Scope::kMachine), kStoppedPartWay);
+  EXPECT_EQ(JudgeInstallerRun(S_OK, 0, true, true, Scope::kNone), kRecordLeft);
+  EXPECT_EQ(JudgeInstallerRun(S_OK, 0, false, true, Scope::kUser), kHandlerLeft);
+  EXPECT_EQ(JudgeInstallerRun(S_OK, 0, false, true, Scope::kNone), kRemoved);
+
+  EXPECT_EQ(InstallerUninstallExitCode(kCancelled, false), ExitCode::kCancelled);
+  EXPECT_EQ(InstallerUninstallExitCode(kNothingRemoved, false), ExitCode::kCancelled);
+  EXPECT_EQ(InstallerUninstallExitCode(kNotStarted, false), ExitCode::kFailed);
+  EXPECT_EQ(InstallerUninstallExitCode(kStoppedPartWay, false), ExitCode::kFailed);
+  for (const InstallerOutcome outcome : {kStoppedWaiting, kTimedOut, kRecordLeft, kHandlerLeft}) {
+    EXPECT_EQ(InstallerUninstallExitCode(outcome, false), ExitCode::kProblems);
+    EXPECT_EQ(InstallerUninstallExitCode(outcome, true), ExitCode::kFailed);
+  }
+  EXPECT_EQ(InstallerUninstallExitCode(kRemoved, false), ExitCode::kOk);
+  EXPECT_EQ(InstallerUninstallExitCode(kRemoved, true), ExitCode::kFailed);
+}
+
+TEST(Inno, Traces) {
+  InstallTraces before;
+  before.read = true;
+  before.machineClass = true;
+  before.slotOurs = true;
+  InstallTraces after = before;
+  EXPECT_FALSE(TracesChanged(before, after));
+  after.slotOurs = false;
+  EXPECT_TRUE(TracesChanged(before, after));
+  EXPECT_EQ(HandlerLeft(after), Scope::kMachine);
+  after.machineClass = false;
+  EXPECT_EQ(HandlerLeft(after), Scope::kNone);
+  after.slotOurs = true;
+  EXPECT_EQ(HandlerLeft(after), Scope::kUser);
+  after.read = false;
+  EXPECT_TRUE(TracesChanged(before, after));
+}
+
+TEST(ActiveSetup, KeyAndVersion) {
+  EXPECT_EQ(
+      ActiveSetupKeyPath(),
+      std::wstring(L"Software\\Microsoft\\Active Setup\\Installed Components\\") + kActiveSetupId);
+  EXPECT_EQ(ActiveSetupVersion(L"2.0.0.0"), L"2,0,0,0");
+  EXPECT_EQ(ActiveSetupVersion(L"2.1"), L"2,1,0,0");
+  EXPECT_EQ(ActiveSetupVersion(L"10.20.30.40"), L"10,20,30,40");
+  for (const wchar_t* bad : {L"", L"2..0", L"x", L"2.0.0.0.0", L"2,0"}) {
+    EXPECT_EQ(ActiveSetupVersion(bad), L"") << bad;
   }
 }
 

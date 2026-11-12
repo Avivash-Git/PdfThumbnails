@@ -4,8 +4,14 @@
 // --uninstall [--yes] [--rebuild-thumbnails], unelevated:
 //   refused where the registry may be virtualized (8) and in an elevated process (8: the
 //   per-user part must run as the signed-in user); while the installer (Inno Setup) has an
-//   install here, its own uninstaller runs instead (silently with --yes; it does not rebuild the
-//   thumbnail cache), so its records stay right; the operation lock (4; 5 when Windows does not
+//   install here, its own uninstaller runs instead, so its records stay right (UninstallByInstaller
+//   in uninstall.cpp): silently with --yes, from the system folder, waited for at most 30 minutes
+//   (10 with --yes; Ctrl+C stops waiting, and it goes on by itself); then its record and the
+//   handler's registration are looked at again, and with exit code 0 and both gone this user's
+//   own part is removed too. With --rebuild-thumbnails and a check that allows the rebuild, the
+//   operation lock is taken before the uninstaller starts (4 when busy), and the thumbnail cache
+//   is rebuilt once nothing of the handler is left. Exit codes: InstallerUninstallExitCode.
+//   Otherwise: the operation lock (4; 5 when Windows does not
 //   let this process make it); nothing of the product here: 6; stopped (Ctrl+C) before anything
 //   is removed: 3, nothing changed. Then
 //   1. the per-user part: the .pdf slots that name the handler (and the keys above them left
@@ -179,15 +185,71 @@ struct MachineUninstallResult {
 
 // ---- --uninstall ----------------------------------------------------------------------------
 
+// How long --uninstall waits for the installer's uninstaller (its administrator prompt and its
+// work); then it stops waiting, and the uninstaller goes on by itself.
+inline constexpr DWORD kInstallerWaitMs = 30 * 60 * 1000;     // when it may ask
+inline constexpr DWORD kInstallerWaitYesMs = 10 * 60 * 1000;  // --yes (silent)
+DWORD InstallerWaitMs(bool yes) noexcept;                     // pure
+
+// What a ProgramRunner gives when it stopped waiting; the program goes on either way.
+inline constexpr HRESULT kStoppedWaitingHr = HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED);
+inline constexpr HRESULT kWaitLimitHr = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+struct ProgramWait {
+  std::stop_token stop;      // a stop request ends the wait: kStoppedWaitingHr
+  DWORD limitMs = INFINITE;  // then the wait ends: kWaitLimitHr
+};
+
 // Starts |exe| with |arguments| (the installer's uninstaller, which asks for administrator
-// rights itself), waits for it and returns its exit code. Injectable: tests pass a fake.
-using ProgramRunner = std::function<HRESULT(const std::filesystem::path& exe,
-                                            const std::wstring& arguments, DWORD* exitCode)>;
+// rights itself), waits as |wait| says and returns its exit code; the program is never ended.
+// Injectable: tests pass a fake.
+using ProgramRunner =
+    std::function<HRESULT(const std::filesystem::path& exe, const std::wstring& arguments,
+                          const ProgramWait& wait, DWORD* exitCode)>;
 
 // The real runner: ShellExecuteExW "open" (so the program's own manifest decides about
-// elevation), no error UI, waits for it.
+// elevation), from the system folder, no error UI, a console program sharing this console.
 [[nodiscard]] HRESULT RunProgramAndWait(const std::filesystem::path& exe,
-                                        const std::wstring& arguments, DWORD* exitCode) noexcept;
+                                        const std::wstring& arguments, const ProgramWait& wait,
+                                        DWORD* exitCode) noexcept;
+
+// What of an install can be seen without changing anything: read before and after the
+// installer's uninstaller.
+struct InstallTraces {
+  bool read = false;          // all of it could be read
+  bool machineClass = false;  // the class for all users
+  bool userClass = false;     // this user's class
+  bool slotOurs = false;      // one of this user's .pdf slots names the handler
+  bool folder = false;        // the install folder of the installer's scope
+};
+[[nodiscard]] HRESULT ReadInstallTraces(const RegistryRoots& roots,
+                                        const std::filesystem::path& folder,
+                                        InstallTraces* traces) noexcept;
+// Whether anything |before| had is gone in |after| (pure); true when either was not read.
+bool TracesChanged(const InstallTraces& before, const InstallTraces& after) noexcept;
+// What is still registered (pure): kMachine (the class for all users), kUser (this user's class
+// or a slot naming the handler), or kNone. The folder does not count.
+Scope HandlerLeft(const InstallTraces& traces) noexcept;
+
+// How the installer's uninstaller ended, as --uninstall judges it.
+enum class InstallerOutcome {
+  kNotRun,          // there was no installer's install
+  kCancelled,       // it did not start: cancelled (exit 3)
+  kNotStarted,      // it could not be started (5)
+  kStoppedWaiting,  // Ctrl+C while waiting; it goes on by itself (1)
+  kTimedOut,        // still running at the limit; it goes on by itself (1)
+  kNothingRemoved,  // exit code not 0, its record there and nothing of it changed (3)
+  kStoppedPartWay,  // exit code not 0, and its record gone or something changed (5)
+  kRecordLeft,      // exit code 0, but its record is still there (1)
+  kHandlerLeft,     // exit code 0, but a class or slot still names the handler (1)
+  kRemoved,         // exit code 0, its record gone, nothing of the handler registered
+};
+// The outcome (pure) from the runner's HRESULT, the exit code, whether the record is still there,
+// whether anything changed, and what is still registered.
+InstallerOutcome JudgeInstallerRun(HRESULT run, DWORD exitCode, bool recordLeft, bool changed,
+                                   Scope handlerLeft) noexcept;
+// The exit code of an uninstall by the installer's uninstaller (pure); |failures|: a step after
+// it failed (this user's part, a check, the rebuild).
+ExitCode InstallerUninstallExitCode(InstallerOutcome outcome, bool failures) noexcept;
 
 enum class UninstallRefusal {
   kNone,
@@ -218,6 +280,11 @@ struct UninstallOptions {
   HWND owner = nullptr;
   ElevationLauncher launcher;  // the administrator step; tests pass a fake
   ProgramRunner runner;        // the installer's uninstaller; tests pass a fake
+  // Called once just before the installer's uninstaller starts; |rebuildAfter| when the cache is
+  // rebuilt once it has finished. The command leaves the install folder as its current folder
+  // and says that it waits there.
+  std::function<void(bool rebuildAfter)> beforeUninstaller;
+  DWORD installerWaitMs = 0;  // 0: InstallerWaitMs(yes)
 };
 
 struct UninstallResult {
@@ -229,6 +296,14 @@ struct UninstallResult {
   std::optional<InnoInstall> inno;  // the installer's install: its uninstaller ran instead
   HRESULT innoRun = S_OK;
   DWORD innoExit = 0;
+  InstallerOutcome innoOutcome = InstallerOutcome::kNotRun;
+  DWORD innoLimitMs = 0;
+  ULONGLONG innoWaitMs = 0;
+  bool innoRecordLeft = false;
+  Scope handlerLeft = Scope::kNone;  // after an exit code of 0
+  // --rebuild-thumbnails with the installer's install: the rebuild was to follow the uninstaller
+  // (its check allowed it); when it did not, innoOutcome says why.
+  bool rebuildPlanned = false;
   UserRemoval user;
   bool machinePart = false;       // the part for all users was there
   bool machineNoProgram = false;  // ... but no settings executable for all users to remove it

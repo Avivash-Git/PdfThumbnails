@@ -166,7 +166,10 @@ void CleanLoadedHives(HKEY users, MachineUninstallResult* result,
       noteHive(DeleteRegistryTree(hive.get(), ClassKeyPath(), &classDeleted));
       bool settingsDeleted = false;
       noteHive(DeleteRegistryTree(hive.get(), kRegKey, &settingsDeleted));
-      removed = slots[0] || slots[1] || classDeleted || settingsDeleted;
+      // What Active Setup recorded for this user: a later install sets them up again.
+      bool activeSetupDeleted = false;
+      noteHive(DeleteActiveSetup(hive.get(), &activeSetupDeleted));
+      removed = slots[0] || slots[1] || classDeleted || settingsDeleted || activeSetupDeleted;
     }
     if (removed) ++result->hivesCleaned;
     if (left) ++result->hivesLeft;
@@ -218,6 +221,10 @@ HRESULT RemoveUserRegistration(const RegistryRoots& roots, const SystemProbes& p
   if (const HRESULT hr = DeleteRegistryTree(roots.user, kRegKey, &removal->settingsDeleted);
       FAILED(hr)) {
     Failed(&failures, L"settings", hr);
+  }
+  // What Active Setup recorded for this user, so a later install sets them up again.
+  if (const HRESULT hr = DeleteActiveSetup(roots.user); FAILED(hr)) {
+    Failed(&failures, L"active-setup", hr);
   }
   removal->notified = NotifyAssocChanged(roots);
   return S_OK;
@@ -359,6 +366,7 @@ HRESULT UninstallForAllUsers(const MachineUninstallOptions& options, const Regis
   };
 
   note(L"class", DeleteMachineClass(roots, &result->classDeleted));
+  note(L"active-setup", DeleteActiveSetup(roots.machine));
   if (!options.taskFolder.empty()) {
     result->tasks = DeleteTaskFolderAllUsers(options.taskFolder, options.taskRootPrefix);
     note(L"tasks", result->tasks);
@@ -431,23 +439,114 @@ CATCH_RETURN();
 
 // ---- --uninstall ----------------------------------------------------------------------------
 
+DWORD InstallerWaitMs(bool yes) noexcept { return yes ? kInstallerWaitYesMs : kInstallerWaitMs; }
+
 HRESULT RunProgramAndWait(const std::filesystem::path& exe, const std::wstring& arguments,
-                          DWORD* exitCode) noexcept try {
+                          const ProgramWait& wait, DWORD* exitCode) noexcept try {
   *exitCode = 0;
+  wchar_t system[MAX_PATH] = {};
+  const UINT length = GetSystemDirectoryW(system, ARRAYSIZE(system));
+  RETURN_LAST_ERROR_IF(length == 0 || length >= ARRAYSIZE(system));
   SHELLEXECUTEINFOW info = {sizeof(info)};
-  info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI | SEE_MASK_UNICODE;
+  info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI | SEE_MASK_UNICODE |
+               SEE_MASK_NO_CONSOLE;
   info.lpVerb = L"open";
   info.lpFile = exe.c_str();
   info.lpParameters = arguments.empty() ? nullptr : arguments.c_str();
+  info.lpDirectory = system;
   info.nShow = SW_SHOWNORMAL;
   RETURN_IF_WIN32_BOOL_FALSE(ShellExecuteExW(&info));
   wil::unique_handle process(info.hProcess);
   RETURN_HR_IF(E_UNEXPECTED, !process);
-  RETURN_LAST_ERROR_IF(WaitForSingleObject(process.get(), INFINITE) == WAIT_FAILED);
-  RETURN_IF_WIN32_BOOL_FALSE(GetExitCodeProcess(process.get(), exitCode));
+  wil::unique_event_nothrow stopped;
+  RETURN_IF_FAILED(stopped.create(wil::EventOptions::ManualReset));
+  const HANDLE stoppedHandle = stopped.get();
+  std::stop_callback onStop(wait.stop, [stoppedHandle] { SetEvent(stoppedHandle); });
+  const HANDLE handles[] = {process.get(), stopped.get()};
+  switch (WaitForMultipleObjects(ARRAYSIZE(handles), handles, FALSE, wait.limitMs)) {
+    case WAIT_OBJECT_0:
+      RETURN_IF_WIN32_BOOL_FALSE(GetExitCodeProcess(process.get(), exitCode));
+      return S_OK;
+    case WAIT_OBJECT_0 + 1:
+      // A program that ended at the same moment still wins.
+      if (WaitForSingleObject(process.get(), 0) == WAIT_OBJECT_0) {
+        RETURN_IF_WIN32_BOOL_FALSE(GetExitCodeProcess(process.get(), exitCode));
+        return S_OK;
+      }
+      return kStoppedWaitingHr;
+    case WAIT_TIMEOUT:
+      return kWaitLimitHr;
+    default:
+      RETURN_LAST_ERROR();
+  }
+}
+CATCH_RETURN();
+
+HRESULT ReadInstallTraces(const RegistryRoots& roots, const std::filesystem::path& folder,
+                          InstallTraces* traces) noexcept try {
+  *traces = InstallTraces{};
+  std::optional<ClassReg> machine;
+  std::optional<ClassReg> user;
+  RETURN_IF_FAILED(ReadClass(roots, Scope::kMachine, &machine));
+  RETURN_IF_FAILED(ReadClass(roots, Scope::kUser, &user));
+  SlotValues slots;
+  RETURN_IF_FAILED(ReadSlots(roots, &slots));
+  traces->machineClass = machine.has_value();
+  traces->userClass = user.has_value();
+  traces->slotOurs = std::any_of(slots.begin(), slots.end(),
+                                 [](const auto& slot) { return slot && IsOurClsid(*slot); });
+  traces->folder = !folder.empty() && Exists(folder);
+  traces->read = true;
   return S_OK;
 }
 CATCH_RETURN();
+
+bool TracesChanged(const InstallTraces& before, const InstallTraces& after) noexcept {
+  if (!before.read || !after.read) return true;
+  return (before.machineClass && !after.machineClass) || (before.userClass && !after.userClass) ||
+         (before.slotOurs && !after.slotOurs) || (before.folder && !after.folder);
+}
+
+Scope HandlerLeft(const InstallTraces& traces) noexcept {
+  if (traces.machineClass) return Scope::kMachine;
+  if (traces.userClass || traces.slotOurs) return Scope::kUser;
+  return Scope::kNone;
+}
+
+InstallerOutcome JudgeInstallerRun(HRESULT run, DWORD exitCode, bool recordLeft, bool changed,
+                                   Scope handlerLeft) noexcept {
+  if (run == HRESULT_FROM_WIN32(ERROR_CANCELLED)) return InstallerOutcome::kCancelled;
+  if (run == kStoppedWaitingHr) return InstallerOutcome::kStoppedWaiting;
+  if (run == kWaitLimitHr) return InstallerOutcome::kTimedOut;
+  if (FAILED(run)) return InstallerOutcome::kNotStarted;
+  if (exitCode != 0) {
+    return recordLeft && !changed ? InstallerOutcome::kNothingRemoved
+                                  : InstallerOutcome::kStoppedPartWay;
+  }
+  if (recordLeft) return InstallerOutcome::kRecordLeft;
+  if (handlerLeft != Scope::kNone) return InstallerOutcome::kHandlerLeft;
+  return InstallerOutcome::kRemoved;
+}
+
+ExitCode InstallerUninstallExitCode(InstallerOutcome outcome, bool failures) noexcept {
+  switch (outcome) {
+    case InstallerOutcome::kCancelled:
+    case InstallerOutcome::kNothingRemoved:
+      return ExitCode::kCancelled;
+    case InstallerOutcome::kNotStarted:
+    case InstallerOutcome::kStoppedPartWay:
+      return ExitCode::kFailed;
+    case InstallerOutcome::kStoppedWaiting:
+    case InstallerOutcome::kTimedOut:
+    case InstallerOutcome::kRecordLeft:
+    case InstallerOutcome::kHandlerLeft:
+      return failures ? ExitCode::kFailed : ExitCode::kProblems;
+    case InstallerOutcome::kRemoved:
+    case InstallerOutcome::kNotRun:
+      break;
+  }
+  return failures ? ExitCode::kFailed : ExitCode::kOk;
+}
 
 bool AnythingToUninstall(const Snapshot& snapshot, bool settingsKey, bool machineRootExists,
                          bool userFilesExist, bool dataDir) noexcept {
@@ -457,6 +556,190 @@ bool AnythingToUninstall(const Snapshot& snapshot, bool settingsKey, bool machin
   return snapshot.machineClass || snapshot.userClass || machineRootExists || userFilesExist ||
          slotOurs || snapshot.task.exists || settingsKey || dataDir;
 }
+
+namespace {
+
+const wchar_t* OutcomeToken(InstallerOutcome outcome) noexcept {
+  switch (outcome) {
+    case InstallerOutcome::kNotRun:
+      return L"not-run";
+    case InstallerOutcome::kCancelled:
+      return L"cancelled";
+    case InstallerOutcome::kNotStarted:
+      return L"not-started";
+    case InstallerOutcome::kStoppedWaiting:
+      return L"stopped-waiting";
+    case InstallerOutcome::kTimedOut:
+      return L"timed-out";
+    case InstallerOutcome::kNothingRemoved:
+      return L"nothing-removed";
+    case InstallerOutcome::kStoppedPartWay:
+      return L"stopped-part-way";
+    case InstallerOutcome::kRecordLeft:
+      return L"record-left";
+    case InstallerOutcome::kHandlerLeft:
+      return L"handler-left";
+    case InstallerOutcome::kRemoved:
+      return L"removed";
+  }
+  return L"?";
+}
+
+// --uninstall where the installer has an install: its own uninstaller removes it (so its records
+// stay right), and this waits for it. With --rebuild-thumbnails and a check that allows the
+// rebuild, the operation lock is taken first, and once the uninstaller has finished with exit
+// code 0, its record is gone and nothing of the handler is registered, this user's own part is
+// removed (an administrator who answered the uninstaller's prompt may have cleaned another
+// account's) and the thumbnail cache is rebuilt.
+HRESULT UninstallByInstaller(const UninstallOptions& options, const RegistryRoots& roots,
+                             const SystemProbes& probes, const ProcessContext& context,
+                             UninstallResult* result) noexcept try {
+  std::vector<std::wstring>& failures = result->failures;
+  std::filesystem::path uninstaller;
+  result->innoRun = ParseInnoUninstallString(result->inno->uninstallString, &uninstaller);
+  if (FAILED(result->innoRun)) {
+    Failed(&failures, L"uninstaller", result->innoRun);
+    result->innoOutcome = InstallerOutcome::kNotStarted;
+    result->code = ExitCode::kFailed;
+    return S_OK;
+  }
+
+  // The rebuild's check: the command's own, or one made here. A refusal or failure is the report's
+  // answer, and the uninstaller still runs, without the lock.
+  const RebuildSystem& system =
+      options.rebuildSystem ? *options.rebuildSystem : RealRebuildSystem();
+  if (options.rebuildThumbnails) {
+    RebuildPrecheck check;
+    if (options.rebuildPrecheck) {
+      check = *options.rebuildPrecheck;
+    } else if (const HRESULT hr = PrecheckRebuild(context, system, &check); FAILED(hr)) {
+      check.failure = hr;
+    }
+    if (FAILED(check.failure) || check.refusal != RebuildRefusal::kNone) {
+      result->rebuild = RebuildNotStarted(check);
+      Log(LogLevel::kWarning, L"refresh", RebuildPrecheckLogText(check));
+    } else {
+      result->rebuildPlanned = true;
+    }
+  }
+  std::optional<OperationLock> lock;
+  if (result->rebuildPlanned) {
+    RETURN_IF_FAILED(
+        TakeLock(options.lockWaitMs, &lock, &result->busy, &result->namedObjectsRefused));
+    if (result->busy || result->namedObjectsRefused) {
+      result->code = result->busy ? ExitCode::kBusy : ExitCode::kFailed;
+      return S_OK;
+    }
+  }
+
+  EnginePaths paths;
+  if (options.paths) {
+    paths = *options.paths;
+  } else {
+    RETURN_IF_FAILED(GetEnginePaths(&paths));
+  }
+  const std::filesystem::path folder =
+      result->inno->scope == Scope::kMachine ? paths.machineRoot : paths.userRoot;
+  InstallTraces before;
+  if (const HRESULT hr = ReadInstallTraces(roots, folder, &before); FAILED(hr)) {
+    Log(LogLevel::kWarning, kLogComponent, L"uninstall installer traces hr=" + HResultText(hr));
+  }
+  if (options.stop.stop_requested()) {
+    result->refusal = UninstallRefusal::kCancelled;
+    result->code = ExitCode::kCancelled;
+    return S_OK;
+  }
+
+  result->innoLimitMs =
+      options.installerWaitMs != 0 ? options.installerWaitMs : InstallerWaitMs(options.yes);
+  if (options.beforeUninstaller) options.beforeUninstaller(result->rebuildPlanned);
+  Log(LogLevel::kInfo, kLogComponent,
+      std::wstring(L"uninstall installer start scope=") +
+          (result->inno->scope == Scope::kMachine ? L"machine" : L"user") + L" silent=" +
+          (options.yes ? L"yes" : L"no") + L" rebuild=" +
+          (!options.rebuildThumbnails ? L"no"
+           : result->rebuildPlanned   ? L"yes"
+                                      : L"refused") +
+          L" limit-ms=" + std::to_wstring(result->innoLimitMs));
+  const ULONGLONG started = GetTickCount64();
+  result->innoRun =
+      options.runner
+          ? options.runner(uninstaller, InnoUninstallArguments(options.yes),
+                           ProgramWait{options.stop, result->innoLimitMs}, &result->innoExit)
+          : E_INVALIDARG;
+  result->innoWaitMs = GetTickCount64() - started;
+
+  // What it left: its record, and what of the handler is still there.
+  const bool ran = SUCCEEDED(result->innoRun);
+  InstallTraces after;
+  bool changed = true;
+  if (ran) {
+    if (const HRESULT hr = RegistryKeyExists(RootOf(roots, result->inno->scope), InnoUninstallKey(),
+                                             &result->innoRecordLeft);
+        FAILED(hr)) {
+      Failed(&failures, L"check", hr);
+      result->innoRecordLeft = true;
+    }
+    if (const HRESULT hr = ReadInstallTraces(roots, folder, &after); FAILED(hr)) {
+      Failed(&failures, L"check", hr);
+    }
+    changed = TracesChanged(before, after);
+  }
+  if (ran && result->innoExit == 0 && !result->innoRecordLeft) {
+    // This user's own part, unelevated; then look again.
+    GatherOptions gather;
+    gather.liveTest = false;
+    gather.context = context;
+    gather.paths = paths;
+    Snapshot snapshot;
+    if (const HRESULT hr = GatherSnapshot(roots, gather, probes, &snapshot); FAILED(hr)) {
+      Failed(&failures, L"user", hr);
+    } else {
+      RETURN_IF_FAILED(RemoveUserRegistration(roots, probes, snapshot, &result->user));
+      failures.insert(failures.end(), result->user.failures.begin(), result->user.failures.end());
+    }
+    if (const HRESULT hr = ReadInstallTraces(roots, folder, &after); FAILED(hr)) {
+      Failed(&failures, L"check", hr);
+    }
+    result->handlerLeft = after.read ? HandlerLeft(after) : Scope::kNone;
+  }
+  result->innoOutcome = JudgeInstallerRun(result->innoRun, result->innoExit, result->innoRecordLeft,
+                                          changed, result->handlerLeft);
+  if (result->innoOutcome == InstallerOutcome::kNotStarted) {
+    Failed(&failures, L"uninstaller", result->innoRun);
+  }
+  Log(LogLevel::kInfo, kLogComponent,
+      std::wstring(L"uninstall installer end outcome=") + OutcomeToken(result->innoOutcome) +
+          L" exit=" + std::to_wstring(result->innoExit) + L" hr=" + HResultText(result->innoRun) +
+          L" wait-ms=" + std::to_wstring(result->innoWaitMs) + L" traces=" +
+          (changed ? L"changed" : L"unchanged"));
+
+  // The rebuild, under the lock, once nothing of the handler is left: File Explorer then makes
+  // every thumbnail again without it.
+  if (result->rebuildPlanned && result->innoOutcome == InstallerOutcome::kRemoved) {
+    RebuildOptions rebuildOptions;
+    rebuildOptions.context = context;
+    RebuildResult rebuild;
+    if (const HRESULT hr = RebuildThumbnailCache(rebuildOptions, system, options.rebuildProgress,
+                                                 options.stop, &rebuild);
+        FAILED(hr)) {
+      rebuild = RebuildResult{};
+      rebuild.failure = hr;
+    }
+    if (const std::optional<HRESULT> failure = RebuildStepFailure(rebuild)) {
+      Failed(&failures, L"rebuild", *failure);
+    }
+    result->rebuild = std::move(rebuild);
+  }
+  result->code = InstallerUninstallExitCode(result->innoOutcome, !failures.empty());
+  Log(failures.empty() ? LogLevel::kInfo : LogLevel::kWarning, kLogComponent,
+      L"uninstall installer result=" + std::wstring(CheckResultName(result->code)) + L" failures=" +
+          std::to_wstring(failures.size()));
+  return S_OK;
+}
+CATCH_RETURN();
+
+}  // namespace
 
 HRESULT Uninstall(const UninstallOptions& options, const RegistryRoots& roots,
                   const SystemProbes& probes, UninstallResult* result) noexcept try {
@@ -481,29 +764,7 @@ HRESULT Uninstall(const UninstallOptions& options, const RegistryRoots& roots,
 
   // The installer's install is removed by its own uninstaller, which keeps its records right.
   RETURN_IF_FAILED(FindInnoInstall(roots, &result->inno));
-  if (result->inno) {
-    std::filesystem::path uninstaller;
-    result->innoRun = ParseInnoUninstallString(result->inno->uninstallString, &uninstaller);
-    if (SUCCEEDED(result->innoRun)) {
-      result->innoRun =
-          options.runner
-              ? options.runner(uninstaller, InnoUninstallArguments(options.yes), &result->innoExit)
-              : E_INVALIDARG;
-    }
-    if (result->innoRun == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
-      result->code = ExitCode::kCancelled;
-    } else if (FAILED(result->innoRun)) {
-      Failed(&failures, L"uninstaller", result->innoRun);
-      result->code = ExitCode::kFailed;
-    } else {
-      result->code = result->innoExit == 0 ? ExitCode::kOk : ExitCode::kFailed;
-    }
-    Log(LogLevel::kInfo, kLogComponent,
-        L"uninstall by the installer's uninstaller result=" +
-            std::wstring(CheckResultName(result->code)) + L" exit=" +
-            std::to_wstring(result->innoExit));
-    return S_OK;
-  }
+  if (result->inno) return UninstallByInstaller(options, roots, probes, context, result);
 
   EnginePaths paths;
   if (options.paths) {

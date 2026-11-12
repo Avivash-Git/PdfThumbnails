@@ -609,6 +609,11 @@ void MainWindow::OnUninstall() {
     if (!ConfirmUninstall(dialog_, UninstallQuestion(false), &clearCache)) return;
   }
   if (!DecideControls(state_).uninstall) return;
+  // The installer's uninstaller cannot remove the install folder while it is this window's (or
+  // its child's) current folder, as it is when the window was started from that folder.
+  wchar_t system[MAX_PATH] = {};
+  const UINT length = GetSystemDirectoryW(system, ARRAYSIZE(system));
+  if (length > 0 && length < ARRAYSIZE(system)) SetCurrentDirectoryW(system);
   StartChild(clearCache ? L"--uninstall --yes --rebuild-thumbnails" : L"--uninstall --yes",
              IDS_CHILD_TITLE_UNINSTALL, true);
 }
