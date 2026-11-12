@@ -76,7 +76,9 @@ windows. It asks first, or takes `--yes`.
 **`--uninstall`** removes the product for every user of the PC, not only for you: your own
 settings first, then, after one administrator prompt, the part for all users. Files that are in
 use are deleted at the next restart. The log goes too, so the command's output is the only
-record.
+record. When the installer installed it, the installer's own uninstaller does the work: the
+command starts it (silently with `--yes`), waits for it, and checks what it left; with
+`--rebuild-thumbnails` it then rebuilds the thumbnail cache. Ctrl+C only stops the waiting.
 
 **Questions.** Commands that ask (`--fix --take-back`, `--uninstall`, `--refresh --full`) need
 `--yes` when there is no console to ask on, or they exit 2.

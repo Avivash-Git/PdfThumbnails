@@ -16,8 +16,5 @@ Until milestone 5 there is no download: build from source ([BUILDING.md](BUILDIN
 ## Later ideas
 
 - Choosing which part of the page a zoom keeps (today it always keeps the centre).
-- Rebuilding the thumbnail cache after the installer's uninstaller has finished, so thumbnails
-  made while PdfThumbnails was installed go at once (today only a developer install's
-  `--uninstall --rebuild-thumbnails` does that).
 
 Ideas and votes are welcome as [feature requests](https://github.com/Avivash-Git/PdfThumbnails/issues/new/choose).

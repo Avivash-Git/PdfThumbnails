@@ -73,7 +73,7 @@ names `--refresh --full` and `--refresh` for those thumbnails:
 |---|---|
 | `--status [--json]`, `--check`, `--fix [--take-back]`, `--checks <list>`, `--diagnostics` | report, repair and schedule the checks, as before; `--fix` now also has the part for all users repaired (the class for all users pointed at the newest complete build), asking for administrator rights through UAC |
 | `--install [--machine \| --user] [--checks <list>] [--zoom <n>] [--force]` | developer builds only: installs the build from the executable's own folder (see [Installing a build](#installing-a-build-developer-install)) |
-| `--uninstall [--yes] [--rebuild-thumbnails]` | removes the install for all users (through UAC) and this user's part: registration, check task, settings, files; with an installer's record, runs that installer's uninstaller instead (`/SILENT` with `--yes`), which does not rebuild the thumbnail cache (the report says so). `--rebuild-thumbnails` also rebuilds the thumbnail cache as `--refresh --full` does, right after this user's registration is removed and before the part for all users, and the question says that File Explorer restarts (unless the rebuild would be refused before it starts). With it, Ctrl+C stops the uninstall before it removes anything (exit 3); later it only keeps the rebuild from starting, until the rebuild ends the first process or deletes the first file. A rebuild that is refused, stopped or cannot start changes nothing, the report says why and the uninstall goes on; when File Explorer did not come back or a cache file could not be deleted, the uninstall exits 5 |
+| `--uninstall [--yes] [--rebuild-thumbnails]` | removes the install for all users (through UAC) and this user's part: registration, check task, settings, files; with an installer's record, runs that installer's uninstaller instead (`/SILENT` with `--yes`) from the system folder and waits for it (at most 30 minutes, 10 with `--yes`; Ctrl+C stops waiting, exit 1, and the uninstaller goes on by itself), then looks at what it left: exit 1 when its entry in Installed apps or the handler's registration is still there, 3 when it was cancelled before it removed anything, 5 when it stopped part-way; with exit code 0 and both gone, this user's own part is removed too. With `--rebuild-thumbnails` (and a check that allows the rebuild) it takes the operation lock before the uninstaller starts (exit 4 when busy) and rebuilds the thumbnail cache once the uninstaller has finished and nothing of the handler is left; otherwise the report says why there was no rebuild. Without an installer's record, `--rebuild-thumbnails` also rebuilds the thumbnail cache as `--refresh --full` does, right after this user's registration is removed and before the part for all users, and the question says that File Explorer restarts (unless the rebuild would be refused before it starts). With it, Ctrl+C stops the uninstall before it removes anything (exit 3); later it only keeps the rebuild from starting, until the rebuild ends the first process or deletes the first file. A rebuild that is refused, stopped or cannot start changes nothing, the report says why and the uninstall goes on; when File Explorer did not come back or a cache file could not be deleted, the uninstall exits 5 |
 | `--migrate-v1 [--user-only \| --machine-only]` | removes what 1.x left, once 2.0 is installed (exit 6 otherwise, and 1.x stays usable): only 1.x's own files, recognized by their contents, its task, settings file and sign-in clean-up; its build folders for all users through UAC |
 | `--zoom [<100-200>] [--no-refresh]` | shows the zoom and where it comes from, or saves a new one for this user |
 | `--refresh --full [--yes]` | rebuilds this user's thumbnail cache, as 1.1's `refresh` did: ends the File Explorer and thumbnail processes of this session that hold it (only `explorer.exe` from the Windows folder and the system's `dllhost.exe`), deletes `%LOCALAPPDATA%\Microsoft\Windows\Explorer\thumbcache_*.db`, waits for Windows to start File Explorer again (or starts it, through WMI from inside an app package and never leaving it inside a job), and opens the folder windows again through File Explorer (at most 25; tabs come back as separate windows). It asks first, or takes `--yes`, which it needs where there is no console to ask on (exit 2 otherwise); Ctrl+C stops it until it ends the first process or deletes the first file (exit 3). Refused before it asks (exit 8) as administrator, where File Explorer on this desktop is another account's, and below an app package where Windows does not restart File Explorer by itself (`AutoRestartShell` 0). Elsewhere, where `AutoRestartShell` is 0, it first starts explorer.exe suspended for a moment and ends it before it runs, to make sure this program could start File Explorer again: exit 8 when a File Explorer started from here would stay inside a job of the program it runs in (also, without that start, when that job lets no program leave it), and exit 5 when File Explorer cannot be started from here at all. Nothing changes in either case. It exits 1 while File Explorer copies or moves files (nothing changed), when File Explorer did not come back, a process could not be ended or a cache file could not be deleted, or when no cache file was deleted at all. Cache files that programs it leaves alone keep open (Windows Search, for example) stay until the next sign-in, and the report names those programs |
@@ -656,10 +656,14 @@ version Installed apps shows (the programs' `ProductVersion`).
   they are in use), then `--setup-user` as the user who started Setup (the `.pdf` settings, the
   zoom, the check task, what 1.x left in their profile). Setup's log holds the first step's output
   and both exit codes.
-- **Other users of the PC.** The `.pdf` settings and the check task are each user's own, and Setup
-  sets up only the user who started it, as `--install` does. Another user gets thumbnails once
-  they run `PdfThumbnailsCli.exe --setup-user`, or open the settings window, choose Fix and turn
-  the checks on.
+- **Other users of the PC.** The `.pdf` settings and the check task are each user's own. Setup sets
+  up the user who started it, and `--setup-machine` (like the developer `--install --machine`)
+  registers an Active Setup component
+  (`HKLM\Software\Microsoft\Active Setup\Installed Components\{77ADCA92-2D3C-47B0-ADA3-D17102A7576B}`,
+  StubPath `"<install folder>\PdfThumbnailsSettings.exe" --setup-user`): Windows runs it once for
+  every other user at their next sign-in, before the desktop appears. Its Version is the
+  product's FileVersion, so a new version sets everyone up again once. The uninstall removes the
+  component, and the version Windows recorded in each signed-in user's hive.
 - **Programs that are running.** Setup closes the product's own programs in the install folder
   through the Restart Manager, and nothing else: never File Explorer or its thumbnail process.
   There is no AppMutex, since a scheduled check holds the app's names for up to 30 seconds while
@@ -667,9 +671,12 @@ version Installed apps shows (the programs' `ProductVersion`).
 - **Uninstall.** The uninstaller first runs `--uninstall-cleanup` as administrator: the class,
   every user's check task, the settings and `.pdf` slots of every user who is signed in, and
   everything in the install folder except the uninstaller's own files (`unins000.*`), which it
-  then deletes with the folder. Files in use wait in a trash folder for the restart. It does not
-  rebuild the thumbnail cache, so thumbnails File Explorer already made stay until it makes them
-  again. Each user's data folder (the log) goes at their next sign-in.
+  then deletes with the folder. Files in use wait in a trash folder for the restart. Each user's
+  data folder (the log) goes at their next sign-in. The uninstaller itself does not rebuild the
+  thumbnail cache: started from Installed apps, thumbnails File Explorer already made stay until
+  it makes them again. Started by the program (the window's Uninstall with "Also clear the
+  thumbnail cache", or `PdfThumbnailsCli.exe --uninstall --rebuild-thumbnails`), the program waits
+  for the uninstaller and then rebuilds the cache, as below.
 
 | Task | Command |
 |---|---|

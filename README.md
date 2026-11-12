@@ -29,7 +29,7 @@ leaves PdfCraft's own settings alone, so PdfCraft updates don't disturb it.
 
 **The installer**, `PdfThumbnails-<version>-setup.exe`, installs for all users of the PC (it asks
 for administrator rights once) and puts PdfThumbnails in Settings > Apps > Installed apps and the
-Start menu. The same setup serves x64 and ARM64 PCs. It replaces a 1.x install and keeps its zoom,
+Start menu. Every other user of the PC is set up at their next sign-in. The same setup serves x64 and ARM64 PCs. It replaces a 1.x install and keeps its zoom,
 and a newer setup installs over an older one and keeps your settings. Until the first release
 there is no download: [build the installer](docs/BUILDING.md#the-installer) from source, or install
 straight from a build as below. For a silent install: `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
@@ -83,9 +83,10 @@ per-user pieces. If another program has taken over `.pdf` thumbnails it leaves t
 you may have chosen it, and the window offers to take them back.
 
 **Uninstall** from Settings > Apps > Installed apps, from the window, or with
-`PdfThumbnailsCli.exe --uninstall`. Thumbnails File Explorer already made can stay in its cache
-after an uninstall until it makes them again; `--uninstall --rebuild-thumbnails` clears them for a
-developer install.
+`PdfThumbnailsCli.exe --uninstall`. The window's Uninstall (with "Also clear the thumbnail cache")
+and `--uninstall --rebuild-thumbnails` also rebuild the thumbnail cache afterwards, which restarts
+File Explorer. From Installed apps, thumbnails File Explorer already made stay until it makes them
+again.
 
 ## Limits
 

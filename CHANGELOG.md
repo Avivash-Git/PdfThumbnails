@@ -15,6 +15,8 @@
   Installed apps and a Start menu shortcut. It upgrades an earlier 2.x in place and keeps every
   user's settings, and its uninstaller removes the product for every user who is signed in.
   Silent: `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
+- Every user of the PC is set up at their next sign-in (Active Setup), not only the one who
+  installed it. In 1.x each user had to run `install` for themselves.
 
 ### Changed
 

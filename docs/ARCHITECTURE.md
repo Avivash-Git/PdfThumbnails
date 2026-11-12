@@ -63,6 +63,7 @@ An install for one user goes to `%LOCALAPPDATA%\Programs\PdfThumbnails` with the
 | The log | `%LOCALAPPDATA%\PdfThumbnails\Logs\PdfThumbnails.log` (never PDF names) |
 | The scheduled check | Task Scheduler, `\PdfThumbnails\Check <user SID>`, one task per user |
 | The entry in Installed apps | `HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\{B4584E00-A586-4C24-996D-6032BFDEDE2F}_is1`, written by the installer |
+| Setting up every other user | Active Setup, `HKLM\Software\Microsoft\Active Setup\Installed Components\{77ADCA92-2D3C-47B0-ADA3-D17102A7576B}`: `--setup-user` once per user at their next sign-in |
 
 ## The check engine
 

@@ -309,7 +309,10 @@ taken from a CI run's `PdfThumbnails-setup-unsigned` artifact.
    in a folder of PDFs show at that zoom.
 5. **Again over itself.** Run `<setup>` once more: it finishes without asking to close anything
    File Explorer uses, and the status stays healthy.
-6. **Uninstall** from Installed apps: one administrator prompt, no question about a restart.
+6. **Uninstall** from the window, with "Also clear the thumbnail cache" checked: the window says
+   it waits for the uninstaller, one administrator prompt, then File Explorer restarts and PDFs
+   show their app's icon. Or from Installed apps: one administrator prompt, no question about a
+   restart, and thumbnails already made stay until File Explorer makes them again. Either way:
    `C:\Program Files\PdfThumbnails` is gone (or holds only a trash folder next to it until the
    restart), the Start menu entry and the Installed apps entry are gone, and PDFs show their
    app's icon once File Explorer makes their thumbnails again.
