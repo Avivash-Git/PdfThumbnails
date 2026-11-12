@@ -720,6 +720,28 @@ TEST_F(Setup, SetupUserWithoutAnySettingsWrites100) {
   EXPECT_EQ(StoredZoom(), 100u);
 }
 
+// Installed for all users, the per-user folder that 1.x's clean-up left empty (an empty app
+// folder in it) goes; one with anything else in it stays as it is.
+TEST_F(Setup, SetupUserRemovesTheEmptiedPerUserFolder) {
+  InstallForAllUsers();
+  ASSERT_TRUE(MakeDirs(paths_.userRoot / L"app"));
+  SetupUserOptions options;
+  options.context = probes_.context;
+  options.paths = paths_;
+  options.lockWaitMs = 5000;
+  SetupUserResult result;
+  ASSERT_HRESULT_SUCCEEDED(SetupUser(options, roots_, probes_, &result));
+  EXPECT_EQ(result.code, ExitCode::kOk);
+  EXPECT_TRUE(result.userRootRemoved);
+  EXPECT_FALSE(Exists(paths_.userRoot));
+
+  ASSERT_TRUE(MakeDirs(paths_.userRoot / L"app"));
+  ASSERT_TRUE(WriteFileText(paths_.userRoot / L"notes.txt", "mine"));
+  ASSERT_HRESULT_SUCCEEDED(SetupUser(options, roots_, probes_, &result));
+  EXPECT_FALSE(result.userRootRemoved);
+  EXPECT_TRUE(Exists(paths_.userRoot / L"notes.txt"));
+}
+
 // Another account's tasks hold every name the user's task may have: the task step fails in words
 // that name those tasks and who can remove them, and the other steps still run.
 TEST_F(Setup, SetupUserSaysWhenAnotherAccountHoldsTheTaskNames) {

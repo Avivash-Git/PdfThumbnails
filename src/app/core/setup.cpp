@@ -28,6 +28,26 @@ bool FileExists(const std::filesystem::path& path) noexcept {
          !(attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT));
 }
 
+// A real folder (not a link), with nothing but what RemoveDirectoryW checks: it removes only
+// empty folders.
+bool RemoveEmptyFolder(const std::filesystem::path& path) noexcept {
+  const DWORD attributes = GetFileAttributesW(path.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+      (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    return false;
+  }
+  return RemoveDirectoryW(path.c_str()) != FALSE;
+}
+
+// The per-user root when it is empty but for an empty app folder; true when it went.
+bool RemoveEmptyUserRoot(const std::filesystem::path& root) noexcept try {
+  if (root.empty() || !root.is_absolute()) return false;
+  RemoveEmptyFolder(root / kBuildsFolderName);
+  return RemoveEmptyFolder(root);
+} catch (...) {
+  return false;
+}
+
 // The context for a per-user step: the caller's, else the canary's. *refusal is set when the
 // step may not run in it.
 HRESULT UserContext(const std::optional<ProcessContext>& given, const SystemProbes& probes,
@@ -247,6 +267,18 @@ HRESULT SetupUser(const SetupUserOptions& options, const RegistryRoots& roots,
   }
   failures.insert(failures.end(), result->migration.failures.begin(),
                   result->migration.failures.end());
+
+  // 7b. Installed for all users, the per-user folder holds nothing of the product once 1.x's
+  // files are gone: it goes when it is empty (with an empty app folder in it), never otherwise.
+  {
+    std::optional<ClassReg> machine;
+    std::optional<ClassReg> user;
+    HRESULT hr = ReadClass(roots, Scope::kMachine, &machine);
+    if (SUCCEEDED(hr)) hr = ReadClass(roots, Scope::kUser, &user);
+    if (SUCCEEDED(hr) && machine && !user) {
+      result->userRootRemoved = RemoveEmptyUserRoot(before.paths.userRoot);
+    }
+  }
 
   // 8. Explorer reads associations once and keeps them.
   result->notified = NotifyAssocChanged(roots);

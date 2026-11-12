@@ -18,7 +18,9 @@
 //      administrator must remove them;
 //   6. this session's thumbnail processes that hold an old build's DLLs are ended (only Windows'
 //      own dllhost.exe of this user), so the new build loads at the next thumbnail;
-//   7. the user part of the 1.x clean-up (migrate_v1.h), with the task already registered;
+//   7. the user part of the 1.x clean-up (migrate_v1.h), with the task already registered; then,
+//      installed for all users with no per-user class, the per-user folder goes when it is left
+//      empty (or holds only an empty app folder), as 1.x's clean-up leaves it;
 //   8. Explorer is told that associations changed.
 //   Exit 0, or 5 when a step failed (the others still ran).
 //
@@ -112,6 +114,7 @@ struct SetupUserResult {
   TaskOptions task;  // what it was registered with
   size_t holdersEnded = 0;
   V1UserResult migration;
+  bool userRootRemoved = false;  // the per-user folder, left empty, went (step 7b)
   bool notified = false;
   // "<step>: <HRESULT>", no paths; for names another account's tasks hold, why in words, the
   // HRESULT and the way out, which names those tasks
