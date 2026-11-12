@@ -33,7 +33,9 @@
 
 #include <aclapi.h>
 #include <gtest/gtest.h>
+#include <knownfolders.h>
 #include <sddl.h>
+#include <shlobj.h>
 #include <wil/resource.h>
 
 #include <algorithm>
@@ -53,6 +55,7 @@
 #include "build_folder.h"
 #include "child_process.h"
 #include "file_ops.h"
+#include "inno.h"
 #include "json_check.h"
 #include "legacy.h"
 #include "medium_il.h"
@@ -1469,6 +1472,354 @@ TEST_F(System, ThumbnailRefreshAndRebuildAsTheUser) {
                 forced.exitCode, EvictionText(before, extracted).c_str());
   }
   ExpectNothingLeft();
+}
+
+// ---- The installer -------------------------------------------------------------------------
+
+// The setup to test (cmake/Installer.cmake's output), and an earlier one of another build for the
+// upgrade; without the first, the installer's tests skip.
+constexpr wchar_t kSetupEnv[] = L"PDFT_SYSTEM_SETUP";
+constexpr wchar_t kEarlierSetupEnv[] = L"PDFT_SYSTEM_SETUP_EARLIER";
+// Inno Setup's switches for an install or uninstall nobody watches: no questions, no message
+// boxes (each one takes its default answer), never a restart.
+constexpr wchar_t kSilent[] = L"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART";
+// How long the uninstaller may take to remove its record and folder after it has exited.
+constexpr DWORD kUninstallSettleMs = 60 * 1000;
+
+// The installer as a person uses it: Setup started by the test account (an administrator with the
+// limited token of a normal sign-in), so it asks for administrator rights through UAC and runs the
+// signed-in user's step as that account, as it would on a PC of someone who installs it; the
+// uninstaller from Installed apps, the same way.
+class Installer : public System {
+ protected:
+  void SetUp() override {
+    const std::wstring setup = EnvironmentValue(kSetupEnv);
+    if (setup.empty()) GTEST_SKIP() << Text(kSetupEnv) << " names no setup";
+    ASSERT_NO_FATAL_FAILURE(System::SetUp());
+    setup_ = CopySetup(setup, L"setup.exe");
+    ASSERT_FALSE(setup_.empty());
+    const std::wstring earlier = EnvironmentValue(kEarlierSetupEnv);
+    if (!earlier.empty()) {
+      earlierSetup_ = CopySetup(earlier, L"setup-earlier.exe");
+      ASSERT_FALSE(earlierSetup_.empty());
+    }
+  }
+
+  void TearDown() override {
+    // A test that failed half-way leaves the installer's record: its uninstaller goes first, run
+    // as an administrator, then whatever it left.
+    if (Record()) {
+      std::printf("[ installer ] cleaning up: the installer's record is still there\n");
+      const path uninstaller = machineRoot_ / L"unins000.exe";
+      if (Exists(uninstaller)) (void)Admin(uninstaller, kSilent);
+      WaitForUninstall();
+      if (Record()) {
+        (void)RegDeleteTreeW(HKEY_LOCAL_MACHINE, InnoUninstallKey().c_str());
+        (void)RegDeleteKeyExW(HKEY_LOCAL_MACHINE, InnoUninstallKey().c_str(), KEY_WOW64_64KEY, 0);
+      }
+    }
+    if (Exists(Shortcut())) DeleteFileW(Shortcut().c_str());
+    System::TearDown();
+  }
+
+  // |from|, copied into the test's scratch folder, which the test account can read.
+  path CopySetup(const std::wstring& from, const wchar_t* name) {
+    const path to = scratch_ / name;
+    if (!CopyFileW(from.c_str(), to.c_str(), FALSE)) {
+      ADD_FAILURE() << "cannot copy " << Text(from) << ": " << GetLastError();
+      return {};
+    }
+    return to;
+  }
+
+  // Setup |setup| started by the test account, silently, with its log in the scratch folder:
+  // printed when it failed, else only the lines about the settings program's steps.
+  Outcome RunSetup(const path& setup, std::wstring_view label) {
+    const path log = scratch_ / (std::wstring(label) + L".log");
+    const Outcome run =
+        User(setup, std::wstring(kSilent) + L" /LOG=" + test::QuoteArgument(log.native()));
+    std::printf("[ installer ] %s -> exit %lu\n", Text(label).c_str(), run.exitCode);
+    PrintLog(log, run.exitCode != 0);
+    return run;
+  }
+
+  // The uninstaller in the install folder, started by the test account as Installed apps starts
+  // it, silently; then the record and the folder must go.
+  Outcome RunUninstaller() {
+    const path log = scratch_ / L"uninstall.log";
+    const Outcome run = User(machineRoot_ / L"unins000.exe",
+                             std::wstring(kSilent) + L" /LOG=" + test::QuoteArgument(log.native()));
+    std::printf("[ installer ] uninstaller -> exit %lu\n", run.exitCode);
+    PrintLog(log, run.exitCode != 0);
+    WaitForUninstall();
+    return run;
+  }
+
+  static void PrintLog(const path& log, bool all) {
+    std::ifstream file(log, std::ios::binary);
+    if (!file.good()) {
+      std::printf("[ installer ] no log at %s\n", Text(log.native()).c_str());
+      return;
+    }
+    std::string line;
+    size_t printed = 0;
+    while (std::getline(file, line) && printed < 400) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      const bool step = line.find("Running ") != std::string::npos ||
+                        line.find("Exit code") != std::string::npos ||
+                        line.find("could not start") != std::string::npos ||
+                        line.find("--setup") != std::string::npos ||
+                        line.find("class for all users") != std::string::npos ||
+                        line.find("Error") != std::string::npos ||
+                        line.find("rror ") != std::string::npos;
+      if (all || step) {
+        std::printf("[ installer ] log: %s\n", line.c_str());
+        ++printed;
+      }
+    }
+  }
+
+  // The uninstaller exits while its last phase may still be deleting itself and the folder.
+  void WaitForUninstall() {
+    const ULONGLONG deadline = GetTickCount64() + kUninstallSettleMs;
+    while ((Record() || Exists(machineRoot_ / L"unins000.exe")) && GetTickCount64() < deadline) {
+      Sleep(500);
+    }
+  }
+
+  // The installer's record (Installed apps) for all users.
+  static bool Record() {
+    bool exists = false;
+    EXPECT_HRESULT_SUCCEEDED(RegistryKeyExists(HKEY_LOCAL_MACHINE, InnoUninstallKey(), &exists));
+    return exists;
+  }
+
+  static std::wstring RecordValue(const wchar_t* name) {
+    std::optional<std::wstring> value;
+    EXPECT_HRESULT_SUCCEEDED(
+        ReadRegistryString(HKEY_LOCAL_MACHINE, InnoUninstallKey(), name, &value));
+    return value.value_or(L"");
+  }
+
+  // The Start menu shortcut, for all users.
+  static path Shortcut() {
+    wil::unique_cotaskmem_string folder;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_CommonPrograms, 0, nullptr, &folder))) return {};
+    return path(folder.get()) / (std::wstring(kProductName) + L".lnk");
+  }
+
+  // The build the class for all users names (its folder's name); empty when there is none.
+  std::wstring ClassBuild() const {
+    const std::optional<std::wstring> dll = ClassDll(Scope::kMachine);
+    if (!dll) return {};
+    return path(*dll).parent_path().filename().native();
+  }
+
+  // What the setup installed: the files, the class at a complete build of this version in the
+  // install folder, the user's part, the record in Installed apps (for all users only, pointing
+  // at the uninstaller in the install folder) and the Start menu shortcut. buildName_ becomes the
+  // installed build, for the System checks.
+  void ExpectInstalledBySetup(const std::wstring& version) {
+    ASSERT_TRUE(Record()) << "no record in Installed apps";
+    buildName_ = ClassBuild();
+    std::printf("[ installer ] class for all users -> app\\%s\n", Text(buildName_).c_str());
+    ASSERT_FALSE(buildName_.empty());
+    ASSERT_TRUE(IsMachineClassPath(machineRoot_, BuildDll()));
+    ExpectInstalledForAllUsers();
+    EXPECT_EQ(RecordValue(L"DisplayName"), kProductName);
+    EXPECT_EQ(RecordValue(L"DisplayVersion"), version);
+    EXPECT_FALSE(RecordValue(L"Publisher").empty());
+    path uninstaller;
+    EXPECT_HRESULT_SUCCEEDED(
+        ParseInnoUninstallString(RecordValue(L"UninstallString"), &uninstaller));
+    EXPECT_TRUE(IEquals(uninstaller.native(), (machineRoot_ / L"unins000.exe").native()))
+        << Text(uninstaller.native());
+    EXPECT_TRUE(IEquals(RecordValue(L"DisplayIcon"), (machineRoot_ / kSettingsExe).native()))
+        << Text(RecordValue(L"DisplayIcon"));
+    bool userRecord = true;
+    EXPECT_HRESULT_SUCCEEDED(RegistryKeyExists(hive_, InnoUninstallKey(), &userRecord));
+    EXPECT_FALSE(userRecord);
+    EXPECT_TRUE(Exists(Shortcut())) << Text(Shortcut().native());
+    std::printf("[ installer ] Installed apps: %s %s, uninstaller %s\n",
+                Text(RecordValue(L"DisplayName")).c_str(),
+                Text(RecordValue(L"DisplayVersion")).c_str(),
+                Text(RecordValue(L"UninstallString")).c_str());
+  }
+
+  // The installed program's own version text: its ProductVersion, which the setup shows.
+  std::wstring InstalledVersion() {
+    const Outcome version = User(InstalledCli(), L"--version");
+    std::string text = version.out;
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+    // "<product> <version>", possibly with more words after a space.
+    const size_t space = text.find(' ');
+    std::string number = space == std::string::npos ? text : text.substr(space + 1);
+    number = number.substr(0, number.find(' '));
+    return Utf8(number);
+  }
+
+  // Healthy, but for the Explorer test, which a runner without a desktop may fail.
+  void ExpectHealthyAfterSetup(DWORD zoom) {
+    const Status status = ReadStatus();
+    std::vector<std::string> others;
+    for (const Finding& finding : status.breaking) {
+      const bool explorerTest =
+          std::find(std::begin(kExplorerTestFindings), std::end(kExplorerTestFindings),
+                    finding.id) != std::end(kExplorerTestFindings);
+      std::printf("[ installer ] not healthy: %s: %s%s\n", finding.id.c_str(), finding.text.c_str(),
+                  explorerTest ? " (the Explorer test: informational)" : "");
+      if (!explorerTest) others.push_back(finding.id + ": " + finding.text);
+    }
+    EXPECT_TRUE(others.empty()) << Lines(others);
+    ExpectStatusForAllUsers(status, zoom);
+  }
+
+  // After the uninstaller: the record, the shortcut and everything else. The data folder of the
+  // test account (the log of its commands) is left to a sign-in clean-up the uninstaller
+  // scheduled; it is checked and removed here, since that sign-in never comes.
+  void ExpectUninstalled() {
+    EXPECT_FALSE(Record());
+    EXPECT_FALSE(Exists(Shortcut()));
+    EXPECT_FALSE(Exists(machineRoot_ / L"unins000.exe"));
+    EXPECT_FALSE(ClassDll(Scope::kMachine).has_value());
+    for (const std::wstring& name : RunOnceValues()) {
+      std::optional<std::wstring> command;
+      EXPECT_HRESULT_SUCCEEDED(ReadRegistryString(hive_, kRunOnceKey, name, &command));
+      std::printf("[ installer ] sign-in clean-up %s: %s\n", Text(name).c_str(),
+                  Text(command.value_or(L"")).c_str());
+      EXPECT_NE(command.value_or(L"").find(dataDir_.native()), std::wstring::npos);
+    }
+    ASSERT_HRESULT_SUCCEEDED(DeleteRunOnceRemovals(Roots()));
+    if (Exists(dataDir_)) EXPECT_HRESULT_SUCCEEDED(RemoveTreeNoFollow(dataDir_));
+    ExpectNothingLeft();
+  }
+
+  path setup_;
+  path earlierSetup_;
+};
+
+// Installed and uninstalled the way a person does it: Setup, then the uninstaller from Installed
+// apps.
+TEST_F(Installer, InstallAndUninstall) {
+  const Outcome setup = RunSetup(setup_, L"setup");
+  ASSERT_EQ(setup.exitCode, 0u);
+  const std::wstring version = InstalledVersion();
+  std::printf("[ installer ] installed version %s\n", Text(version).c_str());
+  ASSERT_NO_FATAL_FAILURE(ExpectInstalledBySetup(version));
+  EXPECT_EQ(StoredZoom(), std::optional<DWORD>(100));
+  ExpectHealthyAfterSetup(100);
+  // The developer install steps aside while the installer's install is there (and a release build
+  // has no such command at all).
+  EXPECT_NE(User(InstalledCli(), L"--install --machine").exitCode, 0u);
+
+  const Outcome uninstall = RunUninstaller();
+  EXPECT_EQ(uninstall.exitCode, 0u);
+  ExpectUninstalled();
+}
+
+// The uninstall from the program itself: --uninstall runs the installer's uninstaller, from the
+// install folder it is about to empty (the running program goes to a trash folder).
+TEST_F(Installer, UninstallFromTheProgram) {
+  ASSERT_EQ(RunSetup(setup_, L"setup").exitCode, 0u);
+  ASSERT_TRUE(Record());
+  const Outcome uninstall = User(InstalledCli(), L"--uninstall --yes");
+  EXPECT_EQ(uninstall.exitCode, 0u) << uninstall.Output();
+  WaitForUninstall();
+  ExpectUninstalled();
+}
+
+// An earlier setup of another build, with the user's choices changed, then this one: the class
+// moves to the new build, the old build goes, one record shows the new version, and the zoom and
+// the checks stay as the user set them.
+TEST_F(Installer, UpgradeOverAnEarlierSetup) {
+  if (earlierSetup_.empty()) GTEST_SKIP() << Text(kEarlierSetupEnv) << " names no setup";
+  ASSERT_EQ(RunSetup(earlierSetup_, L"setup-earlier").exitCode, 0u);
+  const std::wstring earlier = ClassBuild();
+  std::printf("[ installer ] earlier build: app\\%s, version %s\n", Text(earlier).c_str(),
+              Text(RecordValue(L"DisplayVersion")).c_str());
+  ASSERT_FALSE(earlier.empty());
+  EXPECT_EQ(User(InstalledCli(), L"--zoom 130 --no-refresh").exitCode, 0u);
+  EXPECT_EQ(User(InstalledCli(), L"--checks signin").exitCode, 0u);
+
+  ASSERT_EQ(RunSetup(setup_, L"setup").exitCode, 0u);
+  buildName_ = ClassBuild();
+  std::printf("[ installer ] upgraded: app\\%s -> app\\%s\n", Text(earlier).c_str(),
+              Text(buildName_).c_str());
+  EXPECT_NE(buildName_, earlier);
+  EXPECT_FALSE(Exists(machineRoot_ / L"app" / earlier));
+  EXPECT_EQ(RecordValue(L"DisplayVersion"), InstalledVersion());
+  EXPECT_EQ(StoredZoom(), std::optional<DWORD>(130));
+  ExpectTask(false, true);
+  // Everything else as after a fresh install, but for the checks the user chose.
+  EXPECT_EQ(User(InstalledCli(), L"--checks default").exitCode, 0u);
+  ASSERT_NO_FATAL_FAILURE(ExpectInstalledBySetup(InstalledVersion()));
+  ExpectHealthyAfterSetup(130);
+
+  EXPECT_EQ(RunUninstaller().exitCode, 0u);
+  ExpectUninstalled();
+}
+
+// A developer install for all users (--install --machine from a build), then the setup over it:
+// the setup takes it over and its uninstaller removes everything.
+TEST_F(Installer, UpgradeOverADeveloperInstall) {
+  const Outcome install = User(Cli(), L"--install --machine");
+  ASSERT_NO_FATAL_FAILURE(ExpectAdministratorRights(L"machine-install", install));
+  ExpectInstalledForAllUsers();
+  EXPECT_EQ(User(InstalledCli(), L"--zoom 120 --no-refresh").exitCode, 0u);
+
+  ASSERT_EQ(RunSetup(setup_, L"setup").exitCode, 0u);
+  ASSERT_NO_FATAL_FAILURE(ExpectInstalledBySetup(InstalledVersion()));
+  EXPECT_EQ(StoredZoom(), std::optional<DWORD>(120));
+  ExpectHealthyAfterSetup(120);
+
+  EXPECT_EQ(RunUninstaller().exitCode, 0u);
+  ExpectUninstalled();
+}
+
+// 1.1 installed for all users, with its per-user files, settings, task and sign-in clean-up: the
+// setup replaces it and keeps its zoom.
+TEST_F(Installer, Replaces11ForAllUsers) {
+  const path v1 = PlantV1Build(machineRoot_);
+  PlantClass(HKEY_LOCAL_MACHINE, v1);
+  for (size_t i = 0; i < kSlotCount; ++i) {
+    ASSERT_HRESULT_SUCCEEDED(WriteRegistryString(hive_, SlotKeyPath(i), L"", kHandlerClsidString));
+  }
+  PlantV1UserFolder(120);
+  PlantRunOnce();
+  PlantLegacyTask();
+
+  ASSERT_EQ(RunSetup(setup_, L"setup").exitCode, 0u);
+  ASSERT_NO_FATAL_FAILURE(ExpectInstalledBySetup(InstalledVersion()));
+  EXPECT_FALSE(Exists(v1.parent_path()));
+  EXPECT_EQ(StoredZoom(), std::optional<DWORD>(120));
+  ExpectV1UserFilesGone();
+  ExpectHealthyAfterSetup(120);
+
+  EXPECT_EQ(RunUninstaller().exitCode, 0u);
+  ExpectUninstalled();
+}
+
+// Setup started by an administrator's own elevated token (as with "Run as administrator", or a
+// deployment tool): the part for all users is done, the signed-in user's step refuses an
+// elevated process, and Setup says so with its exit code (200 + 8). The test account then sets
+// itself up with --setup-user, as Setup's message tells a person to.
+TEST_F(Installer, StartedAsAdministrator) {
+  const path log = scratch_ / L"setup-admin.log";
+  const Outcome setup =
+      Admin(setup_, std::wstring(kSilent) + L" /LOG=" + test::QuoteArgument(log.native()));
+  std::printf("[ installer ] setup as administrator -> exit %lu\n", setup.exitCode);
+  PrintLog(log, setup.exitCode != 208);
+  EXPECT_EQ(setup.exitCode, 208u);
+  ASSERT_TRUE(Record());
+  buildName_ = ClassBuild();
+  ASSERT_FALSE(buildName_.empty());
+  EXPECT_FALSE(UserTask().exists);
+  const Outcome setupUser = User(InstalledCli(), L"--setup-user");
+  EXPECT_EQ(setupUser.exitCode, 0u) << setupUser.Output();
+  ExpectInstalledBySetup(InstalledVersion());
+
+  EXPECT_EQ(RunUninstaller().exitCode, 0u);
+  ExpectUninstalled();
 }
 
 }  // namespace
