@@ -65,16 +65,16 @@
     {
       "name": "release-x64",
       "displayName": "Release x64 (what the installer ships)",
-      "description": "ci-x64 without the developer install commands, the tests and the tools: the runtime only.",
+      "description": "ci-x64 without the developer install commands, the tests and the tools: the runtime only, checked by the static gates.",
       "inherits": [ "ci-x64" ],
-      "cacheVariables": { "PDFT_DEV_INSTALL": "OFF", "BUILD_TESTING": "OFF", "PDFT_BUILD_TOOLS": "OFF" }
+      "cacheVariables": { "PDFT_DEV_INSTALL": "OFF", "BUILD_TESTING": "OFF", "PDFT_BUILD_TOOLS": "OFF", "PDFT_GATES": "ON" }
     },
     {
       "name": "release-arm64",
       "displayName": "Release ARM64 (what the installer ships)",
-      "description": "ci-arm64 without the developer install commands, the tests and the tools: the runtime only.",
+      "description": "ci-arm64 without the developer install commands, the tests and the tools: the runtime only, checked by the static gates.",
       "inherits": [ "ci-arm64" ],
-      "cacheVariables": { "PDFT_DEV_INSTALL": "OFF", "BUILD_TESTING": "OFF", "PDFT_BUILD_TOOLS": "OFF" }
+      "cacheVariables": { "PDFT_DEV_INSTALL": "OFF", "BUILD_TESTING": "OFF", "PDFT_BUILD_TOOLS": "OFF", "PDFT_GATES": "ON" }
     }
   ],
   "buildPresets": [
@@ -122,7 +122,19 @@
       }
     },
     { "name": "ci-x64", "configurePreset": "ci-x64", "inherits": [ "x64-native" ] },
-    { "name": "ci-arm64", "configurePreset": "ci-arm64", "inherits": [ "arm64-cross" ] }
+    { "name": "ci-arm64", "configurePreset": "ci-arm64", "inherits": [ "arm64-cross" ] },
+    {
+      "name": "release-x64",
+      "configurePreset": "release-x64",
+      "description": "The static gates on the runtime the installer ships (no tests are built).",
+      "inherits": [ "arm64-cross" ]
+    },
+    {
+      "name": "release-arm64",
+      "configurePreset": "release-arm64",
+      "description": "The static gates on the runtime the installer ships (no tests are built).",
+      "inherits": [ "arm64-cross" ]
+    }
   ],
   "workflowPresets": [
     {
@@ -192,14 +204,16 @@
       "name": "release-x64",
       "steps": [
         { "type": "configure", "name": "release-x64" },
-        { "type": "build", "name": "release-x64" }
+        { "type": "build", "name": "release-x64" },
+        { "type": "test", "name": "release-x64" }
       ]
     },
     {
       "name": "release-arm64",
       "steps": [
         { "type": "configure", "name": "release-arm64" },
-        { "type": "build", "name": "release-arm64" }
+        { "type": "build", "name": "release-arm64" },
+        { "type": "test", "name": "release-arm64" }
       ]
     }
   ]

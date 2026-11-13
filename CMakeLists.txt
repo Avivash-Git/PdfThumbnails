@@ -72,6 +72,10 @@ endif()
 
 include(cmake/Install.cmake)
 
-if(BUILD_TESTING)
+# The gates are static checks of the staged runtime, so the release-* presets register them too,
+# without the tests: they then check the very bytes the installer ships.
+option(PDFT_GATES "Register the gates (ctest -L gate), also without the tests" ${BUILD_TESTING})
+if(BUILD_TESTING OR PDFT_GATES)
+  enable_testing()
   include(cmake/Gates.cmake)
 endif()

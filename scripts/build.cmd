@@ -4,7 +4,8 @@ rem   scripts\build.cmd <preset>      x64-release | x64-debug | arm64-release | 
 rem                                   x64-asan | ci-x64 | ci-arm64 | ci-x64-build |
 rem                                   release-x64 | release-arm64
 rem (ci-x64-build: ci-x64 configured and built, no tests; for CodeQL. release-*: the runtime the
-rem installer ships, configured and built: no developer install commands, no tests, no tools.)
+rem installer ships, configured, built and checked by the static gates: no developer install
+rem commands, no tests, no tools.)
 rem Finds Visual Studio with vswhere, sets up the compiler environment with vcvarsall, then runs
 rem "cmake --workflow --preset <preset>" in the repository root. Needs Visual Studio 2026 18.11 or
 rem later (MSVC v145) and CMake 4.3 or later: vcvarsall appends Visual Studio's CMake to PATH, so
