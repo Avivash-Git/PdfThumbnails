@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration "setup": the second signing request of a signed build
+  (.github/workflows/build.yml, job installer, PDFT_SIGNING=signpath; docs/CODE_SIGNING.md).
+
+  The artifact is the setup alone, uploaded as a file (not a ZIP): one setup for x64 and ARM64
+  PCs, built by cmake/Installer.cmake -DSIGN=EXTERNAL from the runtimes and uninstaller that the
+  "runtimes" request signed. It must carry the product name and the version the build passes in.
+
+  This file is the source of the configuration kept in SignPath; a change here is copied there.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" />
+  </parameters>
+  <pe-file path="PdfThumbnails-*-setup.exe" product-name="PdfThumbnails" product-version="${version}">
+    <authenticode-sign />
+  </pe-file>
+</artifact-configuration>

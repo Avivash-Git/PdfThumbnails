@@ -92,7 +92,8 @@ again.
 
 - **Smart App Control.** The program isn't code-signed yet, so with Smart App Control on, Windows
   may block it. The status window says when that is happening. A build you made yourself usually
-  isn't blocked, because it doesn't carry the mark Windows puts on downloads.
+  isn't blocked, because it doesn't carry the mark Windows puts on downloads. Signed releases are
+  planned: see the [code signing policy](docs/CODE_SIGNING.md).
 - These files keep the plain icon: PDFs that need a password to open, dynamic XFA forms made for
   Adobe Reader, files over 256 MiB, and files that take too long to draw.
 - 32-bit programs' Open and Save dialogs show icons.
@@ -132,7 +133,7 @@ in a short-lived separate process. The zoom lives in
 - [Changes since 1.x](CHANGELOG.md): what behaves differently, and what happens to a 1.x install
 - [Contributing](CONTRIBUTING.md), [code of conduct](CODE_OF_CONDUCT.md),
   [reporting security problems](SECURITY.md)
-- [Maintaining the project](docs/MAINTAINING.md)
+- [Maintaining the project](docs/MAINTAINING.md), [code signing policy](docs/CODE_SIGNING.md)
 
 ## Licenses
 

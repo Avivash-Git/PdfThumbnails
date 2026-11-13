@@ -388,15 +388,21 @@ machine is best: the pass installs and uninstalls for all users.
 3. **Signature.** `Get-AuthenticodeSignature <signed>` shows `Valid` and the publisher's
    certificate; the file's Properties > Digital Signatures shows a timestamp.
 4. **Install.** Run `<signed>`. SmartScreen may still say the publisher is new ("unrecognized
-   app") while the certificate has little reputation; the publisher's name must show there.
+   app") while the certificate has little reputation; the publisher's name must show there
+   (SignPath Foundation, for a build signed through SignPath).
    Smart App Control must not block Setup, its temporary files or the uninstaller it writes.
 5. **Every installed file signed.** In PowerShell:
    `Get-ChildItem 'C:\Program Files\PdfThumbnails' -Recurse -Include *.exe,*.dll | Get-AuthenticodeSignature | Format-Table Status, Path`:
-   every line `Valid`, `unins000.exe` and both DLLs in `app\<build folder>` included.
+   every line `Valid`, `unins000.exe` and `PdfThumbnails.dll` in `app\<build folder>` included.
+   `PdfThumbnails-pdfium.dll` is `Valid` too, except in a build that leaves it unsigned
+   (`PDFT_SIGN_PDFIUM=off`, every build signed through SignPath), where it is `NotSigned`.
 6. **Thumbnails.** Open a folder of PDFs (downloaded ones too) with large icons: thumbnails show.
    `PdfThumbnailsCli.exe --status` ends with `Result: healthy`, and its Smart App Control line
    says PdfThumbnails is not being blocked. No new CodeIntegrity 3077 or 3033 event names a file
-   in `C:\Program Files\PdfThumbnails`.
+   in `C:\Program Files\PdfThumbnails`. With an unsigned PDFium DLL this is the step that
+   matters: it shows whether Smart App Control lets File Explorer's thumbnail process load an
+   unsigned DLL that a signed setup wrote (the file has no download mark). Repeat it after a
+   restart, and again a day later, and note the result in the issue or pull request of the pass.
 7. **The check task and the window.** Sign out and in: the log has a `check` line from the task.
    The window opens from the Start menu; Check now and Save with a new zoom work.
 8. **Upgrade.** Download a newer signed setup the same way and run it over the first: healthy,

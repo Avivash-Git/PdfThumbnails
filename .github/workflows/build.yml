@@ -17,6 +17,8 @@
 #                     real (not on pull requests, unless called)
 #   release (x64|arm64) the runtime the installer ships: the release-* presets (no developer
 #                     install commands, no tests, no tools), x64 and ARM64 built on the x64 runner
+#                     and checked by the static gates (ctest label "gate"), so the checks cover
+#                     the very bytes the setup ships
 #   installer         Inno Setup on the x64 runner: one setup for both architectures from the two
 #                     release runtimes (cmake/Installer.cmake), and an earlier setup of another
 #                     build for the upgrade test
@@ -49,11 +51,18 @@
 #                        too: the job needs only CTest).
 #   PDFT_ARM64_TESTS     "off" skips test-arm64, for when no ARM64 runner is available to the
 #                        repository's plan.
-#   PDFT_SIGNING         how signed runs sign: certificate or artifact-signing (cmake/Sign.cmake).
+#   PDFT_SIGNING         how signed runs sign: signpath (SignPath signs on its side; the plan,
+#                        docs/CODE_SIGNING.md), or certificate or artifact-signing (SignTool on the
+#                        runner, cmake/Sign.cmake).
 #   PDFT_SIGN_PDFIUM     "off" leaves the PDFium DLL unsigned, for a service that signs only the
-#                        project's own files.
+#                        project's own files (always off with signpath).
 #   PDFT_SIGN_SUBJECT    text the signing certificate's subject must contain (e.g. the
 #                        publisher's name), checked on every signed file.
+#   SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG (default PdfThumbnails),
+#   SIGNPATH_SIGNING_POLICY_SLUG (default release-signing)
+#                        signpath: where the requests go. Its API token is the secret
+#                        SIGNPATH_API_TOKEN of the "signing" environment; the artifact
+#                        configurations "runtimes" and "setup" are signpath/*.xml.
 #
 # Artifacts are developer builds, not releases: PdfThumbnails-<arch>-unsigned (the runtime
 # staging tree), symbols-<arch> (its PDBs), tests-<arch> (test bundle for test-arm64),
@@ -639,7 +648,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: cmake -DARCH=%PDFT_ARCH% -DVERIFY_ATTESTATION=ON -P cmake/FetchPdfium.cmake
 
-      - name: Configure and build (scripts\build.cmd release-${{ matrix.arch }})
+      - name: Configure, build and gate (scripts\build.cmd release-${{ matrix.arch }})
         env:
           PDFT_VS_VERSION: ${{ vars.PDFT_VS_VERSION }}
         run: |
@@ -671,32 +680,47 @@ jobs:
   # it gets: it signs both runtimes first (the build folder names come from the signed bytes),
   # then Inno Setup signs the setup, its uninstaller and its temporary copies, and every signature
   # is checked. In other runs the files stay unsigned and the check only reports.
+  #
+  # With PDFT_SIGNING=signpath the files are signed on SignPath's side instead, after a person
+  # approves the request there (docs/CODE_SIGNING.md), in two requests: first both runtimes and
+  # the uninstaller Inno Setup writes (signpath/runtimes.xml; PDFium stays unsigned), then the
+  # setup built from them (signpath/setup.xml).
   installer:
     needs: release
     runs-on: ${{ vars.PDFT_WIN_X64_RUNNER || 'windows-2025' }}
-    timeout-minutes: 20
+    # A signed run waits for its signing requests to be approved.
+    timeout-minutes: ${{ inputs.sign && 150 || 20 }}
     environment: ${{ inputs.sign && 'signing' || '' }}
     permissions:
       contents: read
+      actions: read
     env:
       PDFT_SIGNING: ${{ inputs.sign && vars.PDFT_SIGNING || '' }}
-      PDFT_SIGN_PDFIUM: ${{ vars.PDFT_SIGN_PDFIUM }}
+      PDFT_SIGN_PDFIUM: ${{ inputs.sign && vars.PDFT_SIGNING == 'signpath' && 'off' || vars.PDFT_SIGN_PDFIUM }}
       SIGN: ${{ inputs.sign && 'ON' || 'OFF' }}
     steps:
       - name: Signing on or off
         run: |
+          >> "%GITHUB_ENV%" echo INSTALLER_SIGN=-DSIGN=%SIGN%
           if "%SIGN%"=="OFF" (echo Signing is off: the setup and its files are unsigned.& exit /b 0)
           if not defined PDFT_SIGNING (echo ::error::sign is true, but the repository variable PDFT_SIGNING is empty: docs/BUILDING.md, "Code signing"& exit /b 1)
+          if "%PDFT_SIGNING%"=="signpath" >> "%GITHUB_ENV%" echo INSTALLER_SIGN=-DSIGN=EXTERNAL -DUNINSTALLER_DIR=uninstaller
           echo Signing with %PDFT_SIGNING%.
 
-      # The signing service's own steps, which make its identity usable by SignTool on this runner,
-      # come with the choice of a service (docs/BUILDING.md, "Code signing"). Until then a signed
+      # SignPath needs no identity on the runner, only its settings. For the SignTool modes, the
+      # signing service's own steps, which make its identity usable by SignTool on this runner,
+      # come with the choice of such a service (docs/BUILDING.md, "Code signing"). Until then such a
       # run stops here instead of producing unsigned files.
       - name: Make the signing identity available
         if: env.SIGN == 'ON'
+        env:
+          SIGNPATH_TOKEN_SET: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
         run: |
-          echo ::error::PDFT_SIGNING=%PDFT_SIGNING%: this workflow has no steps yet that make a signing identity available on the runner
-          exit /b 1
+          if not "%PDFT_SIGNING%"=="signpath" (echo ::error::PDFT_SIGNING=%PDFT_SIGNING%: this workflow has no steps yet that make a signing identity available on the runner& exit /b 1)
+          if not "%SIGNPATH_TOKEN_SET%"=="true" (echo ::error::PDFT_SIGNING=signpath needs the secret SIGNPATH_API_TOKEN in the signing environment& exit /b 1)
+          if not defined SIGNPATH_ORGANIZATION_ID (echo ::error::PDFT_SIGNING=signpath needs the variable SIGNPATH_ORGANIZATION_ID& exit /b 1)
+          echo Signing through SignPath; PDFium stays unsigned.
 
 
       - name: Check out
@@ -717,15 +741,113 @@ jobs:
           path: release/arm64
 
       - name: Sign both runtimes (cmake/Sign.cmake)
-        if: env.SIGN == 'ON'
+        if: env.SIGN == 'ON' && env.PDFT_SIGNING != 'signpath'
         run: |
           cmake -DDIR=release\x64 -P cmake\Sign.cmake || exit /b 1
           cmake -DDIR=release\arm64 -P cmake\Sign.cmake || exit /b 1
 
+      # SignPath, first request: both runtimes and the uninstaller, in the layout
+      # signpath/runtimes.xml describes. The version is the one every signed file must carry.
+      - name: Gather the files for SignPath (runtimes and uninstaller)
+        if: env.SIGN == 'ON' && env.PDFT_SIGNING == 'signpath'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -DRUNTIME_X64=release\x64 -DRUNTIME_ARM64=release\arm64 -DOUTPUT_DIR=out\setup `
+            -DSIGN=EXTERNAL -DUNINSTALLER_DIR=uninstaller -DPREPARE=ON -P cmake\Installer.cmake
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path to-sign | Out-Null
+          Copy-Item -Recurse -LiteralPath release\x64, release\arm64, uninstaller -Destination to-sign
+          $version = (Get-Item -LiteralPath release\x64\PdfThumbnailsSettings.exe).VersionInfo.ProductVersion
+          if (-not $version) { throw 'PdfThumbnailsSettings.exe has no ProductVersion' }
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "PRODUCT_VERSION=$version`n")
+          "Product version: $version"
+          Get-ChildItem -Recurse -File to-sign | ForEach-Object { $_.FullName }
+
+      - name: Upload the files for SignPath
+        id: signpath-runtimes
+        if: env.SIGN == 'ON' && env.PDFT_SIGNING == 'signpath'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signpath-runtimes
+          path: to-sign/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Have SignPath sign the runtimes and the uninstaller
+        if: env.SIGN == 'ON' && env.PDFT_SIGNING == 'signpath'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'PdfThumbnails' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: runtimes
+          github-artifact-id: ${{ steps.signpath-runtimes.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 5400
+          output-artifact-directory: signed
+          parameters: |
+            version: ${{ toJSON(env.PRODUCT_VERSION) }}
+
+      - name: Use the signed runtimes and uninstaller
+        if: env.SIGN == 'ON' && env.PDFT_SIGNING == 'signpath'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($dir in 'x64', 'arm64') {
+            Remove-Item -Recurse -LiteralPath "release\$dir"
+            Copy-Item -Recurse -LiteralPath "signed\$dir" -Destination release
+          }
+          Remove-Item -Recurse -LiteralPath uninstaller
+          Copy-Item -Recurse -LiteralPath signed\uninstaller -Destination .
+          cmake "-DPATHS=release\x64;release\arm64;$((Get-ChildItem uninstaller\uninst-*.e32).FullName)" `
+            -DREQUIRE=ON -P cmake\VerifySignatures.cmake
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build the setup (cmake/Installer.cmake)
         run: |
           cmake --version
-          cmake -DRUNTIME_X64=release\x64 -DRUNTIME_ARM64=release\arm64 -DOUTPUT_DIR=out\setup -DSIGN=%SIGN% -P cmake\Installer.cmake
+          cmake -DRUNTIME_X64=release\x64 -DRUNTIME_ARM64=release\arm64 -DOUTPUT_DIR=out\setup %INSTALLER_SIGN% -P cmake\Installer.cmake
+
+      # SignPath, second request: the setup itself, uploaded as the file alone.
+      - name: Upload the setup for SignPath
+        id: signpath-setup
+        if: env.SIGN == 'ON' && env.PDFT_SIGNING == 'signpath'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: out/setup/*.exe
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Have SignPath sign the setup
+        if: env.SIGN == 'ON' && env.PDFT_SIGNING == 'signpath'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'PdfThumbnails' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: setup
+          github-artifact-id: ${{ steps.signpath-setup.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 5400
+          output-artifact-directory: signed-setup
+          skip-decompress: true
+          parameters: |
+            version: ${{ toJSON(env.PRODUCT_VERSION) }}
+
+      - name: Use the signed setup
+        if: env.SIGN == 'ON' && env.PDFT_SIGNING == 'signpath'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = @(Get-ChildItem out\setup\*.exe)
+          $signed = @(Get-ChildItem -File signed-setup)
+          if ($setup.Count -ne 1 -or $signed.Count -ne 1) { throw "Expected one setup and one signed file, found $($setup.Count) and $($signed.Count)" }
+          Copy-Item -LiteralPath $signed[0].FullName -Destination $setup[0].FullName -Force
+          (Get-FileHash -Algorithm SHA256 -LiteralPath $setup[0].FullName).Hash
 
       # Required in a signed run: every binary in both runtimes and the setup signed (by the
       # expected signer, with PDFT_SIGN_SUBJECT) and timestamped. Otherwise it only reports.
@@ -841,7 +963,7 @@ jobs:
           SETUP_DIR: setup
           SCRIPTS: src\cmake
           SUBJECT: ${{ vars.PDFT_SIGN_SUBJECT }}
-          PDFT_SIGN_PDFIUM: ${{ vars.PDFT_SIGN_PDFIUM }}
+          PDFT_SIGN_PDFIUM: ${{ vars.PDFT_SIGNING == 'signpath' && 'off' || vars.PDFT_SIGN_PDFIUM }}
         run: |
           set "APP=%ProgramFiles%\PdfThumbnails"
           for %%F in (%SETUP_DIR%\*.exe) do set "SETUP=%%~fF"
@@ -931,16 +1053,27 @@ jobs:
   # setup, its uninstaller and its temporary copies), every signature checked, the setup
   # installed and every installed file checked, the uninstaller included, then uninstalled.
   # Timestamps come from a public timestamp server. Nothing it signs is uploaded.
+  # Two flows: signtool, Inno Setup signing while it compiles (the certificate and
+  # artifact-signing modes); external, the order a service such as SignPath signs in, with
+  # Sign.cmake standing in for the service: the runtimes without PDFium and the uninstaller Inno
+  # Setup writes, then the setup built with that signed uninstaller (Installer.cmake
+  # -DSIGN=EXTERNAL), then the setup itself.
   signing-rehearsal:
+    name: signing-rehearsal (${{ matrix.flow }})
     needs: release
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || inputs.called) }}
     runs-on: ${{ vars.PDFT_WIN_X64_RUNNER || 'windows-2025' }}
     timeout-minutes: 30
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        flow: [signtool, external]
     env:
       PDFT_SIGNING: certificate
       PDFT_SIGN_TIMESTAMP_URL: http://timestamp.digicert.com
+      PDFT_SIGN_PDFIUM: ${{ matrix.flow == 'external' && 'off' || '' }}
       SUBJECT: CN=PdfThumbnails signing rehearsal
     steps:
       - name: Check out
@@ -981,10 +1114,36 @@ jobs:
           cmake -DDIR=release\x64 -P cmake\Sign.cmake > sign-again.log || (type sign-again.log& exit /b 1)
           type sign-again.log
           findstr /l /c:"-- signed and timestamped:" sign-again.log >nul && (echo ::error::Sign.cmake -DDIR signed a file that was signed already& exit /b 1)
+          if "%PDFT_SIGN_PDFIUM%"=="off" (findstr /l /c:"left unsigned (PDFT_SIGN_PDFIUM=off)" sign-again.log >nul || (echo ::error::PDFium was not left unsigned& exit /b 1))
           exit /b 0
 
       - name: Build the signed setup (cmake/Installer.cmake -DSIGN=ON)
+        if: matrix.flow == 'signtool'
         run: cmake -DRUNTIME_X64=release\x64 -DRUNTIME_ARM64=release\arm64 -DOUTPUT_DIR=out\setup -DSIGN=ON -P cmake\Installer.cmake
+
+      # The external flow: the uninstaller first, signed the way the service would sign it, then
+      # the setup built with it, signed last.
+      - name: Build the setup with a signed uninstaller, then sign it (cmake/Installer.cmake -DSIGN=EXTERNAL)
+        if: matrix.flow == 'external'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $common = '-DRUNTIME_X64=release\x64', '-DRUNTIME_ARM64=release\arm64', '-DOUTPUT_DIR=out\setup', '-DSIGN=EXTERNAL', '-DUNINSTALLER_DIR=uninstaller'
+          # Without a signed uninstaller the second pass must refuse.
+          cmake @common -P cmake\Installer.cmake
+          if ($LASTEXITCODE -eq 0) { '::error::Installer.cmake -DSIGN=EXTERNAL built a setup without a signed uninstaller'; exit 1 }
+          cmake @common -DPREPARE=ON -P cmake\Installer.cmake
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $uninstaller = @(Get-ChildItem uninstaller\uninst-*.e32)
+          if ($uninstaller.Count -ne 1) { "::error::Expected one uninstaller, found $($uninstaller.Count)"; exit 1 }
+          cmake "-DFILES=$($uninstaller[0].FullName)" -P cmake\Sign.cmake
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake @common -P cmake\Installer.cmake
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $setup = @(Get-ChildItem out\setup\*.exe)
+          if ($setup.Count -ne 1) { "::error::Expected one setup, found $($setup.Count)"; exit 1 }
+          cmake "-DFILES=$($setup[0].FullName)" -P cmake\Sign.cmake
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Check the signatures (cmake/VerifySignatures.cmake)
         run: cmake "-DPATHS=release\x64;release\arm64;out\setup" -DREQUIRE=ON "-DSUBJECT=%SUBJECT%" -P cmake\VerifySignatures.cmake
@@ -992,6 +1151,7 @@ jobs:
       # The check must catch a file whose signature no longer matches its bytes, and one signed by
       # another signer.
       - name: Check that the check fails where it should
+        if: matrix.flow == 'signtool'
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'

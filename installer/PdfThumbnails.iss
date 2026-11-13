@@ -81,6 +81,12 @@ OutputBaseFilename={#OutputBase}
 SignTool={#SignToolName}
 SignedUninstaller=yes
 #endif
+#ifdef SignedUninstallerDir
+; Builds signed by a service after compiling (cmake/Installer.cmake -DSIGN=EXTERNAL): the
+; uninstaller, which is also Setup's temporary copy of itself, comes signed from this folder.
+SignedUninstaller=yes
+SignedUninstallerDir={#SignedUninstallerDir}
+#endif
 
 [Dirs]
 ; The install folder may be there before Setup (a developer install, 1.x): the uninstaller then

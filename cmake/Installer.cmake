@@ -4,13 +4,23 @@
 #
 #   cmake -DRUNTIME_X64=<folder> -DRUNTIME_ARM64=<folder> -DOUTPUT_DIR=<folder>
 #         [-DOUTPUT_BASE=<file name without .exe>] [-DVERSION_TEXT=<text>] [-DISCC=<ISCC.exe>]
-#         [-DSIGN=ON] -P cmake/Installer.cmake
+#         [-DSIGN=ON | -DSIGN=EXTERNAL -DUNINSTALLER_DIR=<folder> [-DPREPARE=ON]]
+#         -P cmake/Installer.cmake
 #
 # (-D options go before -P.) Run it after code signing, since signing changes the DLLs' bytes and
-# so their build folder names (BuildId.cmake). With SIGN=ON (signed builds: the runtimes signed
-# with cmake/Sign.cmake -DDIR=<runtime>, and its PDFT_SIGNING environment set) it first checks
-# that every binary in both runtimes is signed and timestamped, and Inno Setup signs the setup,
-# its uninstaller and its temporary copies through cmake/Sign.cmake. It
+# so their build folder names (BuildId.cmake). Signed builds:
+#   SIGN=ON        the runtimes signed with cmake/Sign.cmake -DDIR=<runtime>, and its PDFT_SIGNING
+#                  environment set: it first checks that every binary in both runtimes is signed
+#                  and timestamped, and Inno Setup signs the setup, its uninstaller and its
+#                  temporary copies through cmake/Sign.cmake.
+#   SIGN=EXTERNAL  for a signing service that signs the files it is sent (SignPath), in two
+#                  passes. With PREPARE=ON it only has Inno Setup write its uninstaller, unsigned,
+#                  into UNINSTALLER_DIR (uninst-*.e32) and prints its path; the service signs it
+#                  together with the runtimes. The second pass, without PREPARE, checks that the
+#                  runtimes and that uninstaller are signed and timestamped, and builds the setup
+#                  with it (Setup's temporary copies of itself are that signed file too). The
+#                  setup itself comes out unsigned, for the service to sign last.
+# It
 #   1. checks that both runtimes are complete, built for their architecture, and of one version;
 #   2. computes each build's folder name, <FileVersion>-<build id>, from the final DLLs;
 #   3. finds the Inno Setup compiler (-DISCC, else Inno Setup 7, else 6, else ISCC on PATH) and
@@ -86,7 +96,31 @@ if(NOT count EQUAL 1)
   message(FATAL_ERROR "The two runtimes are not of one version: ${versions}")
 endif()
 
-if(SIGN)
+if(NOT SIGN)
+  set(SIGN OFF)
+endif()
+string(TOUPPER "${SIGN}" SIGN)
+if(SIGN STREQUAL "EXTERNAL")
+  pdft_require(UNINSTALLER_DIR)
+  get_filename_component(uninstaller_dir "${UNINSTALLER_DIR}" ABSOLUTE)
+  file(MAKE_DIRECTORY "${uninstaller_dir}")
+  file(GLOB uninstallers_before "${uninstaller_dir}/uninst-*.e32")
+  if(NOT PREPARE)
+    if(NOT uninstallers_before)
+      message(FATAL_ERROR "SIGN=EXTERNAL: ${uninstaller_dir} holds no uninst-*.e32; run with "
+                          "-DPREPARE=ON first and have it signed")
+    endif()
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}" "-DPATHS=${runtime_x64};${runtime_arm64};${uninstallers_before}"
+              -DREQUIRE=ON -P "${CMAKE_CURRENT_LIST_DIR}/VerifySignatures.cmake"
+      RESULT_VARIABLE result)
+    if(NOT result EQUAL 0)
+      message(FATAL_ERROR "SIGN=EXTERNAL: the runtimes and the uninstaller must be signed first")
+    endif()
+  endif()
+elseif(PREPARE OR DEFINED UNINSTALLER_DIR)
+  message(FATAL_ERROR "PREPARE and UNINSTALLER_DIR go with SIGN=EXTERNAL")
+elseif(SIGN)
   if("$ENV{PDFT_SIGNING}" STREQUAL "")
     message(FATAL_ERROR "SIGN=ON needs PDFT_SIGNING and its settings in the environment "
                         "(cmake/Sign.cmake)")
@@ -142,6 +176,10 @@ endif()
 
 # ---- 4. Compile -------------------------------------------------------------------------------
 get_filename_component(output_dir "${OUTPUT_DIR}" ABSOLUTE)
+if(PREPARE)
+  # A setup this pass makes is thrown away: only the uninstaller matters.
+  set(output_dir "${output_dir}/prepare")
+endif()
 file(MAKE_DIRECTORY "${output_dir}")
 # The class GUID and the AppId are passed without their braces: Inno Setup reads "{" as the start
 # of a constant, and the script adds them back escaped.
@@ -172,7 +210,10 @@ set(defines
   "/DOutputDir=${output_dir_native}"
   "/DOutputBase=${OUTPUT_BASE}")
 set(sign_tool "")
-if(SIGN)
+if(SIGN STREQUAL "EXTERNAL")
+  file(TO_NATIVE_PATH "${uninstaller_dir}" uninstaller_dir_native)
+  list(APPEND defines "/DSignedUninstallerDir=${uninstaller_dir_native}")
+elseif(SIGN)
   # Inno Setup runs this command for each file it signs: $f is the file's name, quoted, and $q a
   # quote. The signing identity reaches cmake/Sign.cmake through the environment.
   file(TO_NATIVE_PATH "${CMAKE_COMMAND}" cmake_native)
@@ -182,6 +223,23 @@ if(SIGN)
 endif()
 execute_process(COMMAND "${ISCC}" /Qp ${defines} ${sign_tool} "${iss_native}"
                 COMMAND_ECHO STDOUT RESULT_VARIABLE result)
+if(PREPARE)
+  # Without a Sign Tool, Inno Setup writes a new uninstaller into SignedUninstallerDir when it has
+  # no signed one for this script and compiler, and may stop there with an error asking for it to
+  # be signed: either way, that new file is what this pass is for.
+  file(GLOB uninstallers "${uninstaller_dir}/uninst-*.e32")
+  if(uninstallers_before)
+    list(REMOVE_ITEM uninstallers ${uninstallers_before})
+  endif()
+  file(REMOVE_RECURSE "${output_dir}")
+  list(LENGTH uninstallers count)
+  if(NOT count EQUAL 1)
+    message(FATAL_ERROR "ISCC (exit ${result}) wrote ${count} new uninst-*.e32 files into "
+                        "${uninstaller_dir}, not one (it reuses one already there: start empty)")
+  endif()
+  message(STATUS "Uninstaller to sign: ${uninstallers}")
+  return()
+endif()
 if(NOT result EQUAL 0)
   message(FATAL_ERROR "ISCC failed (${result})")
 endif()
@@ -191,7 +249,7 @@ set(setup "${output_dir}/${OUTPUT_BASE}.exe")
 if(NOT EXISTS "${setup}")
   message(FATAL_ERROR "ISCC made no ${setup}")
 endif()
-if(SIGN)
+if(SIGN STREQUAL "ON")
   execute_process(
     COMMAND "${CMAKE_COMMAND}" "-DPATHS=${setup}" -DREQUIRE=ON
             -P "${CMAKE_CURRENT_LIST_DIR}/VerifySignatures.cmake"

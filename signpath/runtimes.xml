@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration "runtimes": the first signing request of a signed build
+  (.github/workflows/build.yml, job installer, PDFT_SIGNING=signpath; docs/CODE_SIGNING.md).
+
+  The artifact is a ZIP of:
+    x64/, arm64/   the release runtimes (cmake/Installer.cmake's RUNTIME_X64 and RUNTIME_ARM64)
+    uninstaller/   the uninstaller Inno Setup writes for this build (Installer.cmake
+                   -DSIGN=EXTERNAL -DPREPARE=ON), which is also Setup's temporary copy of itself
+
+  Signed: the project's own three binaries of each architecture, and the uninstaller.
+  Not signed: PdfThumbnails-pdfium.dll, an unmodified build of the PDFium project's code by a
+  third party (pdfium-binaries), which passes through unchanged; the notices and licences.
+  Every signed binary of ours must carry the product name and the version the build passes in.
+
+  This file is the source of the configuration kept in SignPath; a change here is copied there.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" />
+  </parameters>
+  <zip-file>
+    <directory path="x64">
+      <pe-file path="PdfThumbnails.dll" product-name="PdfThumbnails" product-version="${version}">
+        <authenticode-sign />
+      </pe-file>
+      <pe-file path="PdfThumbnailsSettings.exe" product-name="PdfThumbnails" product-version="${version}">
+        <authenticode-sign />
+      </pe-file>
+      <pe-file path="PdfThumbnailsCli.exe" product-name="PdfThumbnails" product-version="${version}">
+        <authenticode-sign />
+      </pe-file>
+    </directory>
+    <directory path="arm64">
+      <pe-file path="PdfThumbnails.dll" product-name="PdfThumbnails" product-version="${version}">
+        <authenticode-sign />
+      </pe-file>
+      <pe-file path="PdfThumbnailsSettings.exe" product-name="PdfThumbnails" product-version="${version}">
+        <authenticode-sign />
+      </pe-file>
+      <pe-file path="PdfThumbnailsCli.exe" product-name="PdfThumbnails" product-version="${version}">
+        <authenticode-sign />
+      </pe-file>
+    </directory>
+    <directory path="uninstaller">
+      <pe-file path="uninst-*.e32">
+        <authenticode-sign />
+      </pe-file>
+    </directory>
+  </zip-file>
+</artifact-configuration>
