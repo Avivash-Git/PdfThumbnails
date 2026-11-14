@@ -3,8 +3,9 @@
 First-page thumbnails for PDF files in Windows File Explorer, working alongside
 [PdfCraft](https://github.com/storytold/pdfcraft) or any other PDF app.
 
-**Status: pre-release.** There is an installer, but no signed download yet, so for now you build
-it from source. See [Limits](#limits) for what that means with Smart App Control.
+**Download:** the setup is on [GitHub Releases](https://github.com/Avivash-Git/PdfThumbnails/releases/latest).
+It isn't code-signed yet, so SmartScreen warns before it runs and Smart App Control blocks it (see
+[Install](#install)).
 
 ## What you get
 
@@ -27,12 +28,19 @@ leaves PdfCraft's own settings alone, so PdfCraft updates don't disturb it.
 
 ## Install
 
-**The installer**, `PdfThumbnails-<version>-setup.exe`, installs for all users of the PC (it asks
-for administrator rights once) and puts PdfThumbnails in Settings > Apps > Installed apps and the
-Start menu. Every other user of the PC is set up at their next sign-in. The same setup serves x64 and ARM64 PCs. It replaces a 1.x install and keeps its zoom,
-and a newer setup installs over an older one and keeps your settings. Until the first release
-there is no download: [build the installer](docs/BUILDING.md#the-installer) from source, or install
-straight from a build as below. For a silent install: `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
+**The installer**, `PdfThumbnails-<version>-setup.exe` from
+[Releases](https://github.com/Avivash-Git/PdfThumbnails/releases/latest), installs for all users of
+the PC (it asks for administrator rights once) and puts PdfThumbnails in Settings > Apps >
+Installed apps and the Start menu. Every other user of the PC is set up at their next sign-in. The
+same setup serves x64 and ARM64 PCs. It replaces a 1.x install and keeps its zoom, and a newer
+setup installs over an older one and keeps your settings. Each release lists the setup's SHA-256.
+For a silent install: `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
+
+The setup is not code-signed yet. When it starts, SmartScreen says "Windows protected your PC":
+choose **More info**, then **Run anyway**. Where Smart App Control is on, Windows blocks it with no
+way to allow it; build from source there (below, or [build the
+installer](docs/BUILDING.md#the-installer)). Signed releases are planned: see the [code signing
+policy](docs/CODE_SIGNING.md).
 
 **From source**, without the installer: you need Visual Studio 2026, version 18.11 or later (the
 Build Tools are enough), with the components in `.vsconfig`. From a Command Prompt in the
@@ -91,7 +99,7 @@ again.
 ## Limits
 
 - **Smart App Control.** The program isn't code-signed yet, so with Smart App Control on, Windows
-  may block it. The status window says when that is happening. A build you made yourself usually
+  blocks the downloaded setup, and may block the program. The status window says when that is happening. A build you made yourself usually
   isn't blocked, because it doesn't carry the mark Windows puts on downloads. Signed releases are
   planned: see the [code signing policy](docs/CODE_SIGNING.md).
 - These files keep the plain icon: PDFs that need a password to open, dynamic XFA forms made for

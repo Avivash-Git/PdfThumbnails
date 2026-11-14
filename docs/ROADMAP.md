@@ -11,7 +11,8 @@ project.
 | 4. Release 2.0.0 | The first download for everyone: the setup on GitHub Releases, unsigned | Next |
 | 5. Code signing | Signed releases through SignPath Foundation's open-source programme, so Smart App Control and SmartScreen stop blocking them; a test pass on a PC with Smart App Control on; then a winget package | Planned: the build can already sign and is rehearsed on CI. The programme accepts only projects that are already released, so the project applies after 2.0.0 ([CODE_SIGNING.md](CODE_SIGNING.md)) |
 
-Until milestone 4 there is no download: build from source ([BUILDING.md](BUILDING.md)).
+The setup is on [GitHub Releases](https://github.com/Avivash-Git/PdfThumbnails/releases), or build
+from source ([BUILDING.md](BUILDING.md)).
 
 Until releases are signed (milestone 5), the setup is unsigned, which costs users this:
 
