@@ -11,6 +11,27 @@
 3. `CHANGELOG.md` says what changed.
 4. The version is raised in `cmake/ProjectInfo.cmake` (`PDFT_VERSION`). Build folders are named after it and the build id.
 
+## Making a release
+
+Releases are made by `.github/workflows/release.yml`, started by hand, and are published by a
+person. The workflow never publishes.
+
+1. On `main`: `CHANGELOG.md` has the heading `## <version> (YYYY-MM-DD)` with the release day,
+   and `docs/releases/<version>.md` holds the release notes (the workflow adds the setup's SHA-256
+   and how to check it). Push, and wait for CI to be green.
+2. Run the workflow on `main` with the tag: `gh workflow run release.yml --ref main -f tag=v<version>`.
+   It checks the tag against `PDFT_VERSION`, runs the whole of `build.yml` with `release: true`
+   (a version string without the `-ci+g<commit>` suffix), attests the setup's provenance, and
+   makes a **draft** release targeting the built commit, with the setup and its `.sha256`.
+   A tag such as `v<version>-rc.1` makes a draft prerelease instead, which is also how to rehearse
+   (delete the draft afterwards: `gh release delete <tag> --yes`).
+3. Read the draft, download its setup and run the installer's checks on a real PC.
+4. Tag the commit the draft names (`git tag -a v<version> <commit> -m "PdfThumbnails <version>"`,
+   `git push origin v<version>`), then publish the draft (`gh release edit v<version> --draft=false --latest`).
+
+Pushing the tag starts no workflow. Until releases are signed, run it with `sign` off; with the
+signing set-up of [CODE_SIGNING.md](CODE_SIGNING.md), `sign` on attaches the signed setup.
+
 ## Updating PDFium
 
 `pdfium-watch.yml` opens an issue when a new PDFium build appears. Each update is a change of its

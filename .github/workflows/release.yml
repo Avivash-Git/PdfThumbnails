@@ -1,0 +1,198 @@
+# Makes a DRAFT GitHub Release from one commit: the whole of build.yml (every build, test and
+# installer job) with release: true, then the setup and its SHA-256 as the release's assets, with
+# a provenance attestation of the setup. It never publishes: a person reads the draft and
+# publishes it on GitHub (docs/MAINTAINING.md, "Making a release").
+#
+# Started by hand only (Actions > release > Run workflow, or gh workflow run release.yml):
+#   - on main, with the input tag (e.g. v2.0.0): the draft targets the commit the run builds, and
+#     no tag is created until the draft is published (or the tag is pushed, at that commit);
+#   - on an existing tag (--ref v2.0.0): the run builds the tagged commit; the input tag may be
+#     left empty.
+# A tag v<version>-<anything> (e.g. v2.0.0-rc.1) makes a prerelease. <version> must be
+# PDFT_VERSION in cmake/ProjectInfo.cmake; docs/releases/<version>.md holds the release notes, and
+# for a release (not a prerelease) CHANGELOG.md must have the heading "## <version> (YYYY-MM-DD)".
+#
+# sign: true signs everything through build.yml's signing set-up (docs/CODE_SIGNING.md) and
+# attaches the signed setup; until that set-up exists, leave it off and the release is unsigned.
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release's tag, e.g. v2.0.0 (v2.0.0-rc.1 makes a prerelease); empty when run on the tag
+        type: string
+        default: ""
+      sign:
+        description: Sign the setup and every file in it (needs the signing set-up in docs/CODE_SIGNING.md)
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # Cheap checks first, before an hour of Windows runners.
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the tag, the version, the release notes and the changelog
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          tag="$INPUT_TAG"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            [ -z "$tag" ] || [ "$tag" = "$GITHUB_REF_NAME" ] ||
+              fail "Run on the tag $GITHUB_REF_NAME, but the input tag is $tag"
+            tag="$GITHUB_REF_NAME"
+          fi
+          [ -n "$tag" ] || fail "Give the input tag (e.g. v2.0.0), or run the workflow on the tag"
+          [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] ||
+            fail "The tag $tag is not of the form v1.2.3 or v1.2.3-rc.1"
+          version="${BASH_REMATCH[1]}"
+          prerelease=false
+          [ -z "${BASH_REMATCH[2]}" ] || prerelease=true
+
+          project=$(sed -nE 's/^set\(PDFT_VERSION +"([0-9.]+)".*/\1/p' cmake/ProjectInfo.cmake)
+          [ "$version" = "$project" ] ||
+            fail "The tag $tag is not of the version in cmake/ProjectInfo.cmake ($project)"
+          [ -s "docs/releases/$version.md" ] || fail "docs/releases/$version.md (the release notes) is missing"
+          if [ "$prerelease" = false ]; then
+            grep -Eq "^## $version \([0-9]{4}-[0-9]{2}-[0-9]{2}\)\s*$" CHANGELOG.md ||
+              fail "CHANGELOG.md has no heading \"## $version (YYYY-MM-DD)\""
+          fi
+
+          # A tag that already exists must be at the commit this run builds.
+          at=$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}" | awk '{ print $1 }' | tail -n 1)
+          if [ -n "$at" ] && [ "$at" != "$GITHUB_SHA" ]; then
+            fail "The tag $tag exists at $at, not at the commit this run builds ($GITHUB_SHA)"
+          fi
+
+          echo "Tag $tag, version $version, prerelease $prerelease, commit $GITHUB_SHA${at:+ (tagged)}"
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/build.yml
+    with:
+      sign: ${{ inputs.sign }}
+      release: true
+    secrets: inherit
+
+  draft:
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write       # the draft release
+      id-token: write       # the provenance attestation
+      attestations: write
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      VERSION: ${{ needs.check.outputs.version }}
+      PRERELEASE: ${{ needs.check.outputs.prerelease }}
+      SIGNED: ${{ inputs.sign && 'true' || 'false' }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download PdfThumbnails-setup-${{ inputs.sign && 'signed' || 'unsigned' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: PdfThumbnails-setup-${{ inputs.sign && 'signed' || 'unsigned' }}
+          path: dist
+
+      - name: Check the setup and write its SHA-256
+        run: |
+          set -euo pipefail
+          setup="PdfThumbnails-$VERSION-setup.exe"
+          ls -l dist
+          [ "$(find dist -mindepth 1 | wc -l)" -eq 1 ] && [ -f "dist/$setup" ] ||
+            { echo "::error::Expected dist/$setup alone"; exit 1; }
+          (cd dist && sha256sum "$setup" > "$setup.sha256")
+          cat "dist/$setup.sha256"
+          {
+            echo "SETUP=$setup"
+            echo "SETUP_SHA256=$(cut -d ' ' -f 1 "dist/$setup.sha256")"
+          } >> "$GITHUB_ENV"
+
+      - name: Attest the setup's provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/${{ env.SETUP }}
+
+      - name: Write the release notes
+        run: |
+          set -euo pipefail
+          {
+            cat "docs/releases/$VERSION.md"
+            echo
+            echo "## Checking the download"
+            echo
+            echo "SHA-256 of \`$SETUP\` (also in \`$SETUP.sha256\`):"
+            echo
+            echo '```'
+            echo "$SETUP_SHA256"
+            echo '```'
+            echo
+            echo "In PowerShell: \`(Get-FileHash .\\$SETUP).Hash\`. With the GitHub CLI, to check"
+            echo "that this repository's workflow built it from the commit of this release:"
+            echo
+            echo '```'
+            echo "gh attestation verify $SETUP --repo $GITHUB_REPOSITORY"
+            echo '```'
+          } > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Drafts may share a tag, so look for one first (only this token sees drafts).
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .html_url")
+          if [ -n "$existing" ]; then
+            echo "::error::A release of $TAG exists already: $existing"
+            exit 1
+          fi
+          flags=(--draft --target "$GITHUB_SHA" --title "PdfThumbnails $VERSION")
+          [ "$PRERELEASE" = false ] || flags+=(--prerelease)
+          url=$(gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${flags[@]}" \
+            --notes-file "$RUNNER_TEMP/notes.md" "dist/$SETUP" "dist/$SETUP.sha256")
+          echo "Draft: $url"
+          {
+            echo "### Draft release $TAG ($([ "$SIGNED" = true ] && echo signed || echo unsigned))"
+            echo
+            echo "$url"
+            echo
+            echo "Commit $GITHUB_SHA. Setup SHA-256 \`$SETUP_SHA256\`. Not published: read it, then publish it on GitHub."
+          } >> "$GITHUB_STEP_SUMMARY"
