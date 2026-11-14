@@ -8,8 +8,8 @@ project.
 | 1. The build | CMake and MSVC, CI building and testing x64 and ARM64 | Done |
 | 2. The settings app | The settings window and the command line replace 1.x's PowerShell manager; the scheduled check; refreshing thumbnails after a zoom change | Done |
 | 3. An installer | An Inno Setup installer with an entry in Installed apps, that replaces a 1.x install | Done |
-| 4. Release 2.0.0 | The first download for everyone: the setup on GitHub Releases, unsigned | Next |
-| 5. Code signing | Signed releases through SignPath Foundation's open-source programme, so Smart App Control and SmartScreen stop blocking them; a test pass on a PC with Smart App Control on; then a winget package | Planned: the build can already sign and is rehearsed on CI. The programme accepts only projects that are already released, so the project applies after 2.0.0 ([CODE_SIGNING.md](CODE_SIGNING.md)) |
+| 4. Release 2.0.0 | The first download for everyone: the setup on GitHub Releases, unsigned | Done: [2.0.0](https://github.com/Avivash-Git/PdfThumbnails/releases/tag/v2.0.0) |
+| 5. Code signing | Signed releases through SignPath Foundation's open-source programme, so Smart App Control and SmartScreen stop blocking them; a test pass on a PC with Smart App Control on; then a winget package | Next: the build can already sign and is rehearsed on CI. The programme accepts only projects that are already released, so the project applies after 2.0.0 ([CODE_SIGNING.md](CODE_SIGNING.md)) |
 
 The setup is on [GitHub Releases](https://github.com/Avivash-Git/PdfThumbnails/releases), or build
 from source ([BUILDING.md](BUILDING.md)).
