@@ -64,11 +64,12 @@
 #                        SIGNPATH_API_TOKEN of the "signing" environment; the artifact
 #                        configurations "runtimes" and "setup" are signpath/*.xml.
 #
-# Artifacts are developer builds, not releases: PdfThumbnails-<arch>-unsigned (the runtime
-# staging tree), symbols-<arch> (its PDBs), tests-<arch> (test bundle for test-arm64),
-# release-<arch> (the release runtime, unsigned), PdfThumbnails-setup-unsigned (the setup; in a
-# signed run PdfThumbnails-setup-signed) and setup-earlier (the upgrade test's earlier setup,
-# never signed). Each runtime carries BUILDINFO.txt (runner image, Visual Studio, cl, link, CMake
+# Releases are made by release.yml, which calls this workflow with release: true and publishes
+# the setup on GitHub Releases. Artifacts are developer builds, not releases:
+# PdfThumbnails-<arch>-unsigned (the runtime staging tree), symbols-<arch> (its PDBs),
+# tests-<arch> (test bundle for test-arm64), release-<arch> (the release runtime, unsigned),
+# PdfThumbnails-setup-unsigned (the setup; in a signed run PdfThumbnails-setup-signed, kept 3
+# days) and setup-earlier (the upgrade test's earlier setup, never signed). Each runtime carries BUILDINFO.txt (runner image, Visual Studio, cl, link, CMake
 # and Ninja versions).
 
 name: build
@@ -93,7 +94,7 @@ on:
         description: Sign the setup and every file in it (needs the signing set-up in docs/BUILDING.md)
         type: boolean
         default: false
-  workflow_call:   # for later release workflows
+  workflow_call:   # by release.yml
     inputs:
       called:
         description: Leave at the default; it gives a called run a concurrency group of its own.
@@ -103,8 +104,17 @@ on:
         description: Sign the setup and every file in it (needs the signing set-up in docs/BUILDING.md)
         type: boolean
         default: false
+      release:
+        description: Build a release, whose version string has no -ci+g<commit> suffix
+        type: boolean
+        default: false
 
 permissions: {}
+
+env:
+  # A release (release.yml) is versioned plainly, e.g. "2.0.0"; every other run carries its
+  # commit in the version string, e.g. "2.0.0-ci+g1a2b3c4d" (docs/BUILDING.md).
+  PDFT_RELEASE_BUILD: ${{ inputs.release && 'true' || 'false' }}
 
 concurrency:
   # In a called workflow github.workflow is the caller's name, so a called run gets its own
@@ -167,7 +177,7 @@ jobs:
         env:
           PDFT_VS_VERSION: ${{ vars.PDFT_VS_VERSION }}
         run: |
-          set "PDFT_VERSION_SUFFIX=-ci+g%GITHUB_SHA:~0,8%"
+          if "%PDFT_RELEASE_BUILD%"=="true" (set "PDFT_VERSION_SUFFIX=") else (set "PDFT_VERSION_SUFFIX=-ci+g%GITHUB_SHA:~0,8%")
           call scripts\build.cmd %PRESET% || exit /b 1
 
       # The runner is elevated (High integrity): the handler tests must have relaunched
@@ -652,7 +662,7 @@ jobs:
         env:
           PDFT_VS_VERSION: ${{ vars.PDFT_VS_VERSION }}
         run: |
-          set "PDFT_VERSION_SUFFIX=-ci+g%GITHUB_SHA:~0,8%"
+          if "%PDFT_RELEASE_BUILD%"=="true" (set "PDFT_VERSION_SUFFIX=") else (set "PDFT_VERSION_SUFFIX=-ci+g%GITHUB_SHA:~0,8%")
           call scripts\build.cmd release-%PDFT_ARCH% || exit /b 1
 
       - name: Stage the runtime
@@ -876,7 +886,9 @@ jobs:
           name: PdfThumbnails-setup-${{ inputs.sign && 'signed' || 'unsigned' }}
           path: out/setup/
           if-no-files-found: error
-          retention-days: 14
+          # Signed setups reach users only as GitHub Release assets (release.yml); a signed run's
+          # artifact is kept only for checks.
+          retention-days: ${{ inputs.sign && 3 || 14 }}
 
       - name: Upload setup-earlier
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

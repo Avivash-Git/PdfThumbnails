@@ -163,7 +163,7 @@ by Git):
 | `PDFT_SPECTRE` | `AUTO` (`ON` in `ci-*`) | `/Qspectre` and the Spectre-mitigated runtime. `AUTO` uses them when installed and warns otherwise; `ON` fails without them; `OFF` never uses them. |
 | `PDFT_REPRODUCIBLE` | `OFF` (`ON` in `ci-*`) | `/Brepro`: no time stamps, so a rebuild of the same source gives the same bytes. |
 | `PDFT_WARNINGS_AS_ERRORS` | `ON` | `/WX` for the compiler and the linker, on the project's own targets only. |
-| `PDFT_VERSION_SUFFIX` | empty | Appended to the ProductVersion string only (CI uses `-ci+g<commit>`). The file version stays `2.0.0.0`. The presets take it from the `PDFT_VERSION_SUFFIX` environment variable. |
+| `PDFT_VERSION_SUFFIX` | empty | Appended to the ProductVersion string only (CI uses `-ci+g<commit>`; releases, built by `release.yml`, have none). The file version stays `2.0.0.0`. The presets take it from the `PDFT_VERSION_SUFFIX` environment variable. |
 | `PDFT_DOWNLOAD_DIR` | `.cache\downloads` | Where verified downloads are kept. |
 | `PDFT_PDFIUM_ARCHIVE`, `PDFT_GTEST_ARCHIVE`, `PDFT_WIL_ARCHIVE` | empty | Offline builds: a local copy of the archive. It must match the pinned SHA-256. |
 | `PDFT_BUILD_APP` | `ON` | Builds the settings app (`PdfThumbnailsSettings.exe`, `PdfThumbnailsCli.exe`). WIL is downloaded only for it. |
