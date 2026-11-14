@@ -133,7 +133,8 @@ jobs:
       - name: Check the setup and write its SHA-256
         run: |
           set -euo pipefail
-          setup="PdfThumbnails-$VERSION-setup.exe"
+          # Named after the program's ProductVersion string: the four-part version, e.g. 2.0.0.0.
+          setup="PdfThumbnails-$VERSION.0-setup.exe"
           ls -l dist
           [ "$(find dist -mindepth 1 | wc -l)" -eq 1 ] && [ -f "dist/$setup" ] ||
             { echo "::error::Expected dist/$setup alone"; exit 1; }
